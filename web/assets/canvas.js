@@ -11748,32 +11748,51 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     return out;
   }
 
+  // 批量重命名只管「卡片标题」，所以能改的范围比批量生成宽：
+  // 组合、定时组、导演台身上也有标题，锁定 / 隐藏的仍然跳过。
+  function batchRenameCandidates() {
+    return nodes.filter((node) => {
+      if (!node || !selection.has(node.id)) return false;
+      return !isLocked(node) && !isHidden(node);
+    });
+  }
+
   function paintBatchButtons() {
     if (!alignBarEl) return;
     const genCount = batchCandidates('generate').length;
     const retryCount = batchCandidates('retry').length;
+    const renameCount = batchRenameCandidates().length;
     const gen = alignBarEl.querySelector('[data-batch="generate"]');
     const retry = alignBarEl.querySelector('[data-batch="retry"]');
+    const rename = alignBarEl.querySelector('[data-batch="rename"]');
     const sep = alignBarEl.querySelector('.batch-sep');
     let changed = false;
-    const paint = (button, count, label) => {
+    const paint = (button, count, label, hint) => {
       if (!button) return;
       const text = label + ' ' + count;
       const hidden = count <= 0;
       if (button.textContent !== text) button.textContent = text;
       if (button.hidden !== hidden) button.hidden = hidden;
-      button.title = hidden
-        ? '选中的卡片里没有可以' + label.replace('批量', '') + '的卡片'
-        : label + '：先逐张检查参考素材，确认后再一起提交';
+      button.title = hidden ? hint.hidden : hint.shown;
       if (button.dataset.count !== String(count)) {
         button.dataset.count = String(count);
         changed = true;
       }
     };
-    paint(gen, genCount, '批量生成');
-    paint(retry, retryCount, '批量重试');
+    paint(gen, genCount, '批量生成', {
+      hidden: '选中的卡片里没有可以生成的卡片',
+      shown: '批量生成：先逐张检查参考素材，确认后再一起提交',
+    });
+    paint(retry, retryCount, '批量重试', {
+      hidden: '选中的卡片里没有上一次失败的',
+      shown: '批量重试：把上一次失败的这几张再跑一遍',
+    });
+    paint(rename, renameCount, '批量重命名', {
+      hidden: '选中的卡片里没有可以改标题的（锁定的要先解锁）',
+      shown: '批量重命名：统一改名、加前缀序号，或者查找替换',
+    });
     if (sep) {
-      const hideSep = genCount <= 0 && retryCount <= 0;
+      const hideSep = genCount <= 0 && retryCount <= 0 && renameCount <= 0;
       if (sep.hidden !== hideSep) sep.hidden = hideSep;
     }
     if (changed) alignBarSize = null;
@@ -11781,6 +11800,256 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
 
   function mbTextOf(bytes) {
     return (Number(bytes || 0) / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  // ---------- 批量重命名 ----------
+  // 三种改法：统一设为 / 前缀加序号 / 查找替换。都是纯文本操作，改前先给预览。
+  //
+  // 序号的排序基准是「选中的顺序」——画布上的卡片顺序（nodes 数组）跟
+  // 用户的视觉顺序一致（从左到右、从上到下），比按 id 排更好猜。
+  function renameSortKey(node) {
+    // 分行分列：先按行（y 除以卡片高度的一半，容忍轻微高低差），再按 x
+    const rowH = Math.max(40, (node.h || 240) * 0.6);
+    return [Math.round(node.y / rowH), node.x];
+  }
+
+  function orderedRenameTargets() {
+    const list = batchRenameCandidates();
+    const indexOf = new Map();
+    nodes.forEach((node, i) => indexOf.set(node.id, i));
+    return list.slice().sort((a, b) => {
+      const ka = renameSortKey(a);
+      const kb = renameSortKey(b);
+      if (ka[0] !== kb[0]) return ka[0] - kb[0];
+      if (ka[1] !== kb[1]) return ka[1] - kb[1];
+      return (indexOf.get(a.id) || 0) - (indexOf.get(b.id) || 0);
+    });
+  }
+
+  // 序号补零：卡片多的时候排出来更整齐（1 → 01）
+  function padIndex(n, total) {
+    const width = String(Math.max(1, total)).length;
+    return String(n).padStart(width, '0');
+  }
+
+  function renamePreviewOf(targets, mode, opt) {
+    const total = targets.length;
+    return targets.map((node, i) => {
+      const data = nodeData(node);
+      const oldTitle = String(data.title || '').trim();
+      const seq = i + 1;
+      let next = oldTitle;
+      if (mode === 'set') {
+        next = opt.text || '';
+      } else if (mode === 'prefix') {
+        // 前缀 / 后缀各自去掉首尾空白：手输时多打一个空格很常见，
+        // 留着会变成「镜头_ 1」这种看着像出错的名字
+        const head = String(opt.prefix || '').trim();
+        const tail = String(opt.suffix || '').trim();
+        next = head + padIndex(seq + (Number(opt.start) || 1) - 1, total + (Number(opt.start) || 1) - 1) + tail;
+      } else if (mode === 'replace') {
+        if (!opt.find) next = oldTitle;
+        else next = oldTitle.split(opt.find).join(opt.to == null ? '' : opt.to);
+      }
+      return { node: node, id: node.id, oldTitle: oldTitle, newTitle: String(next).trim(), seq: seq };
+    });
+  }
+
+  function applyBatchRename(rows) {
+    const changed = rows.filter((row) => row.oldTitle !== row.newTitle);
+    if (!changed.length) {
+      toast('标题没有变化，什么都没改');
+      return 0;
+    }
+    pushHistory();
+    changed.forEach((row) => {
+      const data = nodeData(row.node);
+      data.title = row.newTitle;
+    });
+    // 只重画改过的那几张：别的卡片不跟着闪
+    changed.forEach((row) => refreshNode(row.node));
+    scheduleSave();
+    return changed.length;
+  }
+
+  async function openBatchRename() {
+    const targets = orderedRenameTargets();
+    if (!targets.length) {
+      toast('选中的卡片里没有可以改标题的（锁定的要先解锁）');
+      return;
+    }
+    const state = { mode: 'prefix', text: '', prefix: '', suffix: '', start: 1, find: '', to: '' };
+    let rows = renamePreviewOf(targets, state.mode, state);
+
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask rename-mask';
+    const dialog = document.createElement('div');
+    dialog.className = 'modal modal-rename';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', '批量重命名');
+
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const title = document.createElement('b');
+    title.textContent = '批量重命名';
+    const note = document.createElement('span');
+    note.className = 'muted-line rename-note';
+    note.textContent = '会改 ' + targets.length + ' 张卡片的标题';
+    const grow = document.createElement('span');
+    grow.className = 'grow';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'ghost';
+    closeBtn.type = 'button';
+    closeBtn.textContent = '关闭';
+    head.append(title, note, grow, closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body rename-body';
+
+    // 模式切换
+    const tabs = document.createElement('div');
+    tabs.className = 'rename-tabs';
+    const TABS = [
+      { value: 'prefix', label: '前缀 + 序号' },
+      { value: 'set', label: '统一设为' },
+      { value: 'replace', label: '查找替换' },
+    ];
+    const fields = document.createElement('div');
+    fields.className = 'rename-fields';
+
+    const preview = document.createElement('div');
+    preview.className = 'rename-preview';
+
+    const paintTabs = () => {
+      tabs.textContent = '';
+      TABS.forEach((item) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'rename-tab' + (state.mode === item.value ? ' active' : '');
+        button.textContent = item.label;
+        button.addEventListener('click', () => {
+          state.mode = item.value;
+          rows = renamePreviewOf(targets, state.mode, state);
+          paintTabs();
+          paintFields();
+          paintPreview();
+        });
+        tabs.appendChild(button);
+      });
+    };
+
+    const makeField = (labelText, key, placeholder, onInput) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'rename-field';
+      const span = document.createElement('span');
+      span.className = 'rename-field-label';
+      span.textContent = labelText;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.autocomplete = 'off';
+      input.placeholder = placeholder || '';
+      input.value = state[key] == null ? '' : String(state[key]);
+      input.addEventListener('input', () => {
+        state[key] = input.value;
+        if (onInput) onInput(input.value);
+        rows = renamePreviewOf(targets, state.mode, state);
+        paintPreview();
+      });
+      wrap.appendChild(span);
+      wrap.appendChild(input);
+      return wrap;
+    };
+
+    const paintFields = () => {
+      fields.textContent = '';
+      if (state.mode === 'set') {
+        fields.appendChild(makeField('都叫', 'text', '例如 开场镜头'));
+      } else if (state.mode === 'prefix') {
+        fields.appendChild(makeField('前缀', 'prefix', '例如 镜头_'));
+        fields.appendChild(makeField('起始序号', 'start', '1', (value) => {
+          const n = Math.max(1, Math.floor(Number(value) || 1));
+          state.start = n;
+        }));
+        fields.appendChild(makeField('后缀（可选）', 'suffix', '例如 _成片'));
+      } else {
+        fields.appendChild(makeField('找', 'find', '要替换掉的文字'));
+        fields.appendChild(makeField('替换成', 'to', '留空就是删掉'));
+      }
+    };
+
+    const paintPreview = () => {
+      preview.textContent = '';
+      const head2 = document.createElement('div');
+      head2.className = 'rename-preview-head';
+      const changedCount = rows.filter((row) => row.oldTitle !== row.newTitle).length;
+      head2.textContent = changedCount
+        ? '预览（' + changedCount + ' 张会变，其余保持不变）'
+        : '预览（当前设置不会改动任何标题）';
+      preview.appendChild(head2);
+      const list = document.createElement('div');
+      list.className = 'rename-preview-list';
+      rows.forEach((row) => {
+        const line = document.createElement('div');
+        line.className = 'rename-preview-row' + (row.oldTitle === row.newTitle ? '' : ' changed');
+        const seq = document.createElement('span');
+        seq.className = 'rename-preview-seq';
+        seq.textContent = String(row.seq);
+        const before = document.createElement('span');
+        before.className = 'rename-preview-old';
+        before.textContent = row.oldTitle || '（没标题）';
+        const arrow = document.createElement('span');
+        arrow.className = 'rename-preview-arrow';
+        arrow.textContent = '→';
+        const after = document.createElement('span');
+        after.className = 'rename-preview-new';
+        after.textContent = row.newTitle || '（清空）';
+        line.append(seq, before, arrow, after);
+        list.appendChild(line);
+      });
+      preview.appendChild(list);
+    };
+
+    body.appendChild(tabs);
+    body.appendChild(fields);
+    body.appendChild(preview);
+    paintTabs();
+    paintFields();
+    paintPreview();
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    const tip = document.createElement('span');
+    tip.className = 'muted-line';
+    tip.textContent = '序号按画布上从左到右、从上到下排';
+    const grow2 = document.createElement('span');
+    grow2.className = 'grow';
+    const cancel = document.createElement('button');
+    cancel.className = 'ghost';
+    cancel.type = 'button';
+    cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.className = 'primary';
+    ok.type = 'button';
+    ok.textContent = '改这 ' + targets.length + ' 张';
+    foot.append(tip, grow2, cancel, ok);
+
+    dialog.append(head, body, foot);
+    mask.appendChild(dialog);
+    document.body.appendChild(mask);
+
+    const close = () => mask.remove();
+    closeBtn.addEventListener('click', close);
+    cancel.addEventListener('click', close);
+    ok.addEventListener('click', () => {
+      const count = applyBatchRename(rows);
+      close();
+      if (count) toast('已改 ' + count + ' 张卡片的标题', 4000, [{ label: '撤销', run: () => undo() }]);
+      else toast('标题没有变化，什么都没改');
+    });
+    mask.addEventListener('click', (event) => {
+      if (event.target === mask) close();
+    });
   }
 
   function sizeTextOf(bytes) {
@@ -12876,6 +13145,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
         const batch = button.dataset.batch || '';
         if (batch === 'generate') runBatchGenerate('generate');
         else if (batch === 'retry') runBatchGenerate('retry');
+        else if (batch === 'rename') openBatchRename();
         if (batch) return;
         const action = button.dataset.align || '';
         if (action === 'dist-x') distributeSelection('x');

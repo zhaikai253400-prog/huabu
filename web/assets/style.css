@@ -4015,6 +4015,52 @@ input::placeholder { color: var(--placeholder); }
 .recycle-row .muted-line { white-space: nowrap; }
 .recycle-more { padding: 6px 2px 2px 20px; }
 
+/* ---------- 批量重命名 ---------- */
+.rename-mask { z-index: 340; }
+.modal-rename { width: min(620px, 94vw); }
+.rename-note { margin-left: 10px; }
+.rename-body { display: flex; flex-direction: column; gap: 12px; max-height: min(64vh, 580px); overflow-y: auto; }
+.rename-tabs { display: flex; gap: 6px; }
+.rename-tab {
+  font: inherit;
+  font-size: 0.92em;
+  padding: 5px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+.rename-tab:hover { border-color: var(--accent); color: var(--accent); }
+.rename-tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.rename-fields { display: flex; flex-wrap: wrap; gap: 10px; }
+.rename-field { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.rename-field-label { font-size: 0.9em; color: var(--muted); white-space: nowrap; }
+.rename-field input { min-width: 150px; }
+.rename-preview { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.rename-preview-head {
+  padding: 7px 11px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  font-size: 0.88em;
+  color: var(--muted);
+}
+.rename-preview-list { max-height: min(34vh, 300px); overflow-y: auto; }
+.rename-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 11px;
+  font-size: 0.9em;
+  border-bottom: 1px solid var(--line);
+}
+.rename-preview-row:last-child { border-bottom: 0; }
+.rename-preview-seq { flex: 0 0 auto; width: 2.2em; color: var(--muted); text-align: right; }
+.rename-preview-old { flex: 1 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.rename-preview-arrow { flex: 0 0 auto; color: var(--placeholder); }
+.rename-preview-new { flex: 1 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.rename-preview-row.changed .rename-preview-new { color: var(--accent); font-weight: 600; }
+
 /* 带操作按钮的提示条：按钮要能点，所以整个提示条要接住鼠标 */
 .toast.has-actions { pointer-events: auto; display: flex; align-items: center; gap: 12px; }
 .toast-text { min-width: 0; }
