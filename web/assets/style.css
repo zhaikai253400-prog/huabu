@@ -1101,6 +1101,47 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
   -webkit-box-orient: vertical;
 }
 
+/* 「本次提交」一行：生成中 / 出错时，让用户一眼看清这次到底提交了什么。
+   正常状态遮罩是 pointer-events:none（不挡画布拖拽），只有这一行单独放开可点。 */
+.node-status .st-submit {
+  font-size: 0.76em;
+  line-height: 1.4;
+  color: var(--muted);
+  max-width: 94%;
+  word-break: break-word;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.node-status .st-submit.clickable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.node-status .st-submit.clickable:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+/* 展开后的完整快照：键值成对、左对齐，最多占中段一块，超出可滚动 */
+.node-status .st-submit-detail {
+  pointer-events: auto;
+  font-size: 0.72em;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 94%;
+  max-height: 46%;
+  overflow: auto;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.node-status .st-submit-row { display: flex; gap: 4px; }
+.node-status .st-submit-row .k { flex: 0 0 auto; color: var(--text); opacity: 0.75; }
+.node-status .st-submit-row .v { flex: 1 1 auto; word-break: break-word; }
+
 .st-spin {
   width: 22px;
   height: 22px;

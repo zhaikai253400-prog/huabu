@@ -2121,54 +2121,12 @@
   }
 
   // 生成中 / 生成失败直接盖在卡片中间
+  // 只造骨架 + 交给 paintStatusBox 填内容：状态栏的文案 / 结构只有一处定义，
+  // 免得「首次渲染」和「后续刷新」两条路各写一遍、慢慢长歪。
   function buildStatus(data) {
     const box = document.createElement('div');
-    box.className = 'node-status';
-    if (data.running) {
-      box.classList.add('show', 'running');
-      const spin = document.createElement('div');
-      spin.className = 'st-spin';
-      const title = document.createElement('div');
-      title.className = 'st-title';
-      title.textContent = '正在生成中…';
-      box.appendChild(spin);
-      box.appendChild(title);
-      const message = document.createElement('div');
-      message.className = 'st-msg';
-      message.textContent = data.progress || '已提交，正在等结果';
-      box.appendChild(message);
-    } else if (data.preparing) {
-      box.classList.add('show', 'preparing');
-      const spin = document.createElement('div');
-      spin.className = 'st-spin';
-      const title = document.createElement('div');
-      title.className = 'st-title';
-      title.textContent = '正在准备提交…';
-      box.appendChild(spin);
-      box.appendChild(title);
-      const message = document.createElement('div');
-      message.className = 'st-msg';
-      message.textContent = data.preparing;
-      box.appendChild(message);
-    } else if (data.error) {
-      box.classList.add('show', 'error');
-      const title = document.createElement('div');
-      title.className = 'st-title';
-      // 服务端认得出错误类别时用那句中文短结论当标题，否则退回「生成失败」
-      title.textContent = data.errorInfo && data.errorInfo.title ? data.errorInfo.title : '生成失败';
-      const message = document.createElement('div');
-      message.className = 'st-msg';
-      message.textContent = data.errorInfo && data.errorInfo.detail ? data.errorInfo.detail : data.error;
-      if (message.textContent && String(message.textContent).length > 60) box.classList.add('long-msg');
-      box.appendChild(title);
-      box.appendChild(message);
-      const advice = document.createElement('div');
-      advice.className = 'st-advice';
-      advice.textContent = data.errorInfo && data.errorInfo.advice ? data.errorInfo.advice : '';
-      if (!advice.textContent) advice.style.display = 'none';
-      box.appendChild(advice);
-    }
-    return box;
+    box.className = 'node-status show ' + (statusKindOf(data) || 'error');
+    return paintStatusBox(box, data) || box;
   }
 
   // 鼠标移上去才浮出的窄条：显示模型和提示词开头
@@ -2663,6 +2621,7 @@
   function submissionMetaOf(source, fallback) {
     const raw = source && typeof source === 'object' ? source : {};
     const base = fallback && typeof fallback === 'object' ? fallback : {};
+    const refs = Array.isArray(raw.refs) ? raw.refs : Array.isArray(base.refs) ? base.refs : [];
     return {
       mainPrompt: String(raw.mainPrompt || base.mainPrompt || ''),
       submittedPrompt: String(raw.submittedPrompt || raw.apiPrompt || base.submittedPrompt || ''),
@@ -2671,6 +2630,16 @@
       tailText: String(raw.tailText || base.tailText || ''),
       tailAppended: Boolean(raw.tailAppended || base.tailAppended),
       model: String(raw.model || base.model || ''),
+      // 本次提交冻结的参考素材清单（只留名字/类型/角色/地址，不含字节）
+      refs: refs.map((item) => ({
+        name: String((item && item.name) || ''),
+        kind: String((item && item.kind) || ''),
+        role: String((item && item.role) || ''),
+        src: String((item && (item.src || item.url)) || ''),
+      })),
+      refCount: Number.isFinite(Number(raw.refCount))
+        ? Number(raw.refCount)
+        : refs.length || Number(base.refCount) || 0,
       params: raw.params && typeof raw.params === 'object' ? raw.params : base.params && typeof base.params === 'object' ? base.params : {},
       at: Number(raw.at) || Number(base.at) || Date.now(),
     };
@@ -7082,6 +7051,69 @@
     return '';
   }
 
+  // 「本次提交」那一行的文案：模型 · 尺寸 · N 个参考素材 · 提示词前 20 字。
+  // 只在真拿到快照时才有内容；拿不到就返回空串，那一行整个不占位。
+  function submitLineOf(data) {
+    const meta = data && (data.pendingSubmission || data.lastSubmission);
+    if (!meta) return '';
+    const params = (meta.params && typeof meta.params === 'object' ? meta.params : {}) || {};
+    const parts = [];
+    const model = String(meta.model || '').trim();
+    if (model) parts.push(model);
+    const size = String(params.sizeKey || params.size || '').trim();
+    const ratio = String(params.ratio || '').trim();
+    if (size || ratio) parts.push([size, ratio].filter(Boolean).join(' '));
+    const refCount = Number(meta.refCount) || (Array.isArray(meta.refs) ? meta.refs.length : 0);
+    if (refCount > 0) parts.push(refCount + ' 个参考素材');
+    const main = String(meta.mainPrompt || meta.submittedPrompt || '').trim().replace(/\s+/g, ' ');
+    if (main) parts.push(main.slice(0, 20) + (main.length > 20 ? '…' : ''));
+    return parts.join(' · ');
+  }
+
+  // 快照的完整明细，点开那一行时用。每条都做成「键：值」，空值跳过。
+  function submitDetailOf(data) {
+    const meta = data && (data.pendingSubmission || data.lastSubmission);
+    if (!meta) return [];
+    const params = (meta.params && typeof meta.params === 'object' ? meta.params : {}) || {};
+    const rows = [];
+    const push = (key, value) => {
+      const text = String(value == null ? '' : value).trim();
+      if (text) rows.push([key, text]);
+    };
+    push('模型', meta.model);
+    push('尺寸', [params.sizeKey, params.ratio].filter(Boolean).join(' '));
+    push('张数', params.count ? params.count + ' 张' : '');
+    if (params.duration) push('时长', params.duration + ' 秒');
+    if (params.resolution) push('分辨率', params.resolution);
+    if (params.mode) push('模式', params.mode);
+    if (meta.tailPresetName) push('尾部预设', meta.tailPresetName + (meta.tailAppended ? '（已追加）' : '（未追加）'));
+    const main = String(meta.mainPrompt || '').trim();
+    if (main) push('主提示词', main);
+    const submitted = String(meta.submittedPrompt || '').trim();
+    if (submitted && submitted !== main) push('实际发送', submitted);
+    const refs = Array.isArray(meta.refs) ? meta.refs : [];
+    if (refs.length) {
+      push(
+        '参考素材',
+        refs
+          .map((item) => {
+            const name = String((item && item.name) || '').trim() || '未命名';
+            const kindText = item && item.kind ? '（' + item.kind + '）' : '';
+            const roleText = item && item.role ? '［' + item.role + '］' : '';
+            return name + kindText + roleText;
+          })
+          .join('、')
+      );
+    } else if (Number(meta.refCount) > 0) {
+      push('参考素材', Number(meta.refCount) + ' 个');
+    }
+    if (meta.at) {
+      const when = new Date(Number(meta.at));
+      if (!isNaN(when.getTime())) push('提交时间', when.toLocaleString());
+    }
+    return rows;
+  }
+
   // 卡片重建、老数据、异常分支都可能让遮罩丢失：只要有状态就补一层，
   // 不再依赖 buildMedia 一定已经画过 .node-status
   function ensureStatusBox(el, data) {
@@ -7096,13 +7128,13 @@
 
   // 只改字和转圈，不重建整张卡片：视频不会黑闪，轮询也不会打断输入
   function paintStatusBox(box, data) {
-    if (!box) return;
+    if (!box) return box;
     const kind = statusKindOf(data);
     if (!kind) {
       box.className = 'node-status';
       box.dataset.kind = '';
       box.textContent = '';
-      return;
+      return box;
     }
     if (box.dataset.kind !== kind) {
       box.className = 'node-status show ' + kind;
@@ -7122,10 +7154,19 @@
       const advice = document.createElement('div');
       advice.className = 'st-advice';
       box.appendChild(advice);
+      // 「本次提交」一行：生成中时让用户看清这次到底提交了什么
+      const submit = document.createElement('div');
+      submit.className = 'st-submit';
+      box.appendChild(submit);
+      const detail = document.createElement('div');
+      detail.className = 'st-submit-detail';
+      box.appendChild(detail);
     }
     const title = box.querySelector('.st-title');
     const message = box.querySelector('.st-msg');
     const advice = box.querySelector('.st-advice');
+    const submit = box.querySelector('.st-submit');
+    const detail = box.querySelector('.st-submit-detail');
     let titleText = '生成失败';
     let messageText = data.error || '';
     let adviceText = '';
@@ -7153,6 +7194,51 @@
       advice.textContent = adviceText;
       advice.style.display = adviceText ? '' : 'none';
     }
+    // 「本次提交」：只在生成中 / 准备中显示（这是「正在跑的这一版是什么」的答案）；
+    // 出错时也该显示，用户才知道是拿什么参数撞的墙。
+    if (submit) {
+      const line = submitLineOf(data);
+      const showLine = Boolean(line) && (kind === 'running' || kind === 'preparing' || kind === 'error');
+      submit.textContent = line;
+      submit.style.display = showLine ? '' : 'none';
+      submit.classList.toggle('clickable', showLine);
+    }
+    if (detail) {
+      const open = box.dataset.detailOpen === '1';
+      const rows = open ? submitDetailOf(data) : [];
+      detail.textContent = '';
+      rows.forEach((row) => {
+        const line = document.createElement('div');
+        line.className = 'st-submit-row';
+        const key = document.createElement('span');
+        key.className = 'k';
+        key.textContent = row[0] + '：';
+        const value = document.createElement('span');
+        value.className = 'v';
+        value.textContent = row[1];
+        line.appendChild(key);
+        line.appendChild(value);
+        detail.appendChild(line);
+      });
+      detail.style.display = rows.length ? '' : 'none';
+    }
+    return box;
+  }
+
+  // 点「本次提交」那一行：展开 / 收起完整快照。
+  // 状态遮罩本身是 pointer-events:none（不挡画布上的拖拽），只把这一行放出来可点。
+  function bindStatusToggle(box) {
+    if (!box || box.dataset.bound === '1') return;
+    box.dataset.bound = '1';
+    box.addEventListener('click', (event) => {
+      const line = event.target && event.target.closest ? event.target.closest('.st-submit') : null;
+      if (!line || line.style.display === 'none') return;
+      event.stopPropagation();
+      box.dataset.detailOpen = box.dataset.detailOpen === '1' ? '0' : '1';
+      // 展开状态变了，重画一次（paintStatusBox 只认 data，这里借 dataset 传递）
+      const host = box.closest('.node');
+      if (host && typeof host.__repaintStatus === 'function') host.__repaintStatus();
+    });
   }
 
   function updateTaskUi(node) {
@@ -7174,7 +7260,14 @@
         }
       });
     }
-    paintStatusBox(ensureStatusBox(el, data), data);
+    const box = ensureStatusBox(el, data);
+    // 「本次提交」那一行点开后要能重画：把节点数据挂到卡片上，供点击回调取用
+    el.__repaintStatus = () => {
+      const now = elements.get(node.id);
+      if (now) paintStatusBox(now.querySelector('.node-status:not(.schedule-live)'), nodeData(node));
+    };
+    bindStatusToggle(box);
+    paintStatusBox(box, data);
     const state = el.querySelector('.task-state');
     if (state) state.textContent = taskStateText(data);
     const run = el.querySelector('.btn-run');
@@ -7217,6 +7310,9 @@
       data.pendingSubmission = submissionMetaOf(
         Object.assign({}, res.submission || {}, {
           model: payload.model,
+          // 本次实际送出去的参考素材：卡片上要显示「N 个参考素材」
+          refs: refsOfPayload(payload),
+          refCount: refsOfPayload(payload).length,
           params: {
             sizeKey: payload.sizeKey,
             ratio: payload.ratio,
@@ -7244,8 +7340,21 @@
     }
   }
 
+  // 把 payload.refs（前端送出的参考素材）折算成快照里存的那几个字段。
+  // 前端只知道 url/kind/name/role；服务端冻结时用的 src 在这里就对应 url。
+  function refsOfPayload(payload) {
+    const list = payload && Array.isArray(payload.refs) ? payload.refs : [];
+    return list.map((item) => ({
+      name: String((item && item.name) || ''),
+      kind: String((item && item.kind) || ''),
+      role: String((item && item.role) || ''),
+      src: String((item && (item.url || item.src)) || ''),
+    }));
+  }
+
   function submissionMetaFromTask(task, data) {
     const params = (task && task.params) || {};
+    const resumeRefs = task && task.resume && Array.isArray(task.resume.refs) ? task.resume.refs : null;
     return submissionMetaOf(
       {
         mainPrompt: params.mainPrompt,
@@ -7256,6 +7365,8 @@
         tailAppended: params.tailAppended,
         model: (task && task.model) || (data && data.model),
         params: params,
+        // 服务端把参考素材冻结在 resume.refs 里，重启接续的任务也能显示出来
+        refs: resumeRefs || undefined,
         at: (task && task.updatedAt) || Date.now(),
       },
       { model: data && data.model }

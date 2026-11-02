@@ -513,6 +513,9 @@ async function prepareRefs(config, list, channel, progress, options) {
       name: name,
       kind: kind,
       role: (item && item.role) || '',
+      // 原始引用地址（一般是 /media/xxx 这种相对路径）。
+      // 保留下来是为了能把它冻结进任务快照：服务重启后还知道这次用了哪些素材。
+      src: String(url || ''),
       remoteUrl: '',
       remoteId: '',
     });
@@ -893,7 +896,20 @@ function stampMinute(ms) {
 }
 
 // 组装一条「可接续」的记录：服务重启后靠它继续等，不用重新提交一遍
-function buildWaitRecord(channel, kind, spec, payload, model, size, prompt, remoteId) {
+// refs 是本次真正送给平台的参考素材（可能是数组，也可能是带 refStats 的数组）。
+// 只冻结「能重建的东西」：原始地址、角色、名字，不含 buffer（几 MB 的字节不该进库）。
+function waitRefsOf(refs) {
+  const list = Array.isArray(refs) ? refs : [];
+  return list.map((item) => ({
+    src: String((item && (item.src || item.remoteUrl || item.url)) || ''),
+    name: String((item && item.name) || ''),
+    kind: String((item && item.kind) || ''),
+    role: String((item && item.role) || ''),
+    remoteId: String((item && item.remoteId) || ''),
+  }));
+}
+
+function buildWaitRecord(channel, kind, spec, payload, model, size, prompt, remoteId, refs) {
   const poll = spec.poll || {};
   const now = Date.now();
   const maxWaitSec = Math.max(30, Number(poll.maxWaitSec) || 1800);
@@ -904,6 +920,8 @@ function buildWaitRecord(channel, kind, spec, payload, model, size, prompt, remo
     model: model,
     size: size,
     prompt: prompt,
+    // 本次提交冻结的参考素材快照：重启接续、卡片展示「本次提交」都靠它
+    refs: waitRefsOf(refs),
     remoteId: String(remoteId || ''),
     queryPath: String(poll.path || ''),
     listField: String(poll.listField || ''),
@@ -1173,7 +1191,7 @@ async function runKind(config, kind, payload, ctx) {
           snippet(data.text, 200)
       );
     }
-    const record = buildWaitRecord(channel, kind, spec, payload, model, size, prompt, remoteId);
+    const record = buildWaitRecord(channel, kind, spec, payload, model, size, prompt, remoteId, refs);
     // 记下这条记录：万一服务重启，起来后还能接着等，不用重新生成一遍
     if (ctx && ctx.attach) ctx.attach(record);
     progress({ stage: '已提交，正在等接口出结果…' });
@@ -1311,7 +1329,8 @@ async function resumeTask(config, task, ctx) {
     model: record.model || task.model || '',
     size: record.size || '',
     count: 1,
-    refCount: 0,
+    // 重启接续的任务也能报出「这次用了几个参考素材」，卡片展示才完整
+    refCount: Array.isArray(record.refs) ? record.refs.length : 0,
     resumed: true,
   };
 }
@@ -1415,6 +1434,9 @@ module.exports = {
   resolveTail,
   composePrompt,
   composeSubmission,
+  // 提交快照的组装（含参考素材冻结）：导出供测试直接校验，不必真跑一次生成
+  buildWaitRecord,
+  waitRefsOf,
   preflight,
   prepareRefs,
   fitRefsToLimits,
