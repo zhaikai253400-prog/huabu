@@ -1080,6 +1080,27 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
   overflow: auto;
 }
 
+/* 失败时的「该怎么办」一行：字号比原文再小一档、颜色淡一点，
+   专门用来把用户的注意力从「报了什么错」引到「下一步做什么」。 */
+.node-status .st-advice {
+  font-size: 0.76em;
+  line-height: 1.45;
+  color: var(--muted);
+  max-width: 92%;
+  word-break: break-word;
+}
+.node-status.error .st-advice { color: var(--muted); }
+
+/* 平台原文常常是一大段英文 JSON。超过两行就收起来，
+   让卡片不至于被撑爆；想细看有「查看详情」那条路。 */
+.node-status.long-msg .st-msg {
+  max-height: 3.2em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
 .st-spin {
   width: 22px;
   height: 22px;

@@ -10,6 +10,7 @@ const assets = require('./assets');
 const lastframe = require('./lastframe');
 const store = require('./store');
 const modelSpecs = require('./model-specs');
+const errorKinds = require('./error-kinds');
 
 const KIND_FOLDER = { image: '图片', video: '视频', audio: '音频' };
 
@@ -942,6 +943,9 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
   let lastState = '';
   let round = 0;
   let misses = 0;
+  // 按分类记「已经连续失败了几次」。只有确定没救的错误才会提前判死，
+  // 网络类的一律不计数（strikes = 0），继续等满，免得片子其实成了却被误报。
+  const strikes = new Map();
   for (;;) {
     if (Date.now() >= deadline) break;
     if (round) await sleep(Math.min(intervalMs, Math.max(1000, deadline - Date.now())), ctx && ctx.signal);
@@ -954,24 +958,42 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
         contentType: 'none',
         timeoutSec: 60,
         signal: ctx && ctx.signal,
+        // 轮询时 404 的含义是「平台不认这条任务号了」，跟 404 模型不存在是两码事
+        where: 'poll',
       });
+      // 这一轮问到了，连击数清零：错误必须是「连续的」才算数
       misses = 0;
+      strikes.clear();
     } catch (error) {
       if (ctx && ctx.signal && ctx.signal.aborted) throw error;
-      const status = Number(error && error.status) || 0;
-      lastState = (error && error.message) || String(error);
-      // 密钥 / 权限这类错误再等多久都不会好，直接报出来
-      if (status === 401 || status === 403) {
-        throw new Error('接口说没有权限查这条任务（' + status + '），检查一下通道密钥：' + lastState);
+      lastState = (error && error.detail) || (error && error.message) || String(error);
+      const info = error.__info || errorKinds.classify(error, { where: 'poll', path: queryPath });
+
+      // 密钥 / 额度 / 模型不对：再等多久都不会好，立刻报出来
+      if (info.failFast) {
+        throw errorKinds.explain(error, { where: 'poll', path: queryPath });
       }
-      // 网关超时 / 网络抖动时，平台那边可能已经在出片了：
-      // 一直问到这条任务的总等待时间用完，不再「连着 5 次就判失败」，
-      // 免得片子其实成功了，却因为查询接口暂时打不通被误报成失败。
+
+      // 剩下的按分类记连击数，够数才判死。
+      // 原来是一刀切「除了 401/403 一律等满」，对「任务号已经失效」「返回结构
+      // 一直不对」这类明确故障来说太钝了 —— 用户要白等半小时才知道出了事。
+      // 而网络抖动仍然不计数，保住了原来「宁可多等，不可误报」的保守性。
+      const limit = Number(info.strikes) || 0;
+      let count = 0;
+      if (limit > 0) {
+        count = (strikes.get(info.kind) || 0) + 1;
+        strikes.set(info.kind, count);
+        if (count >= limit) {
+          throw errorKinds.explain(error, { where: 'poll', path: queryPath });
+        }
+      }
+
       misses += 1;
       if (Date.now() >= deadline) break;
+      const tail = limit > 0 ? '，' + count + '/' + limit : '';
       progress({
         stage:
-          '接口暂时查不到结果（第 ' + misses + ' 次），继续等（已等 ' +
+          '接口暂时查不到结果（第 ' + misses + ' 次' + tail + '），继续等（已等 ' +
           stampMinute(Date.now() - startedAt) + '，' + lastState.slice(0, 80) + '）',
       });
       continue;
@@ -1011,12 +1033,16 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
     progress({ stage: '生成中…（' + (status || '等待中') + '，已等 ' + stampMinute(Date.now() - startedAt) + '）' });
     const note = channels.pickByPath(taskNode, record.errorField);
     const tail = note ? '：' + String(note).slice(0, 200) : '';
-    if (failWords.length && failWords.indexOf(status) >= 0) throw new Error('接口说这次生成失败了' + tail);
+    if (failWords.length && failWords.indexOf(status) >= 0) {
+      throw errorKinds.makeError('UNKNOWN', '接口说这次生成失败了' + tail);
+    }
     if (doneWords.length && doneWords.indexOf(status) >= 0) {
       // 有的平台在任务里只给「结果文件号」，要再走一次取件接口换下载地址
       if (record.downloadPath) {
         const fileId = channels.pickByPath(taskNode, record.downloadIdPath);
-        if (!fileId) throw new Error('任务完成了，但返回里没找到结果文件号，检查「取件文件号路径」' + tail);
+        if (!fileId) {
+          throw errorKinds.makeError('BAD_FORMAT', '任务完成了，但返回里没找到结果文件号，检查「取件文件号路径」' + tail);
+        }
         const dlPath = String(record.downloadPath).replace(
           /\{\{\s*(fileId|file_id|id)\s*\}\}/g,
           encodeURIComponent(String(fileId))
@@ -1028,17 +1054,22 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
           contentType: 'none',
           timeoutSec: 60,
           signal: ctx && ctx.signal,
+          where: 'download',
         });
         const direct = channels.pickByPath(dl.json, record.downloadUrlField || 'downloadUrl');
         if (typeof direct === 'string' && /^https?:\/\//i.test(direct.trim())) return { url: direct.trim() };
         const again = channels.extractResult(dl.text, dl.json, {});
         if (again) return again;
-        throw new Error('取件接口没给出下载地址，检查「取件地址字段」' + tail);
+        throw errorKinds.makeError('BAD_FORMAT', '取件接口没给出下载地址，检查「取件地址字段」' + tail);
       }
-      throw new Error('接口说完成了，但返回里没找到结果地址，检查「轮询结果地址路径」' + tail);
+      throw errorKinds.makeError('BAD_FORMAT', '接口说完成了，但返回里没找到结果地址，检查「轮询结果地址路径」' + tail);
     }
   }
-  throw new Error('等到超过通道里设的最长等待时间还没出结果（最后状态：' + lastState + '）');
+  // 等满了最长等待时间：这属于平台慢，不是配置错，给出「稍后重试或调小参数」的建议
+  throw errorKinds.makeError(
+    'PLATFORM_TIMEOUT',
+    '等到超过通道里设的最长等待时间还没出结果（最后状态：' + lastState + '）'
+  );
 }
 
 // 结果地址是不是这张卡片要的类型：视频卡片收到图片地址（常见于封面 / 预览图）就当没出片
@@ -1126,6 +1157,7 @@ async function runKind(config, kind, payload, ctx) {
     bodyText: bodyText,
     timeoutSec: spec.timeoutSec,
     signal: ctx && ctx.signal,
+    where: 'submit',
   });
   // 异步通道（配了轮询）又没写明结果路径时，提交响应里常常只有封面 / 预览图，
   // 按文本撮会把封面当成成品、跳过轮询。这里只按配置的路径取，取不到就交给轮询。

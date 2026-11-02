@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const errorKinds = require('./error-kinds');
 
 const KINDS = ['image', 'video', 'audio'];
 
@@ -799,6 +800,12 @@ async function callApi(channel, options) {
     response = await fetch(url, init);
   } catch (error) {
     note('请求 ' + init.method + ' ' + maskUrl(url) + ' 没走通：' + ((error && error.message) || error));
+    // 连不上、DNS 失败、超时、被中止：请求根本没走到平台
+    const info = errorKinds.classify(error, { where: opts.where, path: opts.path });
+    error.kind = info.kind;
+    error.advice = info.advice;
+    error.retryable = info.retryable;
+    error.detail = (error && error.message) || String(error);
     throw error;
   }
   const text = await response.text();
@@ -811,8 +818,21 @@ async function callApi(channel, options) {
     json = null;
   }
   if (!response.ok) {
-    const error = new Error(shortError(text, response.status, response.statusText));
+    const raw = shortError(text, response.status, response.statusText);
+    const info = errorKinds.classify(
+      { status: response.status, message: raw, body: text },
+      { where: opts.where, path: opts.path }
+    );
+    // 认得出是哪一类，就给用户一句中文短标题（卡片状态栏、气泡提示都放得下），
+    // 平台原文完整留在 detail 里，详情面板与日志照旧能查到。
+    // 认不出时保持原样 —— 宁可难看，也不能把仅有的一条线索吞掉。
+    const error = new Error(info.kind === 'UNKNOWN' ? raw : info.title);
     error.status = response.status;
+    error.kind = info.kind;
+    error.advice = info.advice;
+    error.retryable = info.retryable;
+    error.detail = raw;
+    error.body = text;
     throw error;
   }
   return { url: url, text: text, json: json };
@@ -829,6 +849,7 @@ async function probeModels(channel) {
     method: (str(lists.method) || 'GET').toUpperCase(),
     contentType: 'none',
     timeoutSec: 60,
+    where: 'models',
   });
   let rows = pickByPath(data.json, lists.resultPath);
   if (!Array.isArray(rows)) {
@@ -858,6 +879,7 @@ async function queryBalance(channel) {
     contentType: method === 'GET' ? 'none' : 'json',
     bodyText: method === 'GET' ? '' : '{}',
     timeoutSec: 45,
+    where: 'balance',
   });
   const json = data.json;
   const rawCredits = pickByPath(json, conf.resultPath);
@@ -908,6 +930,7 @@ async function queryRide(channel) {
     contentType: method === 'GET' ? 'none' : 'json',
     bodyText: method === 'GET' ? '' : '{}',
     timeoutSec: 45,
+    where: 'ride',
   });
   const json = data.json;
   const raw = pickByPath(json, conf.ridePath);
@@ -1019,6 +1042,7 @@ async function sessionUpload(channel, spec, item, headers, filename, mime) {
     headers: spec.headers,
     extraHeaders: Object.assign({}, spec.headers, { 'Idempotency-Key': newKey() }),
     timeoutSec: timeoutSec,
+    where: 'upload',
   });
   const uploadId = str(pickByPath(created.json, 'uploadId'));
   let fileId = str(pickByPath(created.json, 'fileId'));
@@ -1051,6 +1075,7 @@ async function sessionUpload(channel, spec, item, headers, filename, mime) {
       bodyText: '{}',
       extraHeaders: { 'Idempotency-Key': newKey() },
       timeoutSec: 120,
+      where: 'upload',
     });
     const deadline = Date.now() + timeoutSec * 1000;
     for (;;) {
@@ -1059,6 +1084,7 @@ async function sessionUpload(channel, spec, item, headers, filename, mime) {
         method: 'GET',
         contentType: 'none',
         timeoutSec: 60,
+        where: 'upload',
       });
       status = str(pickByPath(got.json, 'status')).toUpperCase();
       fileId = str(pickByPath(got.json, 'fileId')) || fileId;

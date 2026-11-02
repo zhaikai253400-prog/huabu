@@ -2,8 +2,23 @@
 
 const store = require('./store');
 const generate = require('./generate');
+const errorKinds = require('./error-kinds');
 
 const active = new Map();
+
+// 把异常整理成能存进库、也能直接给前端用的结构。
+// 没有分类的（比如「提交前检查没通过」这类前端自己抛的）返回 null。
+function infoOf(error, message) {
+  if (!error || !error.kind) return null;
+  const meta = errorKinds.meta(error.kind);
+  return {
+    kind: error.kind,
+    title: message || meta.title,
+    advice: error.advice || meta.advice,
+    detail: error.detail || '',
+    retryable: error.retryable !== undefined ? error.retryable : meta.retryable,
+  };
+}
 
 function now() {
   return Date.now();
@@ -49,10 +64,14 @@ function runJob(id, startedAt, job) {
     })
     .catch(function (error) {
       const aborted = controller.signal.aborted;
+      const message = (error && error.message) || String(error);
       store.updateTask(id, {
         status: aborted ? 'canceled' : 'failed',
         stage: aborted ? '已取消' : '失败',
-        error: (error && error.message) || String(error),
+        error: message,
+        // 带分类的错误（见 server/error-kinds.js）会额外记下结构化信息，
+        // 前端据此显示更具体的提示与建议；没有分类时存 null，前端回退到 error 那句话。
+        errorInfo: aborted ? null : infoOf(error, message),
         waitedMs: now() - startedAt,
       });
     })

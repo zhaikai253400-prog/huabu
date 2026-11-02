@@ -123,6 +123,10 @@ function openDb() {
   // 老库升级：任务表补一列，用来记住异步任务的接续信息（服务重启后接着等结果）
   const taskColumns2 = db.prepare('PRAGMA table_info(tasks)').all().map((row) => row.name);
   if (taskColumns2.indexOf('resume_json') < 0) db.exec('ALTER TABLE tasks ADD COLUMN resume_json TEXT');
+  // 老库升级：任务表补一列，存结构化的失败信息（分类 / 建议 / 平台原文）。
+  // error 那列继续留着放一句话摘要，老前端读它也不受影响。
+  const taskColumns3 = db.prepare('PRAGMA table_info(tasks)').all().map((row) => row.name);
+  if (taskColumns3.indexOf('error_json') < 0) db.exec('ALTER TABLE tasks ADD COLUMN error_json TEXT');
   // 老库升级：定时组运行记录补一列，存这一轮冻结的备用模型清单
   const runColumns = db.prepare('PRAGMA table_info(schedule_runs)').all().map((row) => row.name);
   if (runColumns.indexOf('backups_json') < 0) db.exec('ALTER TABLE schedule_runs ADD COLUMN backups_json TEXT');
@@ -734,6 +738,9 @@ function rowToTask(row) {
     result: row.result_json ? JSON.parse(row.result_json) : null,
     resume: row.resume_json ? JSON.parse(row.resume_json) : null,
     error: row.error || '',
+    // 结构化失败信息：{ kind, title, advice, detail, retryable }。
+    // 老记录 / 老前端没有这一项时为 null，前端据此回退到只显示 error 那句话。
+    errorInfo: row.error_json ? JSON.parse(row.error_json) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -789,6 +796,11 @@ function updateTask(id, patch) {
     if (key === 'resume') {
       sets.push('resume_json = ?');
       values.push(patch.resume ? JSON.stringify(patch.resume) : null);
+      return;
+    }
+    if (key === 'errorInfo') {
+      sets.push('error_json = ?');
+      values.push(patch.errorInfo ? JSON.stringify(patch.errorInfo) : null);
       return;
     }
     const column = TASK_FIELDS[key];

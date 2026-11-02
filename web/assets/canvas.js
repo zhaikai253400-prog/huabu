@@ -2154,12 +2154,19 @@
       box.classList.add('show', 'error');
       const title = document.createElement('div');
       title.className = 'st-title';
-      title.textContent = '生成失败';
+      // 服务端认得出错误类别时用那句中文短结论当标题，否则退回「生成失败」
+      title.textContent = data.errorInfo && data.errorInfo.title ? data.errorInfo.title : '生成失败';
       const message = document.createElement('div');
       message.className = 'st-msg';
-      message.textContent = data.error;
+      message.textContent = data.errorInfo && data.errorInfo.detail ? data.errorInfo.detail : data.error;
+      if (message.textContent && String(message.textContent).length > 60) box.classList.add('long-msg');
       box.appendChild(title);
       box.appendChild(message);
+      const advice = document.createElement('div');
+      advice.className = 'st-advice';
+      advice.textContent = data.errorInfo && data.errorInfo.advice ? data.errorInfo.advice : '';
+      if (!advice.textContent) advice.style.display = 'none';
+      box.appendChild(advice);
     }
     return box;
   }
@@ -7112,22 +7119,39 @@
       const message = document.createElement('div');
       message.className = 'st-msg';
       box.appendChild(message);
+      const advice = document.createElement('div');
+      advice.className = 'st-advice';
+      box.appendChild(advice);
     }
     const title = box.querySelector('.st-title');
     const message = box.querySelector('.st-msg');
+    const advice = box.querySelector('.st-advice');
     let titleText = '生成失败';
     let messageText = data.error || '';
+    let adviceText = '';
     if (kind === 'running') {
       titleText = '正在生成中…';
       messageText = data.progress || '已提交，正在等结果';
     } else if (kind === 'preparing') {
       titleText = '正在准备提交…';
       messageText = data.preparing || '正在检查参考素材…';
+    } else if (kind === 'error' && data.errorInfo) {
+      // 服务端认得出这是哪一类错误时，标题就是那句中文短结论（「通道密钥不对」），
+      // message 放平台原文，advice 告诉用户下一步该干什么。
+      titleText = data.errorInfo.title || titleText;
+      messageText = data.errorInfo.detail || data.error || '';
+      adviceText = data.errorInfo.advice || '';
     }
     if (title) title.textContent = titleText;
     if (message) {
       message.textContent = messageText;
-      message.style.display = messageText ? '' : 'none';
+      box.classList.toggle('has-msg', Boolean(messageText));
+      // 原文太长时只显示两行，点标题看全文（避免把卡片撑得没边）
+      box.classList.toggle('long-msg', Boolean(messageText) && String(messageText).length > 60);
+    }
+    if (advice) {
+      advice.textContent = adviceText;
+      advice.style.display = adviceText ? '' : 'none';
     }
   }
 
@@ -7287,11 +7311,14 @@
     scheduleSave();
   }
 
-  function failTask(node, message) {
+  function failTask(node, message, errorInfo) {
     const data = nodeData(node);
     data.running = false;
     data.progress = '';
     data.error = message || '生成失败';
+    // 服务端认得出错误类别时带一份结构化信息（分类 / 建议 / 平台原文），
+    // 卡片上就能显示成「通道密钥不对」+ 该怎么做，而不是一长串英文。
+    data.errorInfo = errorInfo || null;
     refreshNode(node);
     scheduleSave();
   }
@@ -7364,8 +7391,8 @@
           scheduleSave();
           return;
         }
-        failTask(node, task.error || '生成失败');
-        toast('生成失败：' + (task.error || ''));
+        failTask(node, task.error || '生成失败', task.errorInfo);
+        toast('生成失败：' + ((task.errorInfo && task.errorInfo.title) || task.error || ''));
         return;
       }
       const data = nodeData(node);
@@ -7526,7 +7553,7 @@
         refreshNode(node);
         scheduleSave();
       } else if (task.status === 'failed' || task.status === 'interrupted') {
-        failTask(node, task.error || '生成失败');
+        failTask(node, task.error || '生成失败', task.errorInfo);
       } else {
         // 还在排队 / 运行，只是列表翻页没翻到：直接接管
         const data = nodeData(node);
