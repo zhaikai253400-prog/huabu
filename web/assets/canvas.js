@@ -11314,6 +11314,14 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
         return;
       }
       const usable = items.filter((item) => item.report && item.report.ok && item.payload);
+      // 批量提交是一口气改动很多卡片，提交前先给整块画布留个档：
+      // 万一参数或参考素材搞错了，能从「历史版本」整块退回来。
+      // 存档失败不拦着提交（可能只是磁盘满了），只是少一道保险。
+      try {
+        await window.api.snapshotCanvas(canvasId, '批量前');
+      } catch {
+        /* 存档没成也不影响这次批量 */
+      }
       let success = 0;
       let failed = 0;
       await runPool(usable, 2, async (item) => {

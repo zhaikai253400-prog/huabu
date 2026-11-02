@@ -47,7 +47,10 @@
     return Math.round(size / 1024) + ' KB';
   }
 
-  // 历史版本：自动备份每 5 分钟存一次，只留最近 10 份
+  // 历史版本分两类：
+  //   recent —— 改动后隔几分钟自动存一份，只留最近 10 份（「刚才手滑了」用）
+  //   daily  —— 每天留一份，保留 30 天（「昨天还好好的」用）
+  // 另外「删除前 / 回滚前 / 批量前」这些关键动作也会强制留一份，同样落在 recent 里。
   async function openBackups(canvas) {
     let list = [];
     try {
@@ -57,16 +60,25 @@
       window.alert('读历史版本失败：' + error.message);
       return;
     }
-    const rows = list.length
-      ? list
-          .map(
-            (item) =>
-              '<div class="backup-row"><span>' + item.label + '</span>' +
-              '<span class="muted-line">' + sizeText(item.bytes) + '</span>' +
-              '<button data-name="' + item.name + '">回滚到这里</button></div>'
-          )
-          .join('')
-      : '<div class="muted-line">还没有历史版本。画布改动后每隔几分钟自动存一份，最多留 10 份。</div>';
+    const safe = (text) => String(text == null ? '' : text).replace(/[&<>"]/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+    })[c]);
+    const rowOf = (item) =>
+      '<div class="backup-row"><span>' + safe(item.label) + '</span>' +
+      '<span class="muted-line">' + sizeText(item.bytes) + '</span>' +
+      '<button data-name="' + safe(item.name) + '">回滚到这里</button></div>';
+    const recent = list.filter((one) => one.kind !== 'daily');
+    const daily = list.filter((one) => one.kind === 'daily');
+    let rows = '';
+    if (recent.length) {
+      rows += '<div class="backup-group-title">最近改动</div>' + recent.map(rowOf).join('');
+    }
+    if (daily.length) {
+      rows += '<div class="backup-group-title">每日留存（保留 30 天）</div>' + daily.map(rowOf).join('');
+    }
+    if (!recent.length && !daily.length) {
+      rows = '<div class="muted-line">还没有历史版本。画布改动后每隔几分钟自动存一份，最多留 10 份；每天还会另外留一份长期备份。删除画布、回滚历史版本、批量操作前也会强制留一份。</div>';
+    }
     openModal(
       '<div class="modal modal-narrow"><div class="modal-head"><b>「' + canvas.name + '」的历史版本</b>' +
         '<span class="grow"></span><button class="ghost" data-close>关闭</button></div>' +
@@ -75,7 +87,7 @@
         mask.querySelectorAll('[data-name]').forEach((button) => {
           button.addEventListener('click', async () => {
             const name = button.getAttribute('data-name');
-            if (!window.confirm('把画布回滚到 ' + name + ' 这一版吗？当前内容会被这一版覆盖。')) return;
+            if (!window.confirm('把画布回滚到 ' + name + ' 这一版吗？当前内容会被这一版覆盖。\n（覆盖前会自动把当前版本也留一份，回滚错了还能再退回来）')) return;
             try {
               await window.api.restoreBackup(canvas.id, name);
               mask.remove();

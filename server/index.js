@@ -882,6 +882,8 @@ async function handleApi(req, res, pathname, query) {
     const body = await readBody(req);
     if (!body || !Array.isArray(body.nodes)) return sendJson(res, 400, { error: '这个文件不是画布备份，里面没有卡片数据' });
     const imported = store.importCanvas(body);
+    // 刚导进来的画布立刻留一份长期备份：以后就算改乱了，也还有「刚导入时」这一版
+    backup.maybeBackup(imported.canvas.id, true);
     log('导入画布：' + imported.canvas.name + '（' + imported.nodeCount + ' 个卡片）');
     return sendJson(res, 200, imported);
   }
@@ -895,16 +897,31 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, payload);
   }
 
-  const backupMatch = pathname.match(/^\/api\/canvases\/([^/]+)\/backups(?:\/(restore))?$/);
+  const backupMatch = pathname.match(/^\/api\/canvases\/([^/]+)\/backups(?:\/(restore|snapshot))?$/);
   if (backupMatch) {
     const id = decodeURIComponent(backupMatch[1]);
+    // 手动留一份快照：批量操作这类「一口气改动很多卡片」的动作，
+    // 做之前先存一份，出问题能整块退回去。
+    if (backupMatch[2] === 'snapshot' && method === 'POST') {
+      const body = await readBody(req);
+      const state = store.getState(id);
+      if (!state) return sendJson(res, 404, { error: '画布不存在' });
+      const name = backup.forceSnapshot(id, state, body.label || '手动存档');
+      if (!name) return sendJson(res, 500, { error: '没能写下这次快照，检查一下磁盘空间' });
+      log('手动存档：' + name);
+      return sendJson(res, 200, { ok: true, name: name });
+    }
     if (backupMatch[2] === 'restore' && method === 'POST') {
       const body = await readBody(req);
       const snapshot = backup.readBackup(id, body.name);
       if (!snapshot) return sendJson(res, 404, { error: '这个备份找不到了' });
+      // 回滚会覆盖当前内容：先把「回滚前」的这一版强制留一份，
+      // 用户回滚完发现不对，还能再退回来
+      const before = store.getState(id);
+      if (before) backup.forceSnapshot(id, before, '回滚前');
       const saved = store.saveState(id, { nodes: snapshot.nodes, edges: snapshot.edges, viewport: snapshot.viewport });
       if (!saved) return sendJson(res, 404, { error: '画布不存在' });
-      log('画布已回滚到备份：' + String(body.name || ''));
+      log('画布已回滚到备份：' + String(body.name || '') + '（回滚前的版本已留档）');
       return sendJson(res, 200, { ok: true, savedAt: saved.savedAt, nodeCount: saved.nodeCount });
     }
     if (method === 'GET') {
@@ -945,9 +962,14 @@ async function handleApi(req, res, pathname, query) {
     }
     if (method === 'DELETE') {
       scheduler.forgetCanvas(id);
+      // 删除是「一步做错就难回头」的事，删之前把整块画布强制留一份到备份目录。
+      // store.deleteCanvas 自己也会往回收站写一份，但那份和「历史版本」不是一个地方，
+      // 用户从门户页的「历史版本」入口看不到；这里补上，两个入口都能找回。
+      const before = store.getState(id);
+      if (before) backup.forceSnapshot(id, before, '删除前');
       const ok = store.deleteCanvas(id);
       if (!ok) return sendJson(res, 404, { error: '画布不存在' });
-      log('删除画布（可在回收站目录找回数据）');
+      log('删除画布（回收站与历史版本目录各留了一份）');
       return sendJson(res, 200, { ok: true });
     }
     return sendJson(res, 405, { error: '不支持的操作' });

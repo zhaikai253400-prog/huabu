@@ -126,5 +126,8 @@
     forgetSchedule: (nodeId) => request('DELETE', '/api/schedules/' + encodeURIComponent(nodeId)),
     restoreBackup: (id, name) =>
       request('POST', '/api/canvases/' + encodeURIComponent(id) + '/backups/restore', { name }),
+    // 批量操作前手动留个档：一口气改很多卡片，改坏了能整块退回来
+    snapshotCanvas: (id, label) =>
+      request('POST', '/api/canvases/' + encodeURIComponent(id) + '/backups/snapshot', { label }),
   };
 })();
