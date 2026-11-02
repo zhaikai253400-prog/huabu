@@ -530,6 +530,13 @@
   let lastSaveError = '';
   // 保存失败期间把侧栏钉住不收起，红点才看得见
   let saveRailPinned = false;
+  // 乐观锁：这块画布的版本号。读画布时从服务端拿到，每次保存成功后更新。
+  // 保存时把它带回去，对不上说明另一个标签页改过，服务端会拒收（409）。
+  let canvasRev = 0;
+  // 已经弹出冲突面板时置位：期间暂停自动保存，否则会拿旧版本号反复撞 409
+  let saveConflict = false;
+  // 记下这次冲突的服务端信息，面板被误关后还能再打开
+  let lastConflict = null;
   let menuEl = null;
   let toastTimer = null;
   let guideEls = [];
@@ -740,7 +747,8 @@
     setRailDesc('save-state', desc);
     // 侧栏平时是贴着左边缘才弹出的，保存失败时那个红点根本看不见。
     // 这里把侧栏强制顶出来，用户至少能看到「出事了」，点一下就知道怎么办。
-    if (state === 'error') showRailForSaveError();
+    // 冲突同理：需要用户做决定，不能缩在边上没人看见。
+    if (state === 'error' || saveConflict) showRailForSaveError();
     else if (saveRailPinned) releaseRailForSaveError();
   }
 
@@ -771,7 +779,11 @@
       const at = lastSavedAt ? '上次成功保存 ' + clockText(lastSavedAt) : '这块画布还没有成功保存过';
       return '保存失败：' + (lastSaveError || '本机服务暂时没回应') + '（' + at + '）· 点一下可以重试或先导出兜底';
     }
-    if (state === 'dirty') return '有改动还没存，正在排队写入';
+    if (state === 'dirty') {
+      // 冲突未处理时，圆点上的说明要说清「为什么没在存」，否则用户以为卡住了
+      if (saveConflict) return '这块画布在另一个窗口被改过了，需要你选一下怎么处理 · 点一下看选项';
+      return '有改动还没存，正在排队写入';
+    }
     if (state === 'saving') return '正在写入本机数据库…';
     return lastSavedAt ? '已保存 · ' + clockText(lastSavedAt) : '已保存';
   }
@@ -934,6 +946,130 @@
     savePanel = null;
   }
 
+  // 保存被服务端拒收：这块画布在别的地方（多半是另一个标签页）已经改过了。
+  //
+  // 为什么不能让程序自己选：两种做法都会丢东西。
+  // 直接覆盖 → 丢掉另一个标签页的改动；直接放弃本地 → 丢掉本机这几分钟的改动。
+  // 所以这里把三条路都摆出来，让用户自己定，其中「导出」那条路保证一个字节都不丢。
+  function handleSaveConflict(info) {
+    if (saveConflict) return;
+    saveConflict = true;
+    lastConflict = info || {};
+    buildConflictPanel(lastConflict);
+  }
+
+  // 面板被误关（比如点了一下空白处）后还能再打开
+  function reopenConflictPanel() {
+    buildConflictPanel(lastConflict || {});
+  }
+
+  function buildConflictPanel(info) {
+    if (savePanel) closeSavePanel();
+    setSaveState('dirty');
+    if (saveEl) saveEl.classList.add('conflict');
+
+    const panel = document.createElement('div');
+    panel.className = 'menu save-panel conflict-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', '保存冲突');
+
+    const head = document.createElement('div');
+    head.className = 'save-panel-head';
+    const title = document.createElement('b');
+    title.textContent = '这块画布在别处被改过了';
+    head.appendChild(title);
+    panel.appendChild(head);
+
+    const note = document.createElement('div');
+    note.className = 'save-panel-note';
+    note.textContent =
+      '你打开这个页面之后，另一个窗口保存过同一块画布（服务端已到第 ' +
+      Number(info.rev || 0) +
+      ' 版，你手上是第 ' +
+      canvasRev +
+      ' 版）。你自己选怎么办，哪一条都不会偷偷丢掉东西。';
+    panel.appendChild(note);
+
+    const sep = document.createElement('div');
+    sep.className = 'sep';
+    panel.appendChild(sep);
+
+    const reloadBtn = document.createElement('button');
+    reloadBtn.type = 'button';
+    reloadBtn.textContent = '用最新的（丢掉我这次的改动）';
+    reloadBtn.addEventListener('click', async () => {
+      reloadBtn.disabled = true;
+      reloadBtn.textContent = '正在重新读取…';
+      try {
+        const state = info.state || (await window.api.getCanvas(canvasId));
+        applyServerState(state);
+        setCanvasName(state.canvas.name);
+        renderAll();
+        applyViewport();
+        dirty = false;
+        saveConflict = false;
+        lastConflict = null;
+        if (saveEl) saveEl.classList.remove('conflict');
+        lastSavedAt = Date.now();
+        lastSaveError = '';
+        closeSavePanel();
+        setSaveState('saved');
+        toast('已载入最新版本');
+      } catch (error) {
+        reloadBtn.disabled = false;
+        reloadBtn.textContent = '用最新的（丢掉我这次的改动）';
+        toast('读取失败：' + ((error && error.message) || '请稍后再试'));
+      }
+    });
+    panel.appendChild(reloadBtn);
+
+    const mineBtn = document.createElement('button');
+    mineBtn.type = 'button';
+    mineBtn.textContent = '保留我的，覆盖过去';
+    mineBtn.addEventListener('click', async () => {
+      mineBtn.disabled = true;
+      mineBtn.textContent = '正在保存…';
+      // 覆盖之前先把服务端现在这一版留档，压错了还能从「历史版本」找回来
+      try {
+        await window.api.snapshotCanvas(canvasId, '被覆盖前');
+      } catch {
+        // 留档失败不拦覆盖：用户明确要做的事优先，备份只是加分项
+      }
+      // 关键：把版本号对齐到服务端当前值再发，否则又是 409
+      canvasRev = Number.isInteger(info.rev) ? info.rev : canvasRev;
+      saveConflict = false;
+      lastConflict = null;
+      if (saveEl) saveEl.classList.remove('conflict');
+      closeSavePanel();
+      dirty = true;
+      await saveNow(true);
+    });
+    panel.appendChild(mineBtn);
+
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button';
+    exportBtn.textContent = '先导出我这份（.json）';
+    exportBtn.addEventListener('click', () => exportCurrentState());
+    panel.appendChild(exportBtn);
+
+    document.body.appendChild(panel);
+    const rect = saveEl ? saveEl.getBoundingClientRect() : { right: 60, left: 0, top: 100, height: 20 };
+    panel.style.position = 'fixed';
+    const w = panel.offsetWidth || 260;
+    const h = panel.offsetHeight || 200;
+    const margin = 10;
+    let left = rect.right + margin;
+    if (left + w > window.innerWidth - margin) left = rect.left - margin - w;
+    if (left < margin) left = margin;
+    let top = rect.top + rect.height / 2 - h / 2;
+    top = Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - h - margin));
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+    savePanel = panel;
+    // 冲突是「必须处理」的事：把侧栏顶出来，别让它缩在边上没人看见
+    showRailForSaveError();
+  }
+
   // 保存一直失败时的兜底出路：把当前画布内容直接下载成 json，先保住数据不丢
   function exportCurrentState() {
     try {
@@ -965,8 +1101,11 @@
 
   // 只有「保存失败」时圆点才可点，平时点它没有任何意义
   saveEl.addEventListener('click', () => {
-    if (saveEl.dataset.state !== 'error') return;
+    // 保存失败、或有冲突待处理时都能点开：冲突的面板被误关了，得有个地方再打开
+    const state = saveEl.dataset.state;
+    if (state !== 'error' && !saveConflict) return;
     if (savePanel) closeSavePanel();
+    else if (saveConflict) reopenConflictPanel();
     else openSavePanel();
   });
   document.addEventListener('pointerdown', (event) => {
@@ -1024,16 +1163,33 @@
   async function saveNow(force) {
     if (!force && (!dirty || saving)) return;
     if (saving) return;
+    // 冲突面板弹着的时候不自动保存：这时候手里的 rev 已经过期，
+    // 再发也只会在服务端被拒，白白刷日志，还会盖掉用户正在看的提示
+    if (saveConflict) return;
     saving = true;
     dirty = false;
     setSaveState('saving');
     try {
-      await window.api.saveCanvas(canvasId, { nodes: collectNodes(), edges: edges, viewport: viewport });
+      const result = await window.api.saveCanvas(
+        canvasId,
+        { nodes: collectNodes(), edges: edges, viewport: viewport },
+        canvasRev
+      );
+      // 服务端会把写入后的新版本号回过来，记下来供下次保存使用
+      if (result && Number.isInteger(result.rev)) canvasRev = result.rev;
       lastSavedAt = Date.now();
       lastSaveError = '';
       if (savePanel) closeSavePanel();
       setSaveState('saved');
     } catch (error) {
+      // 409：这块画布在另一个标签页被改过了。这不是「保存失败」，是本机会覆盖别人的改动，
+      // 必须由用户来定怎么办，所以单独走一条路，不进普通的失败状态机。
+      if (error && error.status === 409 && error.data && error.data.conflict) {
+        dirty = true;
+        saving = false;
+        handleSaveConflict(error.data);
+        return;
+      }
       dirty = true;
       lastSaveError = (error && error.message) || String(error);
       setSaveState('error');
@@ -1042,7 +1198,7 @@
       saving = false;
       // 失败之后不要再自动重试了：一直打不通就一直重试，只会把日志刷满；
       // 改成留给用户点「立即重试」，或切回页面时自动试一次
-      if (dirty && !lastSaveError) saveTimer = setTimeout(saveNow, 1500);
+      if (dirty && !lastSaveError && !saveConflict) saveTimer = setTimeout(saveNow, 1500);
     }
   }
 
@@ -5400,12 +5556,25 @@
     }
     dirty = false;
     try {
-      await window.api.saveCanvas(canvasId, { nodes: collectNodes(), edges: edges, viewport: viewport });
+      const result = await window.api.saveCanvas(
+        canvasId,
+        { nodes: collectNodes(), edges: edges, viewport: viewport },
+        canvasRev
+      );
+      if (result && Number.isInteger(result.rev)) canvasRev = result.rev;
       lastSavedAt = Date.now();
       lastSaveError = '';
       setSaveState('saved');
     } catch (error) {
       dirty = true;
+      // 冲突要单独说清楚：这是一次「前置检查」式的保存（比如启动定时组之前必须先存住），
+      // 调用方看到这个标记就知道该停下来，而不是当成磁盘写不进去
+      if (error && error.status === 409 && error.data && error.data.conflict) {
+        handleSaveConflict(error.data);
+        const conflict = new Error('这块画布在另一个窗口被改过了，先处理一下再继续');
+        conflict.conflict = true;
+        throw conflict;
+      }
       lastSaveError = (error && error.message) || String(error);
       setSaveState('error');
       throw error;
@@ -12181,6 +12350,36 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     return changed;
   }
 
+  // 把服务端返回的画布数据装进内存（bootstrap 首次加载、以及保存冲突后
+  // 「用服务端最新版本」都走这里），保证两条路径的解析规则完全一致
+  function applyServerState(state) {
+    nodes = (state.nodes || []).map((raw) => {
+      const node = migrateNode(raw);
+      const preset = presetOf(node.type);
+      return {
+        id: node.id,
+        type: node.type,
+        x: node.x,
+        y: node.y,
+        w: node.w || preset.w,
+        h: node.h || preset.h,
+        data: node.data || {},
+        createdAt: node.createdAt,
+      };
+    });
+    edges = (state.edges || []).map((edge) => ({
+      id: edge.id,
+      sourceId: edge.sourceId,
+      targetId: edge.targetId,
+      role: edge.role || '',
+    }));
+    viewport = state.viewport && Number.isFinite(state.viewport.zoom)
+      ? { x: state.viewport.x, y: state.viewport.y, zoom: state.viewport.zoom }
+      : { x: 0, y: 0, zoom: 1 };
+    // 版本号跟着服务端走，之后保存都基于这一版
+    canvasRev = state.canvas && Number.isInteger(state.canvas.rev) ? state.canvas.rev : 0;
+  }
+
   async function bootstrap() {
     // 字体 / 字号 / 缩放 / 主题：先套上再画，避免闪一下
     if (window.UITheme) await window.UITheme.load();
@@ -12191,29 +12390,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     await loadModels();
     try {
       const state = await window.api.getCanvas(canvasId);
-      nodes = (state.nodes || []).map((raw) => {
-        const node = migrateNode(raw);
-        const preset = presetOf(node.type);
-        return {
-          id: node.id,
-          type: node.type,
-          x: node.x,
-          y: node.y,
-          w: node.w || preset.w,
-          h: node.h || preset.h,
-          data: node.data || {},
-          createdAt: node.createdAt,
-        };
-      });
-      edges = (state.edges || []).map((edge) => ({
-        id: edge.id,
-        sourceId: edge.sourceId,
-        targetId: edge.targetId,
-        role: edge.role || '',
-      }));
-      viewport = state.viewport && Number.isFinite(state.viewport.zoom)
-        ? { x: state.viewport.x, y: state.viewport.y, zoom: state.viewport.zoom }
-        : { x: 0, y: 0, zoom: 1 };
+      applyServerState(state);
       setCanvasName(state.canvas.name);
       // 老画布统一按建卡顺序排成连续号；号已经连续时这里什么都不改
       const numbered = renumberAll();
@@ -12275,6 +12452,9 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
         fetch('/api/canvases/' + encodeURIComponent(canvasId), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
+          // 这里刻意不带 rev。这是关页面时的最后一道保险，页面马上就要没了，
+          // 没有机会处理 409、也没机会问用户；带上已过期的 rev 只会让这次保存
+          // 直接被拒、白丢最后几秒的改动。宁可覆盖，也要把用户刚敲进去的东西留住。
           body: JSON.stringify({ nodes: collectNodes(), edges: edges, viewport: viewport }),
           keepalive: true,
         });
@@ -12283,9 +12463,12 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       }
     });
 
-    // 切回这个页面时：如果上次是失败状态，说明本机服务可能刚恢复，自动再试一次
+    // 切回这个页面时：
+    // 1) 上次是失败状态 → 本机服务可能刚恢复，自动再试一次；
+    // 2) 有冲突待处理 → 不自动保存，等用户选完（顺手刷新一下「最新版到第几版」）
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
+      if (saveConflict) return;
       if (lastSaveError && dirty) saveNow(true);
     });
   }

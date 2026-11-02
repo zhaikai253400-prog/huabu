@@ -126,6 +126,10 @@ function openDb() {
   // 老库升级：定时组运行记录补一列，存这一轮冻结的备用模型清单
   const runColumns = db.prepare('PRAGMA table_info(schedule_runs)').all().map((row) => row.name);
   if (runColumns.indexOf('backups_json') < 0) db.exec('ALTER TABLE schedule_runs ADD COLUMN backups_json TEXT');
+  // 老库升级：画布表补一列版本号，用来挡住「两个标签页同时改，后保存的把先保存的盖掉」。
+  // 老画布从 0 起算，前端一读到就会带上这个号，行为跟新画布一致。
+  const canvasColumns = db.prepare('PRAGMA table_info(canvases)').all().map((row) => row.name);
+  if (canvasColumns.indexOf('rev') < 0) db.exec('ALTER TABLE canvases ADD COLUMN rev INTEGER NOT NULL DEFAULT 0');
   // 顺手清掉已经不存在的那块画布留下的卡片 / 连线记录，别让它们一直躺在库里
   try {
     db.exec('DELETE FROM nodes WHERE canvas_id NOT IN (SELECT id FROM canvases)');
@@ -187,6 +191,9 @@ function rowToCanvas(row, nodeCount) {
     viewport: row.viewport ? JSON.parse(row.viewport) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // 版本号：每次整块保存 +1。前端读画布时拿到它，保存时原样带回来，
+    // 对不上就说明期间有别人（另一个标签页）改过，服务端会拒收并回最新的
+    rev: Number(row.rev || 0),
     nodeCount: nodeCount === undefined ? 0 : nodeCount,
   };
 }
@@ -354,9 +361,32 @@ function getState(canvasId) {
   return { canvas, nodes, edges, viewport: canvas.viewport };
 }
 
-function saveState(canvasId, payload) {
+// 整块保存画布。
+//
+// expectedRev 是乐观锁：调用方从 getState() 读到 rev，保存时原样带回来。
+// 对不上说明这块画布在「读出来」和「存回去」之间被别处改过了——
+// 典型场景是两个标签页同时开着同一块画布，后保存的会把先保存的整个盖掉。
+// 对不上时这里一个字都不写，直接把服务端现状回给调用方，由它决定怎么办。
+//
+// 不传 expectedRev 就是强制写入（回滚备份、导入、复制画布这类「用户已经明确
+// 点了按钮」的操作走这条路），但版本号照样 +1，好让别的标签页察觉自己过期了。
+//
+// 注意：这个函数全程同步，中间没有任何 await。node:sqlite 是同步 API，
+// 单进程内没有交错执行的机会，所以「读 rev → 比对 → 写入」是原子的，
+// 不需要额外加锁。以后若要在这里加 await，必须先补事务与锁。
+function saveState(canvasId, payload, expectedRev) {
   const canvas = getCanvas(canvasId);
   if (!canvas) return null;
+  const wantsRev = Number.isInteger(expectedRev) ? expectedRev : null;
+  if (wantsRev !== null && wantsRev !== canvas.rev) {
+    return {
+      conflict: true,
+      rev: canvas.rev,
+      savedAt: canvas.updatedAt,
+      nodeCount: canvas.nodeCount,
+      nodeId: canvasId,
+    };
+  }
   const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
   const edges = Array.isArray(payload.edges) ? payload.edges : [];
   const viewport = payload.viewport || canvas.viewport || { x: 0, y: 0, zoom: 1 };
@@ -431,14 +461,15 @@ function saveState(canvasId, payload) {
       );
     });
     database
-      .prepare('UPDATE canvases SET viewport = ?, updated_at = ? WHERE id = ?')
+      .prepare('UPDATE canvases SET viewport = ?, updated_at = ?, rev = rev + 1 WHERE id = ?')
       .run(JSON.stringify(viewport), stamp, canvasId);
     database.exec('COMMIT');
   } catch (error) {
     database.exec('ROLLBACK');
     throw error;
   }
-  return { savedAt: stamp, nodeCount: nodes.length, edgeCount: edges.length };
+  const nextRev = Number((database.prepare('SELECT rev FROM canvases WHERE id = ?').get(canvasId) || {}).rev || 0);
+  return { savedAt: stamp, nodeCount: nodes.length, edgeCount: edges.length, rev: nextRev, canvasId: canvasId };
 }
 
 // 导出单块画布：一个 JSON 文件，换电脑也能单独搬

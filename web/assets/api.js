@@ -1,8 +1,10 @@
 (function () {
   // 请求失败时把 HTTP 状态带上，调用方才能区分「服务暂时连不上」和「真的没有这条记录」
-  function httpError(message, status) {
+  // payload 是服务端回的原始响应体：409 冲突时要用里面的最新状态，不能只留一句话
+  function httpError(message, status, payload) {
     const error = new Error(message);
     error.status = Number(status) || 0;
+    if (payload) error.data = payload;
     return error;
   }
 
@@ -34,7 +36,7 @@
     }
     if (!response.ok) {
       const message = (data && (data.error || data.raw)) || '请求失败（' + response.status + '）';
-      throw httpError(message, response.status);
+      throw httpError(message, response.status, data);
     }
     return data;
   }
@@ -112,7 +114,12 @@
     listCanvases: () => request('GET', '/api/canvases'),
     createCanvas: (name) => request('POST', '/api/canvases', { name }),
     getCanvas: (id) => request('GET', '/api/canvases/' + encodeURIComponent(id)),
-    saveCanvas: (id, state) => request('PUT', '/api/canvases/' + encodeURIComponent(id), state),
+    // rev 是乐观锁：把读画布时拿到的版本号带回去，对不上说明别人改过，
+    // 服务端会回 409，调用方据此去问用户怎么办（见 canvas.js 的保存冲突处理）
+    saveCanvas: (id, state, rev) => {
+      const payload = rev === undefined || rev === null ? state : Object.assign({}, state, { rev: rev });
+      return request('PUT', '/api/canvases/' + encodeURIComponent(id), payload);
+    },
     renameCanvas: (id, name) => request('PATCH', '/api/canvases/' + encodeURIComponent(id), { name }),
     duplicateCanvas: (id) => request('POST', '/api/canvases/' + encodeURIComponent(id) + '/duplicate', {}),
     deleteCanvas: (id) => request('DELETE', '/api/canvases/' + encodeURIComponent(id)),

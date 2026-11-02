@@ -648,20 +648,25 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
 .save-state.saved { color: var(--ok); }
 .save-state.dirty { color: var(--warn); }
 .save-state.error { color: var(--danger); }
+/* 冲突待处理：和「保存失败」用同一个红系，但它是「要你做个决定」而不是「出错了」 */
+.save-state.conflict { color: var(--danger); }
 
 /* 保存失败时圆点可以点：把 8px 的圆点扩出一圈看不见的热区，
    不然要精准点中那个小点太费劲 */
-.rail .save-state.error {
+.rail .save-state.error,
+.rail .save-state.conflict {
   cursor: pointer;
   position: relative;
 }
-.rail .save-state.error::after {
+.rail .save-state.error::after,
+.rail .save-state.conflict::after {
   content: '';
   position: absolute;
   inset: -9px;
   border-radius: 50%;
 }
-.rail .save-state.error::before {
+.rail .save-state.error::before,
+.rail .save-state.conflict::before {
   content: '';
   position: absolute;
   inset: -4px;
@@ -685,6 +690,16 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   max-width: 300px;
   padding: 10px;
   cursor: default;
+}
+
+/* 冲突面板要多放三行说明和三个按钮，比普通失败面板宽一些 */
+.menu.save-panel.conflict-panel { min-width: 280px; max-width: 340px; }
+.save-panel-note {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.82em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 .save-panel-head {
   display: flex;

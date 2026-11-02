@@ -965,8 +965,23 @@ async function handleApi(req, res, pathname, query) {
     }
     if (method === 'PUT') {
       const body = await readBody(req);
-      const result = store.saveState(id, body);
+      const result = store.saveState(id, body, body.rev);
       if (!result) return sendJson(res, 404, { error: '画布不存在' });
+      // 冲突：这块画布在别的地方（多半是另一个标签页）已经被改过。
+      // 这里一个字都不写，把服务端最新状态一起回过去，让前端去问用户怎么办。
+      // 返回 409 而不是 200，前端才能和「保存成功」区分开。
+      if (result.conflict) {
+        log('画布保存被拒：版本号对不上（可能开了两个标签页），已回最新状态');
+        const latest = store.getState(id);
+        return sendJson(res, 409, {
+          error: '这块画布在别的地方被改过了',
+          conflict: true,
+          rev: result.rev,
+          savedAt: result.savedAt,
+          nodeCount: result.nodeCount,
+          state: latest,
+        });
+      }
       backup.maybeBackup(id);
       return sendJson(res, 200, result);
     }
