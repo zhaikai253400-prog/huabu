@@ -348,6 +348,23 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, statusPayload());
   }
 
+  // 库出过状况（打不开、被挪走、重建过）时，让页面能主动问一句。
+  // 只暴露原因和旧库位置，不含任何画布内容，所以不设鉴权。
+  if (pathname === '/api/health' && method === 'GET') {
+    const notice = store.getHealthNotice();
+    return sendJson(res, 200, {
+      ok: !notice,
+      dataDir: paths.DATA_DIR,
+      notice: notice,
+    });
+  }
+
+  // 用户点掉告警后清掉标记，避免每次都弹
+  if (pathname === '/api/health/ack' && method === 'POST') {
+    const had = store.clearHealthNotice();
+    return sendJson(res, 200, { ok: true, cleared: had });
+  }
+
   // 托盘图标里点「退出」时走这里：只认本机钥匙，网页和其它程序都调不动
   if (pathname === '/api/local/shutdown' && method === 'POST') {
     const given = String(req.headers['x-local-token'] || '');

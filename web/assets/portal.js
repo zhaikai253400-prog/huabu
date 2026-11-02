@@ -8,6 +8,105 @@
   const loadingEl = document.getElementById('loading');
   const importInput = document.getElementById('import-file');
   const toolsHint = document.getElementById('tools-hint');
+  const alertEl = document.getElementById('alert-bar');
+
+  // 统一的转义，凡是把服务端文本塞进 innerHTML 的地方都过一遍
+  function escapeHtml(text) {
+    return String(text == null ? '' : text).replace(/[&<>"]/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+    })[c]);
+  }
+
+  // 复制文本。navigator.clipboard 只在安全上下文（https / localhost）里可用，
+  // 有些环境（无头浏览器、被策略禁掉）拿不到，所以要有一层兜底，
+  // 否则用户点「复制」只看到失败，还得自己去路径那一行手选。
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      /* 落到下面的兜底 */
+    }
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      // 放到视口外，避免页面跳动
+      area.style.position = 'fixed';
+      area.style.top = '-1000px';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      return Boolean(ok);
+    } catch {
+      return false;
+    }
+  }
+
+  // 库打不开、被挪走、重建过 —— 这件事必须让用户看见。
+  // 以前只写进控制台，用户打开页面只看到「画布都没了」，会以为数据丢了。
+  async function loadHealth() {
+    if (!alertEl) return;
+    let data = null;
+    try {
+      data = await window.api.health();
+    } catch {
+      // 老版本服务端没有这个接口，静默跳过，不影响门户页其他功能
+      return;
+    }
+    const notice = data && data.notice;
+    if (!notice) {
+      alertEl.classList.add('hidden');
+      alertEl.textContent = '';
+      return;
+    }
+    const when = whenText(notice.at);
+    const reason = notice.reason || '未知原因';
+    alertEl.textContent = '';
+    const head = document.createElement('div');
+    head.className = 'alert-head';
+    head.textContent = '⚠ 数据库异常，已重建空库（' + when + '）';
+    const body = document.createElement('div');
+    body.className = 'alert-body';
+    body.textContent = '原因：' + reason + '。重建后的库是空的，但旧数据没有删——';
+    const pathLine = document.createElement('div');
+    pathLine.className = 'alert-path';
+    pathLine.textContent = notice.oldDir
+      ? '旧数据库已完整保存在：' + notice.oldDir
+      : '旧数据库已挪到回收站目录：' + (data.dataDir || '') + '\\recycle\\db-broken-*';
+    const actions = document.createElement('div');
+    actions.className = 'alert-actions';
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = '复制旧库路径';
+    copyBtn.addEventListener('click', async () => {
+      const text = notice.oldDir || (data.dataDir || '') + '\\recycle';
+      const ok = await copyText(text);
+      copyBtn.textContent = ok ? '已复制' : '复制失败，请手动选中上面的路径';
+    });
+    const ackBtn = document.createElement('button');
+    ackBtn.className = 'ghost';
+    ackBtn.textContent = '我知道了';
+    ackBtn.addEventListener('click', async () => {
+      try {
+        await window.api.healthAck();
+      } catch {
+        /* 清不掉也不影响本次隐藏，下次还会提示 */
+      }
+      alertEl.classList.add('hidden');
+      alertEl.textContent = '';
+    });
+    actions.appendChild(copyBtn);
+    actions.appendChild(ackBtn);
+    body.appendChild(pathLine);
+    alertEl.appendChild(head);
+    alertEl.appendChild(body);
+    alertEl.appendChild(actions);
+    alertEl.classList.remove('hidden');
+  }
 
   function openModal(html, onReady) {
     const mask = document.createElement('div');
@@ -60,13 +159,10 @@
       window.alert('读历史版本失败：' + error.message);
       return;
     }
-    const safe = (text) => String(text == null ? '' : text).replace(/[&<>"]/g, (c) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
-    })[c]);
     const rowOf = (item) =>
-      '<div class="backup-row"><span>' + safe(item.label) + '</span>' +
+      '<div class="backup-row"><span>' + escapeHtml(item.label) + '</span>' +
       '<span class="muted-line">' + sizeText(item.bytes) + '</span>' +
-      '<button data-name="' + safe(item.name) + '">回滚到这里</button></div>';
+      '<button data-name="' + escapeHtml(item.name) + '">回滚到这里</button></div>';
     const recent = list.filter((one) => one.kind !== 'daily');
     const daily = list.filter((one) => one.kind === 'daily');
     let rows = '';
@@ -269,6 +365,7 @@
 
   loadStatus();
   refresh();
+  loadHealth();
 
   document.getElementById('btn-settings').addEventListener('click', () => {
     if (window.UITheme) window.UITheme.openSettings();

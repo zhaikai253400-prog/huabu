@@ -60,6 +60,9 @@
 
   window.api = {
     status: () => request('GET', '/api/status'),
+    // 库出过状况时会带 notice 回来，页面据此显示告警条
+    health: () => request('GET', '/api/health'),
+    healthAck: () => request('POST', '/api/health/ack', {}),
     saveSettings: (body) => request('POST', '/api/settings', body),
     logs: (day) => request('GET', '/api/log' + (day ? '?day=' + encodeURIComponent(day) : '')),
     logDownloadUrl: (day) => '/api/log/download?day=' + encodeURIComponent(day || ''),

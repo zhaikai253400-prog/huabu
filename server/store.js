@@ -8,28 +8,42 @@ const { DB_FILE, RECYCLE_DIR, DATA_DIR, ensureDir } = require('./paths');
 
 let db = null;
 
+// 库出过状况时留个凭证，等着界面上告诉用户一声。
+// 为什么要有这个：以前坏库被悄悄挪进回收站、重建一个空库接着用，
+// 用户打开画布只看到「画布都没了」，完全不知道旧库还在、更不知道在哪，
+// 很容易以为数据丢了。现在把这件事记下来，页面加载时拉一次并显式提示。
+let healthNotice = null;
+
+// 数据库打不开（文件坏了 / 被别的程序占着）时，把坏库挪到回收站，重建一个空库接着用。
+// 返回挪去的目录（成功时）；挪不动返回空串。
+function quarantineDb() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir = path.join(RECYCLE_DIR, 'db-broken-' + stamp);
+  try {
+    ensureDir(dir);
+    let moved = 0;
+    ['canvas.db', 'canvas.db-wal', 'canvas.db-shm'].forEach((name) => {
+      const file = path.join(path.dirname(DB_FILE), name);
+      if (fs.existsSync(file)) {
+        fs.renameSync(file, path.join(dir, name));
+        moved += 1;
+      }
+    });
+    console.log('[数据库] 旧库已挪到回收站：' + dir);
+    // 一个文件都没挪走，说明目录建了但内容是空的，这个路径没有参考价值
+    return moved > 0 ? dir : '';
+  } catch (error) {
+    console.log('[数据库] 旧库挪不动：' + error.message);
+    return '';
+  }
+}
+
 function now() {
   return Date.now();
 }
 
 function newId(prefix) {
   return prefix + '_' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
-}
-
-// 数据库打不开（文件坏了 / 被别的程序占着）时，把坏库挪到回收站，重建一个空库接着用
-function quarantineDb() {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const dir = path.join(RECYCLE_DIR, 'db-broken-' + stamp);
-  try {
-    ensureDir(dir);
-    ['canvas.db', 'canvas.db-wal', 'canvas.db-shm'].forEach((name) => {
-      const file = path.join(path.dirname(DB_FILE), name);
-      if (fs.existsSync(file)) fs.renameSync(file, path.join(dir, name));
-    });
-    console.log('[数据库] 旧库已挪到回收站：' + dir);
-  } catch (error) {
-    console.log('[数据库] 旧库挪不动：' + error.message);
-  }
 }
 
 function openDb() {
@@ -134,9 +148,31 @@ function init() {
       /* 忽略 */
     }
     db = null;
-    quarantineDb();
-    return openDb();
+    const oldDir = quarantineDb();
+    // 重建成功才记告警：重建也失败的话 init 会往上抛，不需要这条提示误导用户
+    const rebuilt = openDb();
+    healthNotice = {
+      level: 'error',
+      code: 'DB_REBUILT',
+      at: Date.now(),
+      oldDir: oldDir,
+      reason: String((error && error.message) || error || '未知原因'),
+    };
+    return rebuilt;
   }
+}
+
+// 供 /api/health 读取。返回副本，避免调用方改到内部状态。
+function getHealthNotice() {
+  if (!healthNotice) return null;
+  return Object.assign({}, healthNotice);
+}
+
+// 用户确认看过之后清掉，避免每次刷新都弹同样的提示
+function clearHealthNotice() {
+  const had = Boolean(healthNotice);
+  healthNotice = null;
+  return had;
 }
 
 function handle() {
@@ -790,6 +826,8 @@ function listResumableTasks() {
 
 module.exports = {
   init,
+  getHealthNotice,
+  clearHealthNotice,
   newId,
   listCanvases,
   getCanvas,

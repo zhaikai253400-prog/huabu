@@ -782,6 +782,89 @@
     return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
+  // 打开画布时问一次服务端：库是不是被重建过？
+  // 库坏掉时旧数据会被挪进回收站、空库顶上，用户在这块画布上看到的是「卡片全没了」。
+  // 不说一声的话，用户第一反应是「我的东西被删了」，然后拼命找也找不到。
+  async function checkHealth() {
+    const bar = document.getElementById('alert-bar');
+    if (!bar) return;
+    let data = null;
+    try {
+      data = await window.api.health();
+    } catch {
+      // 老服务端没这个接口：静默跳过，别在画布页弹错
+      return;
+    }
+    const notice = data && data.notice;
+    if (!notice) return;
+    // 保存状态圆点上挂个红点，侧栏收起来时也能看出「有事」
+    if (saveEl) saveEl.classList.add('db-rebuilt');
+    const where = notice.oldDir || (data.dataDir || '') + '\\recycle';
+    bar.textContent = '';
+
+    const head = document.createElement('div');
+    head.className = 'alert-head';
+    head.textContent = '⚠ 数据库异常，已重建空库（' + clockText(notice.at) + '）· 这块画布可能是空的';
+
+    const body = document.createElement('div');
+    body.className = 'alert-body';
+    body.textContent = '原因：' + (notice.reason || '未知原因') + '。旧数据没有删除，完整保存在下面这个目录，把里面的 canvas.db 复制回 data 目录再重启就能恢复：';
+
+    const pathLine = document.createElement('div');
+    pathLine.className = 'alert-path';
+    pathLine.textContent = where;
+
+    const actions = document.createElement('div');
+    actions.className = 'alert-actions';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = '复制旧库路径';
+    copyBtn.addEventListener('click', async () => {
+      // clipboard API 在部分环境拿不到，用 execCommand 兜底，别让用户只能手选
+      let ok = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(where);
+          ok = true;
+        }
+      } catch {
+        /* 落到兜底 */
+      }
+      if (!ok) {
+        try {
+          const area = document.createElement('textarea');
+          area.value = where;
+          area.setAttribute('readonly', '');
+          area.style.position = 'fixed';
+          area.style.top = '-1000px';
+          document.body.appendChild(area);
+          area.select();
+          ok = document.execCommand('copy');
+          area.remove();
+        } catch {
+          ok = false;
+        }
+      }
+      copyBtn.textContent = ok ? '已复制' : '复制失败，请手动选中上面的路径';
+    });
+
+    const ackBtn = document.createElement('button');
+    ackBtn.className = 'ghost';
+    ackBtn.textContent = '收起';
+    ackBtn.addEventListener('click', () => {
+      bar.classList.add('hidden');
+      // 只收本次页面，不调 ack：门户页还要继续提示，直到用户在那里点「我知道了」
+    });
+
+    actions.appendChild(copyBtn);
+    actions.appendChild(ackBtn);
+    bar.appendChild(head);
+    bar.appendChild(body);
+    bar.appendChild(pathLine);
+    bar.appendChild(actions);
+    bar.classList.remove('hidden');
+  }
+
   // 保存失败时点圆点弹出来的面板：说清失败原因与上次成功时间，并给出两条出路
   function openSavePanel() {
     closeSavePanel();
@@ -12152,6 +12235,8 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       resumeRunningTasks();
       startSchedulePolling();
       startTaskAdoption();
+      // 库出过状况时提醒一句：画布页里看到的可能是重建后的空库
+      checkHealth();
     } catch (error) {
       loadingEl.textContent = '打开画布失败：' + error.message;
       return;
