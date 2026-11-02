@@ -2807,6 +2807,249 @@
     return out.slice(0, CARD_HISTORY_LIMIT);
   }
 
+  // 照这一版参数改回去：参数、模型、尾部提示词都回到那一版的样子。
+  // 不动结果文件本身 —— 换结果是「切换版本」的事，这里只管下次生成用什么。
+  function applyVersionParams(node, entry) {
+    const data = nodeData(node);
+    const want = cardParamsFromEntry(entry, node);
+    const defs = paramDefsOf(node, nodeData(node));
+    // 先把「要改什么」算清楚，一处数据都不动。因为 pushHistory 拍的是改动前的样子，
+    // 得先知道确实有改动才去拍 —— 否则参数本来就一样时也会往撤销栈里压一条与当前
+    // 完全相同的快照，用户按「撤销」会看着像没反应（其实只是退到了同一个状态）。
+    const plan = [];
+    defs.forEach((def) => {
+      if (!(def.key in want)) return;
+      const before = String(data.params[def.key] == null ? '' : data.params[def.key]);
+      if (before === want[def.key]) return;
+      plan.push({ key: def.key, value: want[def.key], label: def.label + ' ' + paramText(def, want[def.key]) });
+    });
+    const entryModel = String((entry && entry.model) || '');
+    const modelNext = entryModel && entryModel !== String(data.model || '') ? entryModel : '';
+    // 尾部提示词：那一版用的预设若还在，就一起换过去（预设被删了就保留现在的，不乱清）
+    const tailPresetId = String((entry && entry.tailPresetId) || '');
+    const tailNext =
+      supportsTail(node) && tailPresetId && tailPresetById(tailPresetId) &&
+      String((data.tailPrompt && data.tailPrompt.presetId) || '') !== tailPresetId
+        ? tailPresetId
+        : '';
+    const changed = plan.map((one) => one.label);
+    if (modelNext) changed.push('模型 ' + modelNext);
+    if (tailNext) changed.push('尾部提示词 ' + (String((entry && entry.tailPresetName) || '').trim() || tailNext));
+
+    if (!changed.length) {
+      toast('这一版的参数跟现在的完全一样，没什么要改的');
+      return 0;
+    }
+    pushHistory();
+    plan.forEach((one) => {
+      data.params[one.key] = one.value;
+    });
+    if (modelNext) data.model = modelNext;
+    if (tailNext) data.tailPrompt = { enabled: true, presetId: tailNext };
+    normalizeParams(node);
+    refreshNode(node);
+    scheduleSave();
+    return changed;
+  }
+
+  // 生成来源视图：把这张卡片「每次生成用了什么」摊开成时间线。
+  // 数据早就在 data.history 里了（最近 20 版），缺的只是一个看得见的地方。
+  function openVersionPanel(node) {
+    const data = nodeData(node);
+    const entries = versionEntriesOf(data);
+    if (!entries.length) {
+      toast('这张卡片还没有生成过，没有可看的来源');
+      return;
+    }
+    const currentUrl = data.result && data.result.url ? String(data.result.url) : '';
+
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask version-mask';
+    const dialog = document.createElement('div');
+    dialog.className = 'modal modal-version';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', '生成来源');
+
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const title = document.createElement('b');
+    title.textContent = '生成来源';
+    head.appendChild(title);
+    const headNote = document.createElement('span');
+    headNote.className = 'muted-line version-head-note';
+    headNote.textContent = locateLabelOf(node) + ' · 共 ' + entries.length + ' 版';
+    head.appendChild(headNote);
+    const grow = document.createElement('span');
+    grow.className = 'grow';
+    head.appendChild(grow);
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'ghost';
+    closeBtn.type = 'button';
+    closeBtn.textContent = '关闭';
+    head.appendChild(closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body version-body';
+
+    if (entries.length === 1) {
+      const only = document.createElement('div');
+      only.className = 'version-empty';
+      only.textContent = '只生成过一版。再生成几次，这里就会按时间列出每一版用了什么。';
+      body.appendChild(only);
+    }
+
+    const diffNote = document.createElement('span');
+    diffNote.className = 'muted-line version-diff-note';
+    diffNote.textContent = '';
+
+    const repaint = () => {
+      const list = document.createElement('div');
+      list.className = 'version-timeline';
+      const now = versionEntriesOf(nodeData(node));
+      const shownCurrent = nodeData(node).result && nodeData(node).result.url ? String(nodeData(node).result.url) : '';
+      let differs = 0;
+      now.forEach((entry, index) => {
+        const isCurrent = String(entry.result.url) === shownCurrent;
+        const row = document.createElement('div');
+        row.className = 'version-row' + (isCurrent ? ' current' : '');
+
+        // 时间线左边那一列：圆点 + 竖线
+        const rail = document.createElement('div');
+        rail.className = 'version-rail';
+        const dot = document.createElement('span');
+        dot.className = 'version-dot';
+        rail.appendChild(dot);
+        if (index < now.length - 1) {
+          const line = document.createElement('span');
+          line.className = 'version-line';
+          rail.appendChild(line);
+        }
+        row.appendChild(rail);
+
+        const card = document.createElement('div');
+        card.className = 'version-card';
+
+        const thumb = document.createElement('button');
+        thumb.type = 'button';
+        thumb.className = 'version-thumb';
+        thumb.appendChild(versionMediaThumb(entry));
+        thumb.title = isCurrent ? '这是卡片上正在显示的这一版' : '点一下，把卡片切到这一版';
+        thumb.addEventListener('click', () => {
+          switchCardVersion(node, entry.result.url);
+          repaint();
+        });
+        card.appendChild(thumb);
+
+        const info = document.createElement('div');
+        info.className = 'version-info';
+
+        const topLine = document.createElement('div');
+        topLine.className = 'version-top';
+        const when = document.createElement('b');
+        when.className = 'version-when';
+        when.textContent = timeTextOf(entry.at) || '时间不详';
+        topLine.appendChild(when);
+        if (isCurrent) {
+          const nowTag = document.createElement('span');
+          nowTag.className = 'version-tag-now';
+          nowTag.textContent = '当前显示';
+          topLine.appendChild(nowTag);
+        }
+        if (index === 0 && !isCurrent) {
+          const latestTag = document.createElement('span');
+          latestTag.className = 'version-tag-latest';
+          latestTag.textContent = '最近一版';
+          topLine.appendChild(latestTag);
+        }
+        info.appendChild(topLine);
+
+        const summary = versionSummaryOf(entry, node);
+        const summaryLine = document.createElement('div');
+        summaryLine.className = 'version-summary';
+        summaryLine.textContent = summary.length ? summary.join(' · ') : '这一版没有留下参数记录';
+        info.appendChild(summaryLine);
+
+        const prompt = String(entry.submittedPrompt || entry.mainPrompt || '').trim();
+        if (prompt) {
+          const promptLine = document.createElement('div');
+          promptLine.className = 'version-prompt';
+          promptLine.textContent = prompt;
+          promptLine.title = prompt;
+          info.appendChild(promptLine);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'version-actions';
+        if (!isCurrent) {
+          const useBtn = document.createElement('button');
+          useBtn.type = 'button';
+          useBtn.className = 'ghost';
+          useBtn.textContent = '切到这一版';
+          useBtn.title = '把卡片上显示的结果换成这一版（旧文件都保留）';
+          useBtn.addEventListener('click', () => {
+            switchCardVersion(node, entry.result.url);
+            repaint();
+          });
+          actions.appendChild(useBtn);
+        } else {
+          const nowText = document.createElement('span');
+          nowText.className = 'muted-line';
+          nowText.textContent = '现在用的就是这一版';
+          actions.appendChild(nowText);
+        }
+        if (versionParamsDiffer(entry, node)) {
+          differs += 1;
+          const backBtn = document.createElement('button');
+          backBtn.type = 'button';
+          backBtn.className = 'ghost';
+          backBtn.textContent = '照这版参数改回来';
+          backBtn.title = '把模型 / 参数 / 尾部提示词改回这一版的样子（下次生成用它），不改已生成的结果';
+          backBtn.addEventListener('click', () => {
+            const changed = applyVersionParams(node, entry);
+            if (changed && changed.length) {
+              repaint();
+              toast('已改回这一版的设置：' + changed.join('、'), 6000, [{ label: '撤销', run: () => undo() }]);
+            }
+          });
+          actions.appendChild(backBtn);
+        }
+        if (actions.childNodes.length) info.appendChild(actions);
+
+        card.appendChild(info);
+        row.appendChild(card);
+        list.appendChild(row);
+      });
+      body.textContent = '';
+      body.appendChild(list);
+      diffNote.textContent = differs ? differs + ' 版的参数与现在不一样' : '各版参数与现在的一致';
+    };
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    foot.appendChild(diffNote);
+    const footGrow = document.createElement('span');
+    footGrow.className = 'grow';
+    foot.appendChild(footGrow);
+    const closeFoot = document.createElement('button');
+    closeFoot.className = 'primary';
+    closeFoot.type = 'button';
+    closeFoot.textContent = '知道了';
+    foot.appendChild(closeFoot);
+
+    dialog.append(head, body, foot);
+    mask.appendChild(dialog);
+    document.body.appendChild(mask);
+    repaint();
+
+    const close = () => mask.remove();
+    closeBtn.addEventListener('click', close);
+    closeFoot.addEventListener('click', close);
+    mask.addEventListener('click', (event) => {
+      if (event.target === mask) close();
+    });
+  }
+
   function versionTimeText(at) {
     const value = Number(at);
     if (!value) return '';
@@ -2814,6 +3057,80 @@
     if (!Number.isFinite(date.getTime())) return '';
     const pad = (n) => String(n).padStart(2, '0');
     return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+  }
+
+
+  // ---------- 生成来源视图（清单 23）----------
+  //
+  // 历史里存的 params 是「接口形状」（sizeKey / 数字 count / duration 也是数字），
+  // 卡片上的是「面板形状」（size / 字符串）。直接把这坨盖回卡片，会多出 sizeKey 这种
+  // 面板不认的键，参数芯片就跟着显示错。所以搬回来之前先把键名对齐。
+  // 反向（面板 → 历史）也要有，好比较「这版参数与现在是否一致」。
+  const PARAM_KEY_ALIAS = { sizeKey: 'size' };
+
+  // 把历史里那份参数整理成「面板参数」的样子（只保留这张卡片真有的参数键）
+  function cardParamsFromEntry(entry, node) {
+    const src = (entry && entry.params && typeof entry.params === 'object' ? entry.params : {}) || {};
+    const defs = paramDefsOf(node, nodeData(node));
+    const out = {};
+    if (!defs.length) return out;
+    defs.forEach((def) => {
+      let value = src[def.key];
+      if (value == null) {
+        // 历史里可能叫 sizeKey，面板上叫 size
+        Object.keys(PARAM_KEY_ALIAS).some((alias) => {
+          if (PARAM_KEY_ALIAS[alias] !== def.key) return false;
+          if (src[alias] == null) return false;
+          value = src[alias];
+          return true;
+        });
+      }
+      if (value == null) return;
+      // 面板参数一律是字符串，历史里可能是数字
+      out[def.key] = String(value);
+    });
+    return out;
+  }
+
+  // 两版参数是否一样（面板形状对面板形状）。参数个数不同、值不同都算不一样。
+  function sameParams(a, b) {
+    const left = a && typeof a === 'object' ? a : {};
+    const right = b && typeof b === 'object' ? b : {};
+    const keys = Object.keys(left).concat(Object.keys(right)).filter((key, index, arr) => arr.indexOf(key) === index);
+    return keys.every((key) => String(left[key] == null ? '' : left[key]) === String(right[key] == null ? '' : right[key]));
+  }
+
+  // 一版结果在面板里怎么描述：模型 · 参数 · 参考素材 · 尾部提示词
+  function versionSummaryOf(entry, node) {
+    const parts = [];
+    const model = String((entry && entry.model) || '');
+    if (model) parts.push('模型 ' + model);
+    const params = cardParamsFromEntry(entry, node);
+    const defs = paramDefsOf(node, nodeData(node));
+    defs.forEach((def) => {
+      const value = params[def.key];
+      if (value == null || value === '') return;
+      parts.push(def.label + ' ' + paramText(def, value));
+    });
+    const refs = entry && Array.isArray(entry.refs) ? entry.refs : [];
+    if (refs.length) parts.push(refs.length + ' 个参考素材');
+    const tail = String((entry && entry.tailPresetName) || '').trim();
+    if (tail) parts.push('尾部：' + tail);
+    return parts;
+  }
+
+  // 「这一版的参数与现在卡片上的是否一致」—— 决定要不要给「照这版参数改回去」按钮。
+  function versionParamsDiffer(entry, node) {
+    const data = nodeData(node);
+    const want = cardParamsFromEntry(entry, node);
+    const now = {};
+    Object.keys(want).forEach((key) => {
+      now[key] = String((data.params && data.params[key]) == null ? '' : data.params[key]);
+    });
+    if (!sameParams(want, now)) return true;
+    const entryModel = String((entry && entry.model) || '');
+    if (entryModel && entryModel !== String(data.model || '')) return true;
+    return false;
   }
 
   function versionMediaThumb(entry) {
@@ -2896,6 +3213,18 @@
     hint.textContent = '点缩略图切换，旧文件都会保留';
     head.appendChild(title);
     head.appendChild(hint);
+    // 「这一版当初是怎么生成的」得有个地方看 —— 缩略图只能看到结果
+    const sourceBtn = document.createElement('button');
+    sourceBtn.type = 'button';
+    sourceBtn.className = 'version-source-btn';
+    sourceBtn.textContent = '生成来源';
+    sourceBtn.title = '看每一版用了什么模型、参数、提示词、参考素材';
+    sourceBtn.addEventListener('pointerdown', (event) => event.stopPropagation());
+    sourceBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openVersionPanel(node);
+    });
+    head.appendChild(sourceBtn);
     wrap.appendChild(head);
 
     const list = document.createElement('div');
@@ -9487,6 +9816,10 @@
             run: () => (data.running ? cancelGenerate(node) : startGenerate(node)),
           });
           if (node.type === 'video' || node.type === 'quick') items.push({ label: '提取尾帧', run: () => startTailFrame(node) });
+          // 生成过一次就有来源可看（哪怕只有一条），但没生成过就不给这项
+          if (versionEntriesOf(data).length >= 1) {
+            items.push({ label: '生成来源…', run: () => openVersionPanel(node) });
+          }
         }
         items.push({ sep: true });
       }

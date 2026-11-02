@@ -4581,6 +4581,105 @@ input::placeholder { color: var(--placeholder); }
   font-weight: 700;
 }
 
+/* 版本条右上角的「生成来源」：缩略图只能看到结果，这里能看当初怎么生成的 */
+.version-source-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font: inherit;
+  font-size: 0.68em;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.version-source-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- 生成来源视图（清单 23）---------- */
+.version-mask { z-index: 340; }
+.modal-version { width: min(680px, 94vw); }
+.version-head-note { margin-left: 10px; }
+.version-body { max-height: min(68vh, 620px); overflow-y: auto; }
+.version-empty {
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.version-timeline { display: flex; flex-direction: column; }
+
+.version-row { display: flex; gap: 10px; }
+.version-rail {
+  flex: 0 0 auto;
+  width: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 14px;
+}
+.version-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--line-strong);
+  background: var(--surface);
+}
+.version-row.current .version-dot { border-color: var(--accent); background: var(--accent); }
+.version-line { flex: 1 1 auto; width: 2px; background: var(--line); margin-top: 3px; }
+
+.version-card {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.version-row:last-child .version-card { border-bottom: 0; }
+
+.version-thumb {
+  flex: 0 0 auto;
+  width: 84px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  overflow: hidden;
+  cursor: pointer;
+}
+.version-thumb:hover { border-color: var(--accent); }
+.version-row.current .version-thumb { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.version-thumb img,
+.version-thumb video { display: block; width: 100%; height: 56px; object-fit: cover; background: var(--media-bg); }
+.version-thumb .version-audio { height: 56px; border-radius: 0; }
+
+.version-info { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.version-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.version-when { font-size: 0.86em; color: var(--text); }
+.version-tag-now,
+.version-tag-latest {
+  font-size: 0.68em;
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+.version-tag-now { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.version-tag-latest { background: var(--surface-2); color: var(--muted); }
+.version-summary { font-size: 0.82em; color: var(--muted); word-break: break-word; }
+.version-prompt {
+  font-size: 0.8em;
+  color: var(--placeholder);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.version-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; flex-wrap: wrap; }
+.version-actions button { font-size: 0.78em; padding: 3px 10px; }
+
 /* ---------- 尾部提示词：卡片里的选择块 ---------- */
 .tail-card {
   display: flex;
