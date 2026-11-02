@@ -2343,6 +2343,14 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
 .menu .sep { height: 1px; background: var(--line); margin: 5px 2px; }
 .menu button .key { float: right; color: var(--muted); font-size: 0.85em; margin-left: 18px; }
 .menu button.danger-item:hover { background: var(--tint-bad-bg); color: var(--danger); }
+/* 快速定位里「现在没有」的那几项：留在原位但点不动，位置稳定好找 */
+.menu button.disabled-item,
+.menu button.disabled-item:hover {
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.55;
+  cursor: default;
+}
 
 .toast {
   position: fixed;

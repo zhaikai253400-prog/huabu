@@ -1272,6 +1272,9 @@
     saving = true;
     dirty = false;
     setSaveState('saving');
+    // 保存前给这次改动过的卡片盖个时间戳，供「快速定位 → 跳到最近修改」排序用。
+    // 放在这里而不是每个编辑点：编辑点有四十多处，漏一个就有一类改动永远定位不到
+    stampTouchedCards();
     try {
       const result = await window.api.saveCanvas(
         canvasId,
@@ -8033,6 +8036,8 @@
     });
     // 生成状态会变（跑完 / 失败），筛选的颜色跟着刷新一下
     if (filterActive() || worldEl.classList.contains('filtering')) paintFilter();
+    // 定位按钮上的「正在生成」计数也跟着刷新
+    paintLocateBadge();
     placeAlignBar();
   }
 
@@ -9399,6 +9404,13 @@
       }
       const button = document.createElement('button');
       if (item.danger) button.className = 'danger-item';
+      if (item.disabled) {
+        // 没得跳的项留在菜单里但点不动：菜单结构稳定，一眼看出「现在没有」，
+        // 比整项消失好 —— 消失会让人以为功能没了
+        button.classList.add('disabled-item');
+        button.disabled = true;
+        button.title = item.disabledHint || '这一项现在没有内容';
+      }
       button.textContent = item.label;
       if (item.key) {
         const key = document.createElement('span');
@@ -9407,6 +9419,7 @@
         button.appendChild(key);
       }
       button.addEventListener('click', () => {
+        if (item.disabled) return;
         closeMenu();
         item.run();
       });
@@ -10115,6 +10128,308 @@
     scheduleSave();
   }
 
+  // 一批卡片的外接矩形。没东西可算就返回 null（调用方据此决定要不要 fallback）。
+  // measure 可选：默认按卡片当前显示尺寸；测试里可以塞一个替身。
+  function boundsOfNodes(list, measure) {
+    const arr = (Array.isArray(list) ? list : []).filter(Boolean);
+    if (!arr.length) return null;
+    const measureOf = typeof measure === 'function' ? measure : sizeOf;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    arr.forEach((node) => {
+      const size = measureOf(node) || { w: 0, h: 0 };
+      minX = Math.min(minX, node.x);
+      minY = Math.min(minY, node.y);
+      maxX = Math.max(maxX, node.x + size.w);
+      maxY = Math.max(maxY, node.y + size.h);
+    });
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+    if (!Number.isFinite(maxX) || !Number.isFinite(maxY)) return null;
+    return {
+      minX: minX,
+      minY: minY,
+      maxX: maxX,
+      maxY: maxY,
+      w: Math.max(1, maxX - minX),
+      h: Math.max(1, maxY - minY),
+    };
+  }
+
+  // 由外接矩形算出「刚好框住」的缩放与平移。view 是可视区尺寸。
+  // 抽成纯函数是为了单测能直接验算，不用真起一个浏览器。
+  function fitTransformOf(bounds, view, pad) {
+    const gap = Math.max(24, Number(pad) || 70);
+    const width = Math.max(60, (Number(view && view.w) || 0) - gap * 2);
+    const height = Math.max(60, (Number(view && view.h) || 0) - gap * 2);
+    const zoom = clamp(Math.min(width / (bounds.w || 1), height / (bounds.h || 1)), MIN_ZOOM, MAX_ZOOM);
+    return {
+      zoom: zoom,
+      x: gap + (width - bounds.w * zoom) / 2 - bounds.minX * zoom,
+      y: gap + (height - bounds.h * zoom) / 2 - bounds.minY * zoom,
+    };
+  }
+
+  // 把画面缩放到「刚好框住这一批卡片」。fitView 是它的全量特例，
+  // 快速定位的几种入口都用这一个，缩放规则不会各写一套。
+  function fitToNodes(list, opts) {
+    const bounds = boundsOfNodes(list);
+    if (!bounds) return false;
+    const next = fitTransformOf(bounds, { w: viewportEl.clientWidth, h: viewportEl.clientHeight }, opts && opts.pad);
+    viewport.zoom = next.zoom;
+    viewport.x = next.x;
+    viewport.y = next.y;
+    applyViewport();
+    return true;
+  }
+
+  // 选中这一批卡片并跳过去。单选时不缩小 —— 直接保持当前缩放居中，
+  // 不然「跳到最近完成」这种只有一张的场景会被硬拉得很近或很远。
+  function locateNodes(list, opts) {
+    const arr = (Array.isArray(list) ? list : []).filter(Boolean);
+    if (!arr.length) return false;
+    selection.clear();
+    selectedEdgeId = null;
+    arr.forEach((node) => selection.add(node.id));
+    refreshSelection();
+    if (arr.length === 1) {
+      const node = arr[0];
+      const size = sizeOf(node);
+      const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1;
+      viewport.zoom = zoom;
+      viewport.x = viewportEl.clientWidth / 2 - (node.x + size.w / 2) * zoom;
+      viewport.y = viewportEl.clientHeight / 2 - (node.y + size.h / 2) * zoom;
+      applyViewport();
+    } else {
+      fitToNodes(arr, opts);
+    }
+    scheduleSave();
+    return true;
+  }
+
+  // ---------- 快速定位（清单 22）----------
+  //
+  // 「最近改过」需要「每张卡片各不相同」的时间点。库里的 nodes.updated_at 是整块
+  // 保存时统一盖的戳 —— 同一块画布的每张卡片都是同一个值，比不出先后，用不了。
+  //
+  // 所以这里自己记：每次保存前，把每张卡片当前的样子算一个签名，跟上次保存时
+  // 留下的签名比一比，变过的就盖上此刻的时间。好处是只有一处逻辑，不用在
+  // 四十多个「改内容」的地方各插一行 —— 那种写法漏一个就有一类改动永远定位不到。
+  // 顺带还天然排除了「只是平移了画面」这种不算改卡片的保存。
+  let touchSignatures = new Map();
+  let touchBaselineReady = false;
+
+  function cardSignature(node) {
+    const data = nodeData(node);
+    return [
+      Math.round(node.x),
+      Math.round(node.y),
+      Math.round(node.w),
+      Math.round(node.h),
+      data.text,
+      data.title,
+      data.model,
+      JSON.stringify(data.params || {}),
+      data.result ? String(data.result.url || '') : '',
+      Array.isArray(data.history) ? data.history.length : 0,
+      data.hidden ? 1 : 0,
+      data.locked ? 1 : 0,
+    ].join('\u0001');
+  }
+
+  // 返回这次保存里被改过的卡片张数。第一次调用只建基线不算改过 ——
+  // 否则刚打开画布就会把所有卡片都盖成「刚刚」。
+  function stampTouchedCards() {
+    const next = new Map();
+    let changed = 0;
+    const at = Date.now();
+    nodes.forEach((node) => {
+      const sig = cardSignature(node);
+      next.set(node.id, sig);
+      if (!touchBaselineReady) return;
+      if (touchSignatures.get(node.id) === sig) return;
+      nodeData(node).editedAt = at;
+      changed += 1;
+    });
+    touchSignatures = next;
+    touchBaselineReady = true;
+    return changed;
+  }
+
+  function touchedAtOf(node) {
+    const data = nodeData(node);
+    const seen = [
+      Number(data.editedAt) || 0,
+      Number(data.lastSubmission && data.lastSubmission.at) || 0,
+      Number(data.result && data.result.at) || 0,
+    ];
+    const history = Array.isArray(data.history) ? data.history : [];
+    if (history.length) seen.push(Number(history[0] && history[0].at) || 0);
+    return Math.max.apply(null, seen.concat([0]));
+  }
+
+  function finishedAtOf(node) {
+    const data = nodeData(node);
+    return Number(data.result && data.result.at) || 0;
+  }
+
+  // 按某个时间戳挑「最新的那一张」。一张都没有（或全没时间）时返回 null，
+  // 调用方据此把菜单项置灰，而不是点下去什么都不发生。
+  function newestBy(list, stampOf) {
+    let best = null;
+    let bestAt = -1;
+    (Array.isArray(list) ? list : []).forEach((node) => {
+      if (!node) return;
+      const at = Number(stampOf(node)) || 0;
+      if (at > bestAt) {
+        bestAt = at;
+        best = node;
+      }
+    });
+    return best && bestAt > 0 ? { node: best, at: bestAt } : null;
+  }
+
+  // 此刻真的在跑的卡片：自己生成中的，加上定时组里正在跑的那几张（连同组卡本身）。
+  // includeHidden 用来区分「没有」和「有但被藏起来了」—— 后者得先放出来才看得到。
+  function runningTargets(opts) {
+    const includeHidden = Boolean(opts && opts.includeHidden);
+    const seen = new Set();
+    const out = [];
+    const push = (node) => {
+      if (!node || seen.has(node.id)) return;
+      if (!includeHidden && isHidden(node)) return;
+      seen.add(node.id);
+      out.push(node);
+    };
+    nodes.forEach((node) => {
+      if (isSchedule(node)) {
+        const run = scheduleRuns.get(node.id) || null;
+        const items = (run && run.items) || [];
+        items.forEach((one) => {
+          if (one && one.status === 'running') push(byId(one.nodeId));
+        });
+        if (items.some((one) => one && one.status === 'running')) push(node);
+        return;
+      }
+      if (isTaskActive(nodeData(node))) push(node);
+    });
+    return out;
+  }
+
+  function sinceTextOf(at) {
+    const ms = Number(at) || 0;
+    if (!ms) return '';
+    const diff = Date.now() - ms;
+    if (diff < 60 * 1000) return '刚刚';
+    if (diff < 3600 * 1000) return Math.floor(diff / 60000) + ' 分钟前';
+    if (diff < 86400 * 1000) return Math.floor(diff / 3600000) + ' 小时前';
+    if (diff < 30 * 86400 * 1000) return Math.floor(diff / 86400000) + ' 天前';
+    return timeTextOf(ms);
+  }
+
+  // 一张卡片在定位菜单里怎么称呼：标题 → 序号徽章 → 类型名
+  function locateLabelOf(node) {
+    const data = nodeData(node);
+    const title = String(data.title || '').trim();
+    if (title) return title;
+    const tag = tagOf(node);
+    if (tag) return tag;
+    const preset = presetOf(node.type);
+    return (preset && preset.label) || '卡片';
+  }
+
+  function clipText(text, max) {
+    const str = String(text == null ? '' : text);
+    const limit = Math.max(2, Number(max) || 14);
+    return str.length > limit ? str.slice(0, limit - 1) + '…' : str;
+  }
+
+  function locateRunning() {
+    const list = runningTargets();
+    if (!list.length) {
+      const hidden = runningTargets({ includeHidden: true }).length;
+      toast(
+        hidden
+          ? '有 ' + hidden + ' 张卡片正在生成，但都被藏起来了。先按 Ctrl+Shift+H 把它们放出来'
+          : '现在没有正在生成的卡片'
+      );
+      return;
+    }
+    locateNodes(list, { pad: 90 });
+    toast('正在生成的有 ' + list.length + ' 张，已经圈出来了', 6000, [
+      {
+        label: '打开任务面板',
+        run: () => {
+          if (window.TaskPanel && window.TaskPanel.open) window.TaskPanel.open();
+        },
+      },
+    ]);
+  }
+
+  // kind='touched' 找最近改过的，其余找最近生成完成的
+  function locateNewest(kind) {
+    const byTouched = kind === 'touched';
+    const hit = newestBy(visibleNodes(), byTouched ? touchedAtOf : finishedAtOf);
+    if (!hit) {
+      toast(byTouched ? '这些卡片还没有改过，找不到「最近修改」' : '还没有生成完成的卡片');
+      return;
+    }
+    locateNodes([hit.node], { pad: 90 });
+    const when = sinceTextOf(hit.at);
+    toast(
+      (byTouched ? '最近修改：' : '最近完成：') + locateLabelOf(hit.node) + (when ? '（' + when + '）' : ''),
+      6000,
+      [{ label: '展开这张卡片', run: () => setExpanded(hit.node.id) }]
+    );
+  }
+
+  // 定位按钮：弹出三个入口。每项都把「会跳到哪张、多久以前」写在脸上，
+  // 免得点下去才发现跳错了地方；没得跳的项置灰，点不动。
+  function openLocateMenu(clientX, clientY) {
+    const running = runningTargets();
+    const hiddenRunning = runningTargets({ includeHidden: true }).length - running.length;
+    const finished = newestBy(visibleNodes(), finishedAtOf);
+    const touched = newestBy(visibleNodes(), touchedAtOf);
+    const items = [
+      {
+        label: running.length
+          ? '只看正在生成的（' + running.length + ' 张）'
+          : hiddenRunning
+          ? '只看正在生成的（' + hiddenRunning + ' 张被藏起来了）'
+          : '只看正在生成的（现在没有）',
+        disabled: running.length === 0,
+        disabledHint: hiddenRunning ? '先按 Ctrl+Shift+H 把藏起来的卡片放出来' : '现在没有卡片在生成',
+        run: locateRunning,
+      },
+      {
+        label: finished
+          ? '跳到最近完成：' + clipText(locateLabelOf(finished.node), 14)
+          : '跳到最近完成（还没有生成完成的）',
+        key: finished ? sinceTextOf(finished.at) : '',
+        disabled: !finished,
+        run: () => locateNewest('finished'),
+      },
+      {
+        label: touched
+          ? '跳到最近修改：' + clipText(locateLabelOf(touched.node), 14)
+          : '跳到最近修改（还没有改过的）',
+        key: touched ? sinceTextOf(touched.at) : '',
+        disabled: !touched,
+        run: () => locateNewest('touched'),
+      },
+    ];
+    openMenu(clientX, clientY, items);
+  }
+
+  function paintLocateBadge() {
+    const badge = document.getElementById('locate-badge');
+    if (!badge) return;
+    const count = runningTargets().length;
+    badge.textContent = count + '';
+    badge.hidden = count === 0;
+  }
+
   function fitView() {
     if (!nodes.length) {
       resetView();
@@ -10126,25 +10441,7 @@
       resetView();
       return;
     }
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    list.forEach((node) => {
-      const size = sizeOf(node);
-      minX = Math.min(minX, node.x);
-      minY = Math.min(minY, node.y);
-      maxX = Math.max(maxX, node.x + size.w);
-      maxY = Math.max(maxY, node.y + size.h);
-    });
-    const pad = 70;
-    const width = viewportEl.clientWidth - pad * 2;
-    const height = viewportEl.clientHeight - pad * 2;
-    const zoom = clamp(Math.min(width / (maxX - minX || 1), height / (maxY - minY || 1)), MIN_ZOOM, MAX_ZOOM);
-    viewport.zoom = zoom;
-    viewport.x = pad + (width - (maxX - minX) * zoom) / 2 - minX * zoom;
-    viewport.y = pad + (height - (maxY - minY) * zoom) / 2 - minY * zoom;
-    applyViewport();
+    if (!fitToNodes(list, { pad: 70 })) resetView();
     scheduleSave();
   }
 
@@ -13160,6 +13457,13 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     document.getElementById('btn-undo').addEventListener('click', undo);
     document.getElementById('btn-fit').addEventListener('click', fitView);
     document.getElementById('btn-reset').addEventListener('click', resetView);
+    const locateBtn = document.getElementById('btn-locate');
+    if (locateBtn) {
+      locateBtn.addEventListener('click', (event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        openLocateMenu(rect.left, rect.bottom + 6);
+      });
+    }
     const tasksBtn = document.getElementById('btn-tasks');
     if (tasksBtn && window.TaskPanel) {
       tasksBtn.addEventListener('click', () => window.TaskPanel.open());
@@ -13308,6 +13612,8 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       prunePromptHeights();
       renderAll();
       applyViewport();
+      // 刚读进来的样子当作基线：这一批不算「改过」，否则一打开满屏都是「刚刚修改」
+      stampTouchedCards();
       loadingEl.classList.add('hidden');
       // 从库里读出来就算已保存状态，时间点用「刚刚读到」的此刻
       lastSavedAt = Date.now();
