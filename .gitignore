@@ -25,6 +25,7 @@ work/
 _archive/
 
 # ---------- 临时与系统文件 ----------
+.tmp-test/
 *.tmp
 *.log
 Thumbs.db

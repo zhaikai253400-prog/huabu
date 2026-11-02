@@ -1,0 +1,22 @@
+# ---------- 行尾统一 ----------
+# 背景：本仓库原有行尾是混合状态（部分文件 CRLF、部分 LF、部分同一文件内混用），
+# 导致任何一处小改动都会产生整文件级的假 diff（例如 server/index.js 只改 25 行
+# 却显示 2348 行差异），无法审阅。此处统一为 LF，并让 Git 不再自动转换。
+* text=auto eol=lf
+
+# Windows 批处理对行尾敏感（goto/label 解析），保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ---------- 二进制（禁止行尾转换与文本 diff） ----------
+*.exe binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.woff2 binary
+*.mp4 binary
+*.mp3 binary
+*.wav binary
