@@ -677,11 +677,74 @@
     return PRESETS[type] || PRESETS.image;
   }
 
-  function toast(message, stayMs) {
-    toastEl.textContent = message;
-    toastEl.classList.add('show');
+  // 提示条。actions 可选：给一串 { label, run }，会渲染成提示条里的按钮。
+  // 带按钮的提示条鼠标悬停时暂停计时 —— 否则用户刚要伸手去点，提示就自己消失了。
+  let toastPauseLeft = 0;
+  let toastPauseAt = 0;
+  let toastHoverBound = false;
+
+  function toastHide() {
+    if (toastTimer) {
+      clearTimeout(toastTimer);
+      toastTimer = 0;
+    }
+    toastEl.classList.remove('show');
+    toastEl.classList.remove('has-actions');
+  }
+
+  function toastSchedule(ms) {
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toastEl.classList.remove('show'), Math.max(1200, Number(stayMs) || 1800));
+    toastPauseLeft = ms;
+    toastPauseAt = Date.now();
+    toastTimer = setTimeout(toastHide, ms);
+  }
+
+  function toast(message, stayMs, actions) {
+    const list = Array.isArray(actions) ? actions.filter((item) => item && typeof item.run === 'function') : [];
+    // 按钮比纯文字更值得多看两眼，最短停留也给足
+    const stay = Math.max(list.length ? 5200 : 1200, Number(stayMs) || (list.length ? 8000 : 1800));
+    // 上一次的按钮要清掉，否则残留的旧按钮会跟着新提示一起出现
+    toastEl.textContent = '';
+    const text = document.createElement('span');
+    text.className = 'toast-text';
+    text.textContent = message;
+    toastEl.appendChild(text);
+    if (list.length) {
+      const bar = document.createElement('span');
+      bar.className = 'toast-actions';
+      list.forEach((item) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'toast-action';
+        button.textContent = item.label;
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          // 点了就先收起来：动作自己会再弹一条结果提示
+          toastHide();
+          item.run();
+        });
+        bar.appendChild(button);
+      });
+      toastEl.appendChild(bar);
+      toastEl.classList.add('has-actions');
+    }
+    // 悬停暂停 / 移开续计，只绑一次
+    if (!toastHoverBound) {
+      toastHoverBound = true;
+      toastEl.addEventListener('mouseenter', () => {
+        if (!toastEl.classList.contains('has-actions')) return;
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = 0;
+        toastPauseLeft = Math.max(600, toastPauseLeft - (Date.now() - toastPauseAt));
+      });
+      toastEl.addEventListener('mouseleave', () => {
+        if (!toastEl.classList.contains('has-actions')) return;
+        if (!toastEl.classList.contains('show')) return;
+        toastSchedule(Math.max(600, toastPauseLeft));
+      });
+    }
+    toastEl.classList.add('show');
+    toastSchedule(stay);
   }
 
   // 只改真正变了的东西：平移时不重设点阵大小，缩放时百分比文字不重复写
@@ -8191,6 +8254,8 @@
     }
     refreshSelection();
     scheduleSave();
+    // 连线也是容易误删的：给一条撤销入口
+    toast('已断开这条连线', 6000, [{ label: '撤销删除', run: () => undo() }]);
   }
 
   function snapshot() {
@@ -9259,7 +9324,15 @@
     keepViewportAnchored();
     refreshSelection();
     scheduleSave();
-    toast('已删除 ' + removed + ' 张卡片' + (stripped.size ? '，提示词里指向它的 @ 也一起清掉了' : ''));
+    // 删完给一条能反悔的路：撤销回到删之前（连同连线），或者去回收站翻旧文件
+    toast(
+      '已删除 ' + removed + ' 张卡片' + (stripped.size ? '，提示词里指向它的 @ 也一起清掉了' : ''),
+      8000,
+      [
+        { label: '撤销删除', run: () => undo() },
+        { label: '查看回收站', run: () => openRecycleBin() },
+      ]
+    );
   }
 
   function reorderSelection(toFront) {
@@ -11710,6 +11783,241 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     return (Number(bytes || 0) / 1024 / 1024).toFixed(1) + ' MB';
   }
 
+  function sizeTextOf(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + ' 字节';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function timeTextOf(at) {
+    const ms = Number(at) || 0;
+    if (!ms) return '时间不详';
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    return (
+      d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+      pad(d.getHours()) + ':' + pad(d.getMinutes())
+    );
+  }
+
+  // 回收站面板：删掉的素材只是挪进 data\recycle，这里能看、能挑着摆回去。
+  // 入口在删除后的提示条上，也可以从素材库那边进。
+  async function openRecycleBin() {
+    let data = null;
+    try {
+      data = await window.api.recycleList();
+    } catch (error) {
+      toast('读回收站失败：' + ((error && error.message) || '服务没响应'), 5000);
+      return;
+    }
+    const batches = (data && data.batches) || [];
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask recycle-mask';
+    const picked = new Set();
+
+    const dialog = document.createElement('div');
+    dialog.className = 'modal modal-recycle';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', '回收站');
+
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const title = document.createElement('b');
+    title.textContent = '回收站';
+    head.appendChild(title);
+    const headNote = document.createElement('span');
+    headNote.className = 'muted-line recycle-head-note';
+    headNote.textContent = batches.length
+      ? batches.length + ' 批 · 共 ' + (data.total || 0) + ' 个文件 · ' + sizeTextOf(data.bytes)
+      : '';
+    head.appendChild(headNote);
+    const grow = document.createElement('span');
+    grow.className = 'grow';
+    head.appendChild(grow);
+    const headClose = document.createElement('button');
+    headClose.className = 'ghost';
+    headClose.type = 'button';
+    headClose.textContent = '关闭';
+    head.append(headClose);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body recycle-body';
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    const footNote = document.createElement('span');
+    footNote.className = 'muted-line';
+    foot.appendChild(footNote);
+    const footGrow = document.createElement('span');
+    footGrow.className = 'grow';
+    foot.appendChild(footGrow);
+    const restoreAll = document.createElement('button');
+    restoreAll.className = 'ghost';
+    restoreAll.type = 'button';
+    restoreAll.textContent = '全选';
+    const restoreBtn = document.createElement('button');
+    restoreBtn.className = 'primary';
+    restoreBtn.type = 'button';
+    restoreBtn.textContent = '还原选中的';
+    restoreBtn.disabled = true;
+    foot.appendChild(restoreAll);
+    foot.appendChild(restoreBtn);
+
+    dialog.appendChild(head);
+    dialog.appendChild(body);
+    dialog.appendChild(foot);
+    mask.appendChild(dialog);
+
+    const paintFoot = () => {
+      const count = picked.size;
+      restoreBtn.disabled = count === 0;
+      restoreBtn.textContent = count ? '还原选中的 ' + count + ' 个' : '还原选中的';
+      footNote.textContent = count ? '已选 ' + count + ' 个文件' : '勾几个文件，或者整批还原';
+    };
+
+    const paint = () => {
+      body.textContent = '';
+      if (!batches.length) {
+        const empty = document.createElement('div');
+        empty.className = 'muted-line recycle-empty';
+        empty.textContent = '回收站是空的。删除素材时不会直接销毁，会先挪到这里，方便后悔。';
+        body.appendChild(empty);
+        paintFoot();
+        return;
+      }
+      batches.forEach((batch) => {
+        const group = document.createElement('div');
+        group.className = 'recycle-batch';
+        const bar = document.createElement('div');
+        bar.className = 'recycle-batch-head';
+        const hit = document.createElement('label');
+        hit.className = 'recycle-batch-title';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        const ids = batch.items.map((item) => item.rel);
+        box.checked = ids.length > 0 && ids.every((rel) => picked.has(batch.id + '::' + rel));
+        box.addEventListener('change', () => {
+          ids.forEach((rel) => {
+            const key = batch.id + '::' + rel;
+            if (box.checked) picked.add(key);
+            else picked.delete(key);
+          });
+          paint();
+        });
+        const label = document.createElement('b');
+        label.textContent = batch.label;
+        hit.appendChild(box);
+        hit.appendChild(label);
+        bar.appendChild(hit);
+        const meta = document.createElement('span');
+        meta.className = 'muted-line';
+        meta.textContent = timeTextOf(batch.at) + ' · ' + batch.count + ' 个 · ' + sizeTextOf(batch.bytes);
+        bar.appendChild(meta);
+        group.appendChild(bar);
+
+        const list = document.createElement('div');
+        list.className = 'recycle-list';
+        batch.items.forEach((item) => {
+          const row = document.createElement('label');
+          row.className = 'recycle-row';
+          const check = document.createElement('input');
+          check.type = 'checkbox';
+          const key = batch.id + '::' + item.rel;
+          check.checked = picked.has(key);
+          check.addEventListener('change', () => {
+            if (check.checked) picked.add(key);
+            else picked.delete(key);
+            paintFoot();
+          });
+          const name = document.createElement('span');
+          name.className = 'recycle-name';
+          name.textContent = item.rel;
+          const size = document.createElement('span');
+          size.className = 'muted-line';
+          size.textContent = sizeTextOf(item.bytes);
+          row.appendChild(check);
+          row.appendChild(name);
+          row.appendChild(size);
+          list.appendChild(row);
+        });
+        if (batch.count > batch.items.length) {
+          const more = document.createElement('div');
+          more.className = 'muted-line recycle-more';
+          more.textContent = '这一批还有 ' + (batch.count - batch.items.length) + ' 个文件没列出来，整批还原时会一起处理。';
+          list.appendChild(more);
+        }
+        group.appendChild(list);
+        body.appendChild(group);
+      });
+      paintFoot();
+    };
+
+    paint();
+
+    const close = () => mask.remove();
+    headClose.addEventListener('click', close);
+    mask.addEventListener('click', (event) => {
+      if (event.target === mask) close();
+    });
+
+    restoreAll.addEventListener('click', () => {
+      const everything = batches.every((batch) =>
+        batch.items.every((item) => picked.has(batch.id + '::' + item.rel))
+      );
+      picked.clear();
+      if (!everything) {
+        batches.forEach((batch) => batch.items.forEach((item) => picked.add(batch.id + '::' + item.rel)));
+      }
+      paint();
+    });
+
+    restoreBtn.addEventListener('click', async () => {
+      // 按批次分组提交：接口是「一批 + 若干文件」
+      const byBatch = new Map();
+      picked.forEach((key) => {
+        const at = key.indexOf('::');
+        const batchId = key.slice(0, at);
+        const rel = key.slice(at + 2);
+        if (!byBatch.has(batchId)) byBatch.set(batchId, []);
+        byBatch.get(batchId).push(rel);
+      });
+      restoreBtn.disabled = true;
+      restoreBtn.textContent = '正在还原…';
+      let moved = 0;
+      let skipped = 0;
+      let failed = 0;
+      for (const [batchId, items] of byBatch) {
+        try {
+          const res = await window.api.recycleRestore(batchId, items);
+          moved += Number(res.moved) || 0;
+          skipped += (res.skipped || []).length;
+          failed += (res.failed || []).length;
+        } catch (error) {
+          failed += items.length;
+        }
+      }
+      picked.clear();
+      try {
+        data = await window.api.recycleList();
+      } catch (error) {
+        data = { batches: [], total: 0, bytes: 0 };
+      }
+      batches.length = 0;
+      (data.batches || []).forEach((item) => batches.push(item));
+      paint();
+      const parts = ['已还原 ' + moved + ' 个'];
+      if (skipped) parts.push(skipped + ' 个同名已存在，没覆盖');
+      if (failed) parts.push(failed + ' 个没成功');
+      toast(parts.join('，'), 5200);
+    });
+
+    document.body.appendChild(mask);
+    // 打开时先算一次底部的选中提示
+    paintFoot();
+  }
+
   function batchNodeName(node) {
     const data = nodeData(node);
     const title = String(data.title || '').trim();
@@ -12801,6 +13109,9 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       if (lastSaveError && dirty) saveNow(true);
     });
   }
+
+  // 回收站面板给素材库那边也用（素材库在画布页里是同一份脚本加载的）
+  window.openRecycleBin = openRecycleBin;
 
   bootstrap();
 })();

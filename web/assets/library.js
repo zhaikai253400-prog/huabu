@@ -65,6 +65,7 @@
       '<div class="lib-foot">' +
       '  <span class="lib-pick" id="lib-pick">没有选中</span>' +
       '  <span class="grow"></span>' +
+      '  <button id="lib-recycle" title="看看删掉的素材，还能摆回去">回收站</button>' +
       '  <button id="lib-orphan" title="清理没有被任何画布引用的素材">清理孤儿文件</button>' +
       '  <button class="danger" id="lib-delete">删除选中（进回收站）</button>' +
       '</div>'
@@ -527,6 +528,11 @@
     host.querySelector('#lib-refresh').addEventListener('click', reload);
     host.querySelector('#lib-delete').addEventListener('click', deleteSelected);
     host.querySelector('#lib-orphan').addEventListener('click', cleanOrphans);
+    host.querySelector('#lib-recycle').addEventListener('click', () => {
+      // 回收站面板在画布页那边实现；素材库单独用时退化成提示，不硬报错
+      if (typeof window.openRecycleBin === 'function') window.openRecycleBin();
+      else window.alert('回收站面板在画布页打开：删掉的素材都放在 data\\recycle 里，手动挪回素材目录也能恢复。');
+    });
     reload();
   }
 

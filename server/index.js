@@ -514,6 +514,24 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { moved: result.moved, failed: result.failed, recycle: result.recycle });
   }
 
+  // 回收站：删掉的素材挪进 data\recycle 后不会当场销毁，这里能列出来并摆回去
+  if (pathname === '/api/library/recycle') {
+    if (method === 'GET') {
+      return sendJson(res, 200, library.listRecycle());
+    }
+    if (method === 'POST') {
+      const body = await readBody(req);
+      const result = library.restoreRecycle(config.assetRoot, body.batchId, body.items);
+      if (!result.ok) return sendJson(res, 400, { error: result.error });
+      log('从回收站还原素材：成功 ' + result.moved + ' 个' + (result.skipped.length ? '，' + result.skipped.length + ' 个同名已存在被跳过' : ''));
+      return sendJson(res, 200, {
+        moved: result.moved,
+        skipped: result.skipped,
+        failed: result.failed,
+      });
+    }
+  }
+
   if (pathname === '/api/channels') {
     if (method === 'GET') {
       return sendJson(res, 200, { channels: config.channels || [], template: channels.defaultChannel() });

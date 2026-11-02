@@ -3974,6 +3974,63 @@ input::placeholder { color: var(--placeholder); }
 /* ---------- 恢复隐藏卡片：勾选窗口 ---------- */
 .hidden-restore-mask { z-index: 340; }
 .hidden-restore-modal { width: min(620px, 94vw); }
+
+/* ---------- 回收站：删除不等于销毁，这里挑着摆回去 ---------- */
+.recycle-mask { z-index: 340; }
+.modal-recycle { width: min(660px, 94vw); }
+.recycle-head-note { margin-left: 10px; }
+.recycle-body { max-height: min(62vh, 560px); overflow-y: auto; }
+.recycle-empty { padding: 18px 2px; line-height: 1.7; }
+.recycle-batch { margin-bottom: 14px; }
+.recycle-batch:last-child { margin-bottom: 2px; }
+.recycle-batch-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.recycle-batch-title { display: flex; align-items: center; gap: 7px; cursor: pointer; min-width: 0; }
+.recycle-batch-title b { font-weight: 600; }
+.recycle-batch-head .muted-line { margin-left: auto; white-space: nowrap; }
+.recycle-list { display: flex; flex-direction: column; }
+.recycle-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 2px 5px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.92em;
+}
+.recycle-row:hover { background: var(--surface-3); }
+.recycle-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.recycle-row .muted-line { white-space: nowrap; }
+.recycle-more { padding: 6px 2px 2px 20px; }
+
+/* 带操作按钮的提示条：按钮要能点，所以整个提示条要接住鼠标 */
+.toast.has-actions { pointer-events: auto; display: flex; align-items: center; gap: 12px; }
+.toast-text { min-width: 0; }
+.toast-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.toast-action {
+  font: inherit;
+  font-size: 0.94em;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.toast-action:hover { background: rgba(255, 255, 255, 0.24); border-color: rgba(255, 255, 255, 0.5); }
 .hidden-restore-sub { font-size: 0.82em; color: var(--muted); }
 .hidden-restore-body { padding: 12px 16px 4px; }
 .hidden-restore-tools { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }

@@ -79,6 +79,9 @@
     libraryDelete: (relPaths) => request('POST', '/api/library/delete', { relPaths }),
     libraryOrphans: () => request('GET', '/api/library/orphans'),
     libraryCleanOrphans: () => request('POST', '/api/library/orphans/clean', {}),
+    // 回收站：删掉的素材只是挪进 data\recycle，还能列出来摆回去
+    recycleList: () => request('GET', '/api/library/recycle'),
+    recycleRestore: (batchId, items) => request('POST', '/api/library/recycle', { batchId, items }),
     models: () => request('GET', '/api/models'),
     listChannels: () => request('GET', '/api/channels'),
     saveChannels: (channels) => request('POST', '/api/channels', { channels }),
