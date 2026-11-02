@@ -1711,7 +1711,7 @@
     // 组合卡片：一张卡代表一组素材，拉一条线就把整组接过去
     if (node.type === 'group') {
       media.appendChild(buildGroupBody(node));
-      media.appendChild(buildStatus(data));
+      media.appendChild(buildStatus(data, node));
       media.appendChild(buildHoverBar(data, preset, node));
       return media;
     }
@@ -1719,7 +1719,7 @@
     if (node.type === 'director') {
       media.classList.add('director-card');
       media.appendChild(buildDirectorBody(node, data));
-      media.appendChild(buildStatus(data));
+      media.appendChild(buildStatus(data, node));
       media.appendChild(buildHoverBar(data, preset, node));
       return media;
     }
@@ -1926,7 +1926,7 @@
       media.appendChild(placeholder);
     }
     if (media.classList.contains('zoomable')) media.appendChild(buildZoomHint());
-    media.appendChild(buildStatus(data));
+    media.appendChild(buildStatus(data, node));
     media.appendChild(buildHoverBar(data, preset));
     return media;
   }
@@ -2123,10 +2123,10 @@
   // 生成中 / 生成失败直接盖在卡片中间
   // 只造骨架 + 交给 paintStatusBox 填内容：状态栏的文案 / 结构只有一处定义，
   // 免得「首次渲染」和「后续刷新」两条路各写一遍、慢慢长歪。
-  function buildStatus(data) {
+  function buildStatus(data, node) {
     const box = document.createElement('div');
     box.className = 'node-status show ' + (statusKindOf(data) || 'error');
-    return paintStatusBox(box, data) || box;
+    return paintStatusBox(box, data, node) || box;
   }
 
   // 鼠标移上去才浮出的窄条：显示模型和提示词开头
@@ -7116,18 +7116,18 @@
 
   // 卡片重建、老数据、异常分支都可能让遮罩丢失：只要有状态就补一层，
   // 不再依赖 buildMedia 一定已经画过 .node-status
-  function ensureStatusBox(el, data) {
+  function ensureStatusBox(el, data, node) {
     let box = el.querySelector('.node-status:not(.schedule-live)');
     if (box || !statusKindOf(data)) return box;
     const media = el.querySelector('.node-media');
     if (!media) return null;
-    box = buildStatus(data);
+    box = buildStatus(data, node);
     media.appendChild(box);
     return box;
   }
 
   // 只改字和转圈，不重建整张卡片：视频不会黑闪，轮询也不会打断输入
-  function paintStatusBox(box, data) {
+  function paintStatusBox(box, data, node) {
     if (!box) return box;
     const kind = statusKindOf(data);
     if (!kind) {
@@ -7161,12 +7161,25 @@
       const detail = document.createElement('div');
       detail.className = 'st-submit-detail';
       box.appendChild(detail);
+      // 生成中改了参数：轻提示 + 「用新参数再跑一次」按钮
+      const changed = document.createElement('div');
+      changed.className = 'st-changed';
+      const changedText = document.createElement('div');
+      changedText.className = 'st-changed-text';
+      changed.appendChild(changedText);
+      const again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'st-again';
+      again.textContent = '用新参数再跑一次';
+      changed.appendChild(again);
+      box.appendChild(changed);
     }
     const title = box.querySelector('.st-title');
     const message = box.querySelector('.st-msg');
     const advice = box.querySelector('.st-advice');
     const submit = box.querySelector('.st-submit');
     const detail = box.querySelector('.st-submit-detail');
+    const changed = box.querySelector('.st-changed');
     let titleText = '生成失败';
     let messageText = data.error || '';
     let adviceText = '';
@@ -7222,7 +7235,115 @@
       });
       detail.style.display = rows.length ? '' : 'none';
     }
+    // 生成期间改了参数：提醒一句，并给个「用新参数再跑一次」的出口。
+    // 判定放在这里（而不是各处改动入口）是因为所有改动最终都会走到重绘，
+    // 只要对比「当前卡片值」和「冻结快照」就够了，不用在每个输入框上挂钩子。
+    if (changed) {
+      const diff = node ? submissionDiffOf(node, data) : null;
+      const show = Boolean(diff && diff.changed) && (kind === 'running' || kind === 'preparing');
+      changed.style.display = show ? '' : 'none';
+      if (show) {
+        const text = changed.querySelector('.st-changed-text');
+        if (text) {
+          text.textContent =
+            '已改动：' + diff.fields.join('、') + '　·　只影响下次生成，当前任务仍用提交时的版本';
+        }
+        const again = changed.querySelector('.st-again');
+        if (again && !again.dataset.bound) {
+          again.dataset.bound = '1';
+          again.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const host = changed.closest('.node');
+            const id = host && host.dataset ? host.dataset.id : '';
+            const target = id ? nodeById(id) : null;
+            if (target && typeof rerunWithNewParams === 'function') rerunWithNewParams(target);
+          });
+        }
+      }
+    }
     return box;
+  }
+
+  // 对比「当前卡片上的值」与「本次提交冻结的快照」，找出生成期间被改动的项。
+  // 只比几样真正会影响结果的：提示词、模型、尺寸/比例/张数/时长/分辨率/模式、参考素材。
+  // 返回 { changed, fields } —— fields 是给用户看的中文名列表。
+  function submissionDiffOf(node, data) {
+    const d = data || (node ? nodeData(node) : null);
+    const meta = d && (d.pendingSubmission || d.lastSubmission);
+    if (!meta) return null;
+    // 只比「当前这一版正在跑」的：pendingSubmission 存在说明是本次提交的那一份
+    if (!d.pendingSubmission) return null;
+    const fields = [];
+    const params = (meta.params && typeof meta.params === 'object' ? meta.params : {}) || {};
+    const now = (d.params && typeof d.params === 'object' ? d.params : {}) || {};
+
+    const mainNow = String(d.text || '').trim();
+    const mainThen = String(meta.mainPrompt || meta.submittedPrompt || '').trim();
+    if (mainNow && mainThen && mainNow !== mainThen) fields.push('提示词');
+
+    const modelNow = String(d.model || '').trim();
+    const modelThen = String(meta.model || '').trim();
+    if (modelNow !== modelThen) fields.push('模型');
+
+    const cmp = (a, b) => String(a == null ? '' : a) !== String(b == null ? '' : b);
+    if (cmp(now.size, params.sizeKey || params.size)) fields.push('尺寸');
+    if (cmp(now.ratio, params.ratio)) fields.push('比例');
+    if (cmp(now.count, params.count)) fields.push('张数');
+    if (cmp(now.duration, params.duration)) fields.push('时长');
+    if (cmp(now.resolution, params.resolution)) fields.push('分辨率');
+
+    // 参考素材：按名字 + 类型 + 角色比对（顺序也算，因为首尾帧顺序影响画面）
+    const sigOf = (list) =>
+      (Array.isArray(list) ? list : [])
+        .map((item) => [item && item.name, item && item.kind, item && item.role].join('|'))
+        .join('>');
+    const refsNow = typeof refsForApi === 'function' ? refsForApi(node) : [];
+    if (sigOf(refsNow) !== sigOf(meta.refs)) fields.push('参考素材');
+
+    return { changed: fields.length > 0, fields: fields };
+  }
+
+  function nodeById(id) {
+    let hit = null;
+    nodes.forEach((item) => {
+      if (item && item.id === id) hit = item;
+    });
+    return hit;
+  }
+
+  // 「用新参数再跑一次」：不打断当前任务 —— 一张卡片只有一个轮询位，
+  // 立刻再提交会把旧任务的轮询顶掉、旧结果就永远回不到卡片上了。
+  // 所以这里挂一个「排队」标记，等当前任务出结果（或失败）后自动接着跑。
+  function rerunWithNewParams(node) {
+    const data = nodeData(node);
+    if (data.checking) {
+      toast('正在检查参考素材，稍等一下');
+      return;
+    }
+    if (!data.running && !data.preparing) {
+      startGenerate(node);
+      return;
+    }
+    if (data.rerunQueued) {
+      toast('已经排上了：等这次跑完就自动用新参数再跑一次');
+      return;
+    }
+    data.rerunQueued = true;
+    toast('已排上：等这次跑完，自动用新参数再跑一次（两个结果都会留下）', 4600);
+    refreshNode(node);
+    scheduleSave();
+  }
+
+  // 任务收尾时看一眼有没有排队的重跑（成功 / 失败都会走到这里）
+  function runQueuedRerun(node) {
+    const data = nodeData(node);
+    if (!data.rerunQueued) return false;
+    data.rerunQueued = false;
+    scheduleSave();
+    // 放到下一轮事件循环再开跑：让当前这一版的结果先渲染出来，
+    // 用户能看见「旧的那版留下了」，再进入新的工作态。
+    setTimeout(() => startGenerate(node), 60);
+    return true;
   }
 
   // 点「本次提交」那一行：展开 / 收起完整快照。
@@ -7260,14 +7381,14 @@
         }
       });
     }
-    const box = ensureStatusBox(el, data);
+    const box = ensureStatusBox(el, data, node);
     // 「本次提交」那一行点开后要能重画：把节点数据挂到卡片上，供点击回调取用
     el.__repaintStatus = () => {
       const now = elements.get(node.id);
-      if (now) paintStatusBox(now.querySelector('.node-status:not(.schedule-live)'), nodeData(node));
+      if (now) paintStatusBox(now.querySelector('.node-status:not(.schedule-live)'), nodeData(node), node);
     };
     bindStatusToggle(box);
-    paintStatusBox(box, data);
+    paintStatusBox(box, data, node);
     const state = el.querySelector('.task-state');
     if (state) state.textContent = taskStateText(data);
     const run = el.querySelector('.btn-run');
@@ -7301,6 +7422,9 @@
     data.preparing = '';
     data.error = '';
     data.progress = '正在提交';
+    // 新一轮开始了，之前排的队已经兑现（runQueuedRerun 在开跑前就清掉了），
+    // 这里再兜一次底，避免标记残留导致下一轮结束又自动开一次。
+    data.rerunQueued = false;
     refreshNode(node);
     scheduleSave();
     try {
@@ -7420,6 +7544,8 @@
     }
     refreshNode(node);
     scheduleSave();
+    // 生成期间点过「用新参数再跑一次」：这一版已经留下，接着跑新参数那一版
+    runQueuedRerun(node);
   }
 
   function failTask(node, message, errorInfo) {
@@ -7432,6 +7558,9 @@
     data.errorInfo = errorInfo || null;
     refreshNode(node);
     scheduleSave();
+    // 这一版失败了：如果排队里有新参数的版本，接着跑（用户既然点了再跑一次，
+    // 多半就是冲着重试来的，不该因为上一次失败就把队列丢掉）。
+    runQueuedRerun(node);
   }
 
   // 查询任务时偶尔会碰上本机服务重启、端口还没接上。
@@ -7520,6 +7649,9 @@
     // 本页刚点了取消：短时间内别再被自动接管回来
     muteTaskAdopt(node.id);
     stopWatch(node.id);
+    // 取消是明确的「别跑了」：把排队里的重跑一并撤掉，不能背着用户再开一次
+    const hadQueued = Boolean(data.rerunQueued);
+    data.rerunQueued = false;
     data.running = false;
     data.progress = '';
     data.error = '';
@@ -7532,7 +7664,7 @@
         /* 取消失败也不影响本地状态 */
       }
     }
-    toast('这次生成已取消');
+    toast(hadQueued ? '这次生成已取消，排队中的重跑也一并撤掉了' : '这次生成已取消');
   }
 
   // 之前因为本机断线被误判成「读取生成进度失败」的卡片：重新核对一次，
