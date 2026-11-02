@@ -13,10 +13,10 @@ const assert = require('node:assert');
 const SERVER = path.resolve(__dirname, '..', '..', 'server');
 
 // ---- 准备隔离环境 ----
+// 走统一隔离助手：环境变量 + 派生路径逐个校验，避免「只改 DATA_DIR」的老坑
+// （本文件用假 store，风险较低，但对齐同一范式，未来新增测试照抄即可）。
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-backup-test-'));
-const paths = require(path.join(SERVER, 'paths.js'));
-const originalDataDir = paths.DATA_DIR;
-paths.DATA_DIR = TMP;
+const paths = require(path.join(__dirname, '_isolate.js'))(TMP);
 
 // store 换成假对象：只提供 getState，返回我们喂进去的画布
 let fakeState = null;
@@ -268,7 +268,6 @@ check('30 天内的 daily 会被保留', () => {
 });
 
 // ---- 清理 ----
-paths.DATA_DIR = originalDataDir;
 if (realStore) require.cache[storePath] = realStore;
 fs.rmSync(TMP, { recursive: true, force: true });
 

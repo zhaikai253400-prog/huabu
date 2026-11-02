@@ -32,10 +32,8 @@ function check(name, fn) {
 
 function makeSandbox(tag) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-lock-' + tag + '-'));
-  const paths = require(path.join(SERVER, 'paths.js'));
-  paths.DATA_DIR = dir;
-  paths.DB_FILE = path.join(dir, 'canvas.db');
-  paths.RECYCLE_DIR = path.join(dir, 'recycle');
+  // 统一隔离助手：派生路径逐个校验，杜绝「只改 DATA_DIR」写进真实库
+  require(path.join(__dirname, '_isolate.js'))(dir);
   delete require.cache[require.resolve(STORE_PATH)];
   return require(STORE_PATH);
 }
@@ -219,10 +217,7 @@ console.log('\n[9] 老库升级：已有的 canvases 表会自动补上 rev 列'
   );
   old.close();
 
-  const paths = require(path.join(SERVER, 'paths.js'));
-  paths.DATA_DIR = dir;
-  paths.DB_FILE = dbFile;
-  paths.RECYCLE_DIR = path.join(dir, 'recycle');
+  const paths = require(path.join(__dirname, '_isolate.js'))(dir);
   delete require.cache[require.resolve(STORE_PATH)];
   const store = require(STORE_PATH);
   store.init();

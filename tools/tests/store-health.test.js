@@ -32,21 +32,16 @@ function check(name, fn) {
   }
 }
 
-// paths 是单例，所有模块共享它，直接改字段就能把整条链路指到临时目录
-const paths = require(path.join(SERVER, 'paths.js'));
-
 // 每个场景一个全新目录，避免上一组残留的 WAL 干扰下一组
+// 隔离走统一助手：派生路径逐个校验，杜绝「只改 DATA_DIR」写进真实库
 function makeSandbox(tag) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-health-' + tag + '-'));
-  const box = {
+  require(path.join(__dirname, '_isolate.js'))(dir);
+  return {
     dir: dir,
     dbFile: path.join(dir, 'canvas.db'),
     recycleDir: path.join(dir, 'recycle'),
   };
-  paths.DATA_DIR = dir;
-  paths.DB_FILE = box.dbFile;
-  paths.RECYCLE_DIR = box.recycleDir;
-  return box;
 }
 
 // store 是单例，模块级 db / healthNotice 会跨用例残留，每次取一份干净的
