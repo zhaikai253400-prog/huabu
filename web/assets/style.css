@@ -591,7 +591,60 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
 .save-state { font-size: 0.85em; color: var(--muted); min-width: 92px; text-align: right; }
 .save-state.saving { color: var(--warn); }
 .save-state.saved { color: var(--ok); }
+.save-state.dirty { color: var(--warn); }
 .save-state.error { color: var(--danger); }
+
+/* 保存失败时圆点可以点：把 8px 的圆点扩出一圈看不见的热区，
+   不然要精准点中那个小点太费劲 */
+.rail .save-state.error {
+  cursor: pointer;
+  position: relative;
+}
+.rail .save-state.error::after {
+  content: '';
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+}
+.rail .save-state.error::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  opacity: 0.55;
+  animation: save-pulse 1.9s ease-in-out infinite;
+}
+@keyframes save-pulse {
+  0%, 100% { opacity: 0.15; transform: scale(0.9); }
+  50% { opacity: 0.6; transform: scale(1.05); }
+}
+
+/* 保存失败时点圆点弹出来的面板。
+   这里必须写成 .menu.save-panel：.menu 的规则在后面定义，
+   同权重下会盖掉单独 .save-panel 写的 z-index 与 min-width。 */
+.menu.save-panel {
+  position: fixed;
+  z-index: 300;
+  min-width: 236px;
+  max-width: 300px;
+  padding: 10px;
+  cursor: default;
+}
+.save-panel-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 6px 8px;
+}
+.save-panel-head b { color: var(--danger); font-weight: 500; font-size: 0.92em; }
+.save-panel-head span { color: var(--muted); font-size: 0.82em; line-height: 1.5; overflow-wrap: anywhere; }
+.save-panel-when {
+  padding: 0 6px 8px;
+  color: var(--muted);
+  font-size: 0.82em;
+}
+.save-panel button { font-size: 0.9em; }
 
 .viewport {
   position: relative;

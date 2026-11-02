@@ -524,6 +524,12 @@
   let dirty = false;
   let saving = false;
   let saveTimer = null;
+  // 保存状态面板（只有保存失败时才弹）与上次成功保存的时刻
+  let savePanel = null;
+  let lastSavedAt = 0;
+  let lastSaveError = '';
+  // 保存失败期间把侧栏钉住不收起，红点才看得见
+  let saveRailPinned = false;
   let menuEl = null;
   let toastTimer = null;
   let guideEls = [];
@@ -714,12 +720,180 @@
     };
   }
 
-  function setSaveState(text, className) {
-    saveEl.textContent = text;
-    saveEl.className = 'save-state' + (className ? ' ' + className : '');
-    saveEl.setAttribute('aria-label', text);
-    setRailDesc('save-state', text);
+  // ---------- 保存状态 ----------
+  // 侧栏那个小圆点只表达「现在是哪一种状态」；存到几点、失败了该怎么办，
+  // 统一收进点开的面板里。只改颜色不给下一步操作，用户是不知道该做什么的。
+  const SAVE_STATE_TEXT = {
+    saved: '已保存',
+    dirty: '待保存',
+    saving: '保存中',
+    error: '保存失败',
+  };
+
+  function setSaveState(kind) {
+    const state = SAVE_STATE_TEXT[kind] ? kind : 'saved';
+    saveEl.textContent = SAVE_STATE_TEXT[state];
+    saveEl.className = 'save-state ' + state;
+    saveEl.dataset.state = state;
+    const desc = saveDescription(state);
+    saveEl.setAttribute('aria-label', desc);
+    setRailDesc('save-state', desc);
+    // 侧栏平时是贴着左边缘才弹出的，保存失败时那个红点根本看不见。
+    // 这里把侧栏强制顶出来，用户至少能看到「出事了」，点一下就知道怎么办。
+    if (state === 'error') showRailForSaveError();
+    else if (saveRailPinned) releaseRailForSaveError();
   }
+
+  // 保存失败期间把侧栏钉住不放回；恢复后松手，交还给原来的「贴边弹出」逻辑
+  function showRailForSaveError() {
+    const rail = document.getElementById('rail');
+    const page = document.querySelector('.canvas-page');
+    if (!rail || !page) return;
+    saveRailPinned = true;
+    rail.classList.add('open');
+    page.classList.add('rail-open');
+  }
+
+  function releaseRailForSaveError() {
+    saveRailPinned = false;
+    const rail = document.getElementById('rail');
+    const page = document.querySelector('.canvas-page');
+    if (!rail || !page) return;
+    // 鼠标还停在侧栏上就先留着，等它自己移开后由贴边逻辑收回
+    if (rail.matches(':hover')) return;
+    rail.classList.remove('open');
+    page.classList.remove('rail-open');
+  }
+
+  // 圆点的悬浮说明：把「上次成功保存时间」一起带上，鼠标一停就知道存到哪一步了
+  function saveDescription(state) {
+    if (state === 'error') {
+      const at = lastSavedAt ? '上次成功保存 ' + clockText(lastSavedAt) : '这块画布还没有成功保存过';
+      return '保存失败：' + (lastSaveError || '本机服务暂时没回应') + '（' + at + '）· 点一下可以重试或先导出兜底';
+    }
+    if (state === 'dirty') return '有改动还没存，正在排队写入';
+    if (state === 'saving') return '正在写入本机数据库…';
+    return lastSavedAt ? '已保存 · ' + clockText(lastSavedAt) : '已保存';
+  }
+
+  function clockText(ts) {
+    const d = new Date(ts);
+    const pad = (n) => String(n).padStart(2, '0');
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  // 保存失败时点圆点弹出来的面板：说清失败原因与上次成功时间，并给出两条出路
+  function openSavePanel() {
+    closeSavePanel();
+    const panel = document.createElement('div');
+    panel.className = 'menu save-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', '保存状态');
+
+    const head = document.createElement('div');
+    head.className = 'save-panel-head';
+    const title = document.createElement('b');
+    title.textContent = '保存失败';
+    head.appendChild(title);
+    const reason = document.createElement('span');
+    reason.textContent = lastSaveError || '本机服务暂时没回应';
+    head.appendChild(reason);
+    panel.appendChild(head);
+
+    const when = document.createElement('div');
+    when.className = 'save-panel-when';
+    when.textContent = lastSavedAt
+      ? '上次成功保存：' + clockText(lastSavedAt)
+      : '这块画布还没有成功保存过';
+    panel.appendChild(when);
+
+    const sep = document.createElement('div');
+    sep.className = 'sep';
+    panel.appendChild(sep);
+
+    // 服务恢复了就直接重试；服务还没起来，至少先把当前内容落到本地文件里
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = '立即重试保存';
+    retry.addEventListener('click', () => {
+      closeSavePanel();
+      dirty = true;
+      saveNow(true);
+    });
+    panel.appendChild(retry);
+
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button';
+    exportBtn.textContent = '导出当前状态（.json）';
+    exportBtn.addEventListener('click', () => exportCurrentState());
+    panel.appendChild(exportBtn);
+
+    document.body.appendChild(panel);
+    // 贴在圆点右边；右边放不下就往左让，上下左右都不出窗口
+    const rect = saveEl.getBoundingClientRect();
+    panel.style.position = 'fixed';
+    const w = panel.offsetWidth || 240;
+    const h = panel.offsetHeight || 150;
+    const margin = 10;
+    let left = rect.right + margin;
+    if (left + w > window.innerWidth - margin) left = rect.left - margin - w;
+    if (left < margin) left = margin;
+    let top = rect.top + rect.height / 2 - h / 2;
+    top = Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - h - margin));
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+    savePanel = panel;
+  }
+
+  function closeSavePanel() {
+    if (!savePanel) return;
+    if (savePanel.parentNode) savePanel.parentNode.removeChild(savePanel);
+    savePanel = null;
+  }
+
+  // 保存一直失败时的兜底出路：把当前画布内容直接下载成 json，先保住数据不丢
+  function exportCurrentState() {
+    try {
+      const payload = {
+        format: 'local-canvas',
+        version: 1,
+        exportedAt: Date.now(),
+        canvas: { name: (nameEl && nameEl.textContent || '').trim() },
+        viewport: viewport,
+        nodes: collectNodes(),
+        edges: edges,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '画布兜底-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 200);
+      toast('已把当前状态导出成文件，可以先留个底');
+    } catch (error) {
+      toast('导出失败：' + ((error && error.message) || error));
+    }
+  }
+
+  // 只有「保存失败」时圆点才可点，平时点它没有任何意义
+  saveEl.addEventListener('click', () => {
+    if (saveEl.dataset.state !== 'error') return;
+    if (savePanel) closeSavePanel();
+    else openSavePanel();
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!savePanel) return;
+    if (savePanel.contains(event.target) || saveEl.contains(event.target)) return;
+    closeSavePanel();
+  }, true);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && savePanel) closeSavePanel();
+  });
 
   // 工具栏图标的说明文字：按钮的 title 会随状态变，统一走这里同步到悬浮提示
   function setRailDesc(id, text) {
@@ -758,26 +932,34 @@
 
   function scheduleSave() {
     dirty = true;
-    setSaveState('待保存…', 'saving');
+    setSaveState('dirty');
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(saveNow, 700);
   }
 
-  async function saveNow() {
-    if (!dirty || saving) return;
+  // force=true 是「立即重试保存」用的：跳过 dirty/saving 判断，手动点的那次必须真的发出去
+  async function saveNow(force) {
+    if (!force && (!dirty || saving)) return;
+    if (saving) return;
     saving = true;
     dirty = false;
-    setSaveState('保存中…', 'saving');
+    setSaveState('saving');
     try {
       await window.api.saveCanvas(canvasId, { nodes: collectNodes(), edges: edges, viewport: viewport });
-      setSaveState('已保存', 'saved');
+      lastSavedAt = Date.now();
+      lastSaveError = '';
+      if (savePanel) closeSavePanel();
+      setSaveState('saved');
     } catch (error) {
       dirty = true;
-      setSaveState('保存失败', 'error');
-      console.log('保存失败：' + error.message);
+      lastSaveError = (error && error.message) || String(error);
+      setSaveState('error');
+      console.log('保存失败：' + lastSaveError);
     } finally {
       saving = false;
-      if (dirty) saveTimer = setTimeout(saveNow, 1500);
+      // 失败之后不要再自动重试了：一直打不通就一直重试，只会把日志刷满；
+      // 改成留给用户点「立即重试」，或切回页面时自动试一次
+      if (dirty && !lastSaveError) saveTimer = setTimeout(saveNow, 1500);
     }
   }
 
@@ -5136,9 +5318,13 @@
     dirty = false;
     try {
       await window.api.saveCanvas(canvasId, { nodes: collectNodes(), edges: edges, viewport: viewport });
-      setSaveState('已保存', 'saved');
+      lastSavedAt = Date.now();
+      lastSaveError = '';
+      setSaveState('saved');
     } catch (error) {
       dirty = true;
+      lastSaveError = (error && error.message) || String(error);
+      setSaveState('error');
       throw error;
     }
   }
@@ -9543,6 +9729,8 @@
       openTimer = 0;
       window.clearTimeout(closeTimer);
       closeTimer = 0;
+      // 保存失败期间不许自动收起，否则用户刚要去看红点它就缩回去了
+      if (saveRailPinned) return;
       rail.classList.remove('open');
       page.classList.remove('rail-open');
       tip.classList.remove('show');
@@ -11946,6 +12134,9 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       renderAll();
       applyViewport();
       loadingEl.classList.add('hidden');
+      // 从库里读出来就算已保存状态，时间点用「刚刚读到」的此刻
+      lastSavedAt = Date.now();
+      setSaveState('saved');
       const focusId = params.get('node');
       if (focusId) {
         if (!focusNodeById(focusId)) toast('这张卡片已经不在了，可能已经被删掉');
@@ -11974,6 +12165,17 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       settingsBtn.addEventListener('click', () => window.UITheme.openSettings());
     }
 
+    // 关页面 / 刷新 / 切到别的站点之前：
+    // 1) 还有没存上的内容 → 让浏览器弹一次原生确认，别让用户手一抖丢掉；
+    // 2) 能存就顺手用 keepalive 发一次，作为最后一道保险。
+    window.addEventListener('beforeunload', (event) => {
+      if (!dirty) return;
+      // 只要设了 returnValue，浏览器就会弹「离开此网站？」的确认框
+      event.preventDefault();
+      event.returnValue = '';
+      return '';
+    });
+
     window.addEventListener('pagehide', () => {
       if (!dirty) return;
       try {
@@ -11986,6 +12188,12 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       } catch {
         /* 忽略 */
       }
+    });
+
+    // 切回这个页面时：如果上次是失败状态，说明本机服务可能刚恢复，自动再试一次
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      if (lastSaveError && dirty) saveNow(true);
     });
   }
 
