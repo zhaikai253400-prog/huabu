@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本地无限画布 · 启动器</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/style.css" />
+  <link rel="stylesheet" href="/assets/local-pages.css" />
+</head>
+<body class="local-page">
+  <div class="topbar local-topbar">
+    <div class="brand"><span class="local-brand-dot"></span>本地无限画布</div>
+    <span class="local-sub">启动器</span>
+    <div class="chips">
+      <span class="chip ok" id="st-service">正在连接本机服务…</span>
+    </div>
+  </div>
+
+  <main class="launcher-shell">
+    <section class="launcher-card">
+      <div class="launcher-mark" aria-hidden="true"></div>
+      <h1 class="launcher-title">本地无限画布</h1>
+      <p class="launcher-sub">服务已经在本机运行。点下面的按钮进入画布，或者在独立窗口里配置接口通道。</p>
+
+      <div class="launcher-actions">
+        <button class="primary launch-main" id="btn-start">打开画布</button>
+        <button id="btn-channels">接口通道设置</button>
+      </div>
+
+      <div class="launcher-status">
+        <span class="chip" id="st-canvases">画布 — 块</span>
+        <span class="chip" id="st-channels">通道 — 个</span>
+        <span class="chip" id="st-assets">素材目录检查中…</span>
+      </div>
+      <div class="launcher-foot">接口通道设置只在本机窗口里打开，画布页面拿不到密钥。</div>
+    </section>
+  </main>
+
+  <script src="/assets/api.js"></script>
+  <script>
+    (function () {
+      const serviceEl = document.getElementById('st-service');
+      const canvasesEl = document.getElementById('st-canvases');
+      const channelsEl = document.getElementById('st-channels');
+      const assetsEl = document.getElementById('st-assets');
+
+      document.getElementById('btn-start').addEventListener('click', function () {
+        location.href = '/';
+      });
+
+      document.getElementById('btn-channels').addEventListener('click', function () {
+        window.open('/channels', 'canvas-channels', 'width=1280,height=920');
+      });
+
+      window.api.status().then(function (status) {
+        serviceEl.textContent = '本机服务已就绪';
+        serviceEl.className = 'chip ok';
+        const stats = status.stats || {};
+        canvasesEl.innerHTML = '画布 <b>' + (Number(stats.canvases) || 0) + '</b> 块';
+        channelsEl.innerHTML = '通道 <b>' + (Number(status.channels) || 0) + '</b> 个';
+        assetsEl.textContent = status.writable ? '素材目录可用' : '素材目录需要检查';
+        assetsEl.className = 'chip ' + (status.writable ? 'ok' : 'warn');
+      }).catch(function () {
+        serviceEl.textContent = '本机服务连接失败';
+        serviceEl.className = 'chip warn';
+        assetsEl.textContent = '请回到启动窗口看看是否已停止';
+        assetsEl.className = 'chip warn';
+      });
+    })();
+  </script>
+</body>
+</html>

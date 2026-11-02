@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>画布 · 本地无限画布</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+  <div class="canvas-page">
+    <div class="rail-zone" id="rail-zone" aria-hidden="true"></div>
+    <aside class="rail" id="rail" aria-label="画布工具栏">
+      <div class="rail-group">
+        <button class="rail-name" id="rail-name" title="画布名字：点一下可以改名">
+          <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 5.6A2 2 0 016.5 3.6h7.6l4.4 4.4v11.4a2 2 0 01-2 2H6.5a2 2 0 01-2-2z"/><path d="M13.8 3.8v4.4h4.4"/><path d="M8.2 12.4h6M8.2 15.8h4"/></svg></span>
+          <span class="rail-text" id="canvas-name">画布</span>
+        </button>
+
+        <button class="rail-btn" id="btn-back" title="回到门户页（画布列表）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></span>
+        <span class="rail-text">门户页</span>
+        </button>
+
+        <button class="rail-btn" id="tool-mode" title="选择工具：点一下切成平移工具（快捷键 V / H）">
+        <span class="rail-ico" id="tool-mode-icon"></span>
+        <span class="rail-text" id="tool-mode-label">选择</span>
+        </button>
+
+        <button class="rail-btn primary" id="btn-add" title="新建卡片，或者把电脑里的素材导进来">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
+        <span class="rail-text">添加卡片</span>
+        </button>
+
+        <button class="rail-btn" id="btn-search" title="找卡片：按提示词、模型名、类型搜，点结果直接跳过去（Ctrl+F）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.2"/><path d="M15.6 15.6L20.5 20.5"/></svg></span>
+        <span class="rail-text">查找卡片</span>
+        </button>
+
+        <button class="rail-btn" id="btn-help" title="快捷键与操作一览：所有快捷键和常用操作都在这一张表里（F1）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="12.4" rx="2"/><path d="M7 9.2h4.4M7 12.4h6.2M15.6 9.2h1.8"/><path d="M8 20.4h8"/></svg></span>
+        <span class="rail-text">快捷键</span>
+        </button>
+
+        <button class="rail-btn" id="btn-filter" title="只看想看的卡片：按图片 / 视频 / 音频 / 组合，或按生成中 / 失败 / 已完成筛一遍">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.6h16l-6.2 7.3v6.1l-3.6 2v-8.1z"/></svg></span>
+        <span class="rail-text">筛选</span>
+        <span class="rail-badge" id="filter-badge" hidden>0</span>
+        </button>
+        <button class="rail-btn" id="btn-undo" title="撤销上一步（Ctrl+Z）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h10a5 5 0 010 10h-6"/><path d="M8 6l-4 4 4 4"/></svg></span>
+        <span class="rail-text">撤销</span>
+        </button>
+
+        <button class="rail-btn" id="btn-fit" title="把所有卡片缩放到看得见（Shift+1）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H5.5A1.5 1.5 0 004 5.5V9"/><path d="M15 4h3.5A1.5 1.5 0 0120 5.5V9"/><path d="M9 20H5.5A1.5 1.5 0 014 18.5V15"/><path d="M15 20h3.5A1.5 1.5 0 0020 18.5V15"/></svg></span>
+        <span class="rail-text">适应窗口</span>
+        </button>
+
+        <button class="rail-btn" id="btn-reset" title="画面回到原点，缩放归 100%（Ctrl+0）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v3.4M12 17.6V21M3 12h3.4M17.6 12H21"/></svg></span>
+        <span class="rail-text">回到原点</span>
+        </button>
+
+        <button class="rail-btn" id="btn-tidy" title="一键整理排版：卡片按连线从左到右排好，或者排成整齐的网格（Ctrl+Shift+L）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.6" y="3.6" width="7.2" height="7.2" rx="1.5"/><rect x="13.2" y="3.6" width="7.2" height="7.2" rx="1.5"/><rect x="3.6" y="13.2" width="7.2" height="7.2" rx="1.5"/><rect x="13.2" y="13.2" width="7.2" height="7.2" rx="1.5"/></svg></span>
+        <span class="rail-text">整理排版</span>
+        </button>
+
+        <button class="rail-btn" id="btn-snap" title="对齐辅助线：现在关着，拖卡片不会有吸附和线条。点一下打开">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v17"/><path d="M4 7.5h3M4 12h3M4 16.5h3"/><path d="M17 7.5h3M17 12h3M17 16.5h3"/></svg></span>
+        <span class="rail-text">对齐辅助线</span>
+        <span class="rail-dot" id="snap-dot" hidden></span>
+        </button>
+
+        <button class="rail-btn" id="btn-export" title="把卡片里的素材原文件导出到本地文件夹：选中几张就导这几张，没选就导整张画布（Ctrl+Shift+E）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.4v11"/><path d="M7.6 10.2L12 14.6l4.4-4.4"/><path d="M4.4 17.4v1.8a1.4 1.4 0 001.4 1.4h12.4a1.4 1.4 0 001.4-1.4v-1.8"/></svg></span>
+        <span class="rail-text">导出素材</span>
+        </button>
+
+        <button class="rail-btn" id="btn-library" title="打开素材库，里面的素材可以直接拖到画布上">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 012-2h3.3l2 2h7.7a2 2 0 012 2v7a2 2 0 01-2 2h-13a2 2 0 01-2-2z"/></svg></span>
+        <span class="rail-text">素材库</span>
+        </button>
+
+        <button class="rail-btn" id="btn-tasks" title="看生成任务：正在跑的、跑完的、失败的，可以跳回对应卡片">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg></span>
+        <span class="rail-text">任务</span>
+        </button>
+        <button class="rail-btn" id="btn-channel-status" title="通道状态：看每个接口通道还剩多少余额、班次排到哪了（只读，不扣次数）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 18.5a8.5 8.5 0 0117 0"/><path d="M12 18.5l4.4-5.6"/><circle cx="12" cy="18.5" r="1.5"/></svg></span>
+        <span class="rail-text">通道状态</span>
+        </button>
+
+        <button class="rail-btn" id="btn-submit-compress" title="提交压缩：已打开。所有通道每次提交参考图都会先压缩（只压提交副本，原图不变）">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4.5H6.2A1.7 1.7 0 004.5 6.2V9"/><path d="M15 4.5h2.8A1.7 1.7 0 0119.5 6.2V9"/><path d="M9 19.5H6.2a1.7 1.7 0 01-1.7-1.7V15"/><path d="M15 19.5h2.8a1.7 1.7 0 001.7-1.7V15"/><path d="M8 8l3 3M16 8l-3 3M8 16l3-3M16 16l-3-3"/></svg></span>
+        <span class="rail-text">提交压缩</span>
+        <span class="rail-dot" id="submit-compress-dot"></span>
+        </button>
+
+        <button class="rail-btn" id="btn-tail-prompts" title="尾部提示词：预设多套不同风格，生成时自动接在提示词后面">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5h11"/><path d="M4.5 11.5h7"/><path d="M4.5 16.5h5"/><path d="M15.5 13.5l2 2 3-3.2"/><path d="M15.5 19l2 2 3-3.2"/></svg></span>
+        <span class="rail-text">尾部提示词</span>
+        <span class="rail-dot" id="tail-prompts-dot"></span>
+        </button>
+
+        <button class="rail-btn" id="btn-settings" title="字体、字号、整体缩放、快捷键">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h9M17 8h3M4 16h3M11 16h9"/><circle cx="15" cy="8" r="2"/><circle cx="9" cy="16" r="2"/></svg></span>
+        <span class="rail-text">显示</span>
+        </button>
+
+        <button class="rail-btn" id="btn-minimap" title="展开小地图，一眼看到所有卡片在哪">
+        <span class="rail-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4.5l6-2 6 2v15l-6 2-6-2-6 2v-15z"/><path d="M9 4.5v15M15 2.5v15"/></svg></span>
+        <span class="rail-text">小地图</span>
+        </button>
+
+        <button class="rail-btn" id="btn-theme" title="一键切换白天 / 夜间模式">
+        <span class="rail-ico" id="theme-icon"></span>
+        <span class="rail-text" id="theme-label">夜间模式</span>
+        </button>
+        <div class="rail-foot"><span class="save-state" id="save-state">已保存</span></div>
+      </div>
+    </aside>
+
+    <div class="canvas-main">
+      <div class="viewport" id="viewport">
+        <div class="grid-layer" id="grid-layer"></div>
+        <div class="world" id="world"></div>
+        <div class="canvas-title" id="canvas-title">
+          <button class="canvas-title-btn" id="canvas-title-btn" type="button" title="点一下改画布名字">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 5.6A2 2 0 016.6 3.6h7.4l4.4 4.4v11.4a2 2 0 01-2 2H6.6a2 2 0 01-2-2z"/><path d="M13.8 3.8v4.4h4.4"/><path d="M8.4 12.6h6.4M8.4 16h4"/></svg>
+            <span class="canvas-title-text" id="canvas-title-text">画布</span>
+          </button>
+          <input class="canvas-title-input" id="canvas-title-input" type="text" maxlength="60" autocomplete="off" spellcheck="false" hidden />
+        </div>        <div class="search-panel hidden" id="search-panel">
+          <div class="search-head">
+            <input id="search-input" type="search" autocomplete="off" placeholder="找卡片：提示词、模型名、类型都行" />
+            <button class="icon-btn" id="search-close" title="关闭（Esc）">×</button>
+          </div>
+          <div class="search-hint" id="search-hint">画布上有几张卡片，输几个字就能找出来</div>
+          <div class="search-list" id="search-list"></div>
+        </div>
+        <div class="align-bar hidden" id="align-bar">
+          <span class="align-label">对齐</span>
+          <button data-align="left" title="左对齐：都对齐到最左边那张"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3.6v16.8"/><rect x="7.2" y="6" width="11.4" height="4.4" rx="1.3"/><rect x="7.2" y="13.6" width="7.2" height="4.4" rx="1.3"/></svg></button>
+          <button data-align="hcenter" title="水平居中：都对齐到整块的中间（左右并排时好用）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.6v16.8"/><rect x="6.3" y="6" width="11.4" height="4.4" rx="1.3"/><rect x="8.4" y="13.6" width="7.2" height="4.4" rx="1.3"/></svg></button>
+          <button data-align="right" title="右对齐：都对齐到最右边那张"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 3.6v16.8"/><rect x="5.4" y="6" width="11.4" height="4.4" rx="1.3"/><rect x="9.6" y="13.6" width="7.2" height="4.4" rx="1.3"/></svg></button>
+          <span class="align-sep"></span>
+          <button data-align="top" title="顶对齐：都对齐到最上面那张"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 4h16.8"/><rect x="6" y="7.2" width="4.4" height="11.4" rx="1.3"/><rect x="13.6" y="7.2" width="4.4" height="7.2" rx="1.3"/></svg></button>
+          <button data-align="vcenter" title="垂直居中：都对齐到整块的中间（上下并排时好用）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 12h16.8"/><rect x="6" y="6.3" width="4.4" height="11.4" rx="1.3"/><rect x="13.6" y="8.4" width="4.4" height="7.2" rx="1.3"/></svg></button>
+          <button data-align="bottom" title="底对齐：都对齐到最下面那张"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 20h16.8"/><rect x="6" y="5.4" width="4.4" height="11.4" rx="1.3"/><rect x="13.6" y="9.6" width="4.4" height="7.2" rx="1.3"/></svg></button>
+          <span class="align-sep"></span>
+          <button data-align="dist-x" title="水平等距：最左和最右两张不动，中间的按一样间隔排开（至少三张）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="6" width="4.2" height="12" rx="1.3"/><rect x="9.9" y="6" width="4.2" height="12" rx="1.3"/><rect x="16.6" y="6" width="4.2" height="12" rx="1.3"/></svg></button>
+          <button data-align="dist-y" title="垂直等距：最上和最下两张不动，中间的按一样间隔排开（至少三张）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3.2" width="12" height="4.2" rx="1.3"/><rect x="6" y="9.9" width="12" height="4.2" rx="1.3"/><rect x="6" y="16.6" width="12" height="4.2" rx="1.3"/></svg></button>
+          <span class="align-sep batch-sep" hidden></span>
+          <button type="button" class="batch-btn" data-batch="generate" hidden>批量生成 0</button>
+          <button type="button" class="batch-btn" data-batch="retry" hidden>批量重试 0</button>
+        </div>
+        <div class="zoom-box">
+          <button id="btn-zoom-out">−</button>
+          <div class="value" id="zoom-value">100%</div>
+          <button id="btn-zoom-in">+</button>
+        </div>
+        <div class="minimap" id="minimap" title="小地图：点一下或者拖着里面的蓝框，画面就跟着跳过去">
+          <canvas id="minimap-canvas"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <aside class="library-drawer hidden" id="library-drawer">
+      <div class="drawer-head">
+        <b>素材库</b>
+        <span class="grow"></span>
+        <button class="ghost" id="drawer-close">收起</button>
+      </div>
+      <div class="drawer-hint">按住素材拖到画布上，松手就放在鼠标指的位置；点一下 = 加到画布中间</div>
+      <div class="drawer-body" id="library-body"></div>
+    </aside>
+  </div>
+  <div class="loading" id="loading">正在打开画布…</div>
+  <div class="perf-panel" id="perf-panel" aria-hidden="true">
+    <div class="perf-row perf-head"><span>性能</span><span class="perf-hint">Ctrl+Alt+P 关闭</span></div>
+    <div class="perf-row"><span>帧率</span><b id="perf-fps">--</b></div>
+    <div class="perf-row"><span>帧耗时</span><b id="perf-frame">--</b></div>
+    <div class="perf-row"><span>长任务</span><b id="perf-long">--</b></div>
+    <div class="perf-row"><span>页面元素</span><b id="perf-dom">--</b></div>
+    <div class="perf-row"><span>图片 / 视频</span><b id="perf-media">--</b></div>
+    <div class="perf-row"><span>内存</span><b id="perf-mem">--</b></div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="/assets/api.js"></script>
+  <script src="/assets/ui.js"></script>
+  <script src="/assets/library.js"></script>
+  <script src="/assets/tasks.js"></script>
+  <script src="/assets/chstatus.js"></script>
+  <script src="/assets/canvas.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/vendor/three/three.module.min.js",
+        "three/addons/": "/vendor/three/"
+      }
+    }
+  </script>
+  <script type="module" src="/assets/director.js"></script>
+</body>
+</html>
+

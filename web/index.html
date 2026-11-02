@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本地无限画布</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">本地无限画布</div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="page-tools">
+    <button id="btn-settings" title="字体、字号、整体缩放、深浅主题、素材目录都在这里调">显示与设置</button>
+    <button id="btn-library" title="浏览素材目录里的图片 / 视频 / 音频 / 尾帧">素材库</button>
+    <button id="btn-tasks" title="看所有生成任务：进行中、已完成、失败的都在这里，可以跳到对应卡片">生成任务</button>
+    <button id="btn-logs" title="看运行日志，出问题先看这里">运行日志</button>
+    <button id="btn-import" title="把之前导出的画布备份文件导进来">导入画布备份</button>
+    <input type="file" id="import-file" accept=".json,application/json" hidden />
+    <span class="grow"></span>
+    <span class="hint" id="tools-hint"></span>
+  </div>
+
+  <div class="wrap">
+    <div class="card-box">
+      <h2 class="section-title">新建画布</h2>
+      <div class="create-row">
+        <input type="text" id="new-name" placeholder="给画布起个名字，例如：星海篇 第3集" autocomplete="off" />
+        <button class="primary" id="btn-create">创建并进入</button>
+      </div>
+      <div class="hint">只需要一个名字就可以开始，其他什么都不用设置。</div>
+    </div>
+
+    <div style="height: 22px"></div>
+
+    <div class="card-box">
+      <h2 class="section-title">我的画布 <span class="count" id="count-label"></span></h2>
+      <div class="canvas-grid" id="list"></div>
+      <div class="empty" id="empty" style="display: none">还没有画布，在上面输入名字创建第一块吧。</div>
+    </div>
+
+
+  </div>
+
+  <div class="loading hidden" id="loading">正在读取画布列表…</div>
+
+  <script src="/assets/api.js"></script>
+  <script src="/assets/ui.js"></script>
+  <script src="/assets/library.js"></script>
+  <script src="/assets/logs.js"></script>
+  <script src="/assets/tasks.js"></script>
+  <script src="/assets/portal.js"></script>
+</body>
+</html>

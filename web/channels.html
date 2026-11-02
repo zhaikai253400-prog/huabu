@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>接口通道设置 · 本地无限画布</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/style.css" />
+  <link rel="stylesheet" href="/assets/local-pages.css" />
+</head>
+<body class="local-page">
+  <div class="topbar local-topbar">
+    <div class="brand"><span class="local-brand-dot"></span>接口通道设置</div>
+    <span class="local-sub">只在本机窗口里打开</span>
+    <div class="chips">
+      <button id="btn-back-launcher">返回启动器</button>
+      <button class="primary" id="btn-open-canvas">打开画布</button>
+    </div>
+  </div>
+
+  <div class="wrap channels-shell">
+    <div class="card-box channels-card">
+      <div class="channels-titlebar">
+        <h2 class="section-title">接口通道 <span class="count" id="channel-count"></span></h2>
+        <span class="hint" id="channel-save-state"></span>
+      </div>
+
+      <div class="local-note">
+        把平台地址、密钥和模型填在这里，保存后画布就能直接用。每个通道下面的
+        <b>「拉取模型」</b>、<b>「试生成一张图」</b> 和 <b>「试生成一段视频」</b> 都保留。
+        密钥只保存在这台电脑的配置里，不会写进画布页面。
+      </div>
+
+      <div class="ch-tools">
+        <input type="search" id="ch-search" placeholder="搜通道名字、地址、备注或模型…" autocomplete="off" />
+        <button id="ch-expand-all">全部展开</button>
+        <button id="ch-collapse-all">全部收起</button>
+        <button id="btn-ch-io">导入 / 导出</button>
+      </div>
+
+      <div class="ch-io-panel hidden" id="ch-io-panel">
+        <div class="ch-io-row">
+          <button id="btn-ch-export">导出到文件</button>
+          <button id="btn-ch-copy">复制到剪贴板</button>
+          <label class="kind-box"><input type="checkbox" id="ch-include-keys" /> 导出时包含密钥</label>
+        </div>
+        <textarea id="ch-import-text" rows="5" placeholder="把通道 JSON 粘到这里，再选下面的「合并导入」或「替换导入」。"></textarea>
+        <div class="ch-io-row">
+          <button id="btn-ch-import-merge">合并导入</button>
+          <button id="btn-ch-import-replace">替换导入</button>
+        </div>
+      </div>
+
+      <div class="channel-list" id="channel-list"></div>
+
+      <div class="channel-add-row">
+        <button id="btn-add-channel-0">+ 图片通道</button>
+        <button id="btn-add-channel-1">+ 视频通道</button>
+        <button id="btn-add-channel-2">+ 音频通道</button>
+        <button id="btn-add-channel-3">+ 全能通道</button>
+        <span class="grow"></span>
+        <button class="primary" id="btn-save-channels">保存</button>
+      </div>
+    </div>
+
+    <div class="hint">改动会自动保存；真正的「试生成」和「拉取模型」会调用对应平台，可能产生费用。</div>
+  </div>
+
+  <script>window.__localToken = '__LOCAL_TOKEN__';</script>
+  <script src="/assets/api.js"></script>
+  <script src="/assets/ui.js"></script>
+  <script src="/assets/channels.js"></script>
+  <script>
+    (function () {
+      document.getElementById('btn-back-launcher').addEventListener('click', function () {
+        location.href = '/launcher';
+      });
+      document.getElementById('btn-open-canvas').addEventListener('click', function () {
+        location.href = '/';
+      });
+      const ready = window.UITheme && window.UITheme.load ? window.UITheme.load() : Promise.resolve();
+      ready.then(function () {
+        return window.ChannelAdmin.mount({});
+      }).catch(function (error) {
+        const list = document.getElementById('channel-list');
+        if (list) list.textContent = '页面初始化失败：' + error.message;
+      });
+    })();
+  </script>
+</body>
+</html>

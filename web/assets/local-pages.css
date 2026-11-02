@@ -1,0 +1,254 @@
+/* ---------- 本地启动器 / 接口通道设置窗口 ---------- */
+
+body.local-page {
+  min-height: 100%;
+  background:
+    radial-gradient(1100px 520px at 50% -10%, var(--accent-soft), transparent 68%),
+    var(--bg);
+}
+
+.local-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(14px);
+  background: var(--float);
+}
+
+.local-topbar .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.local-brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 5px var(--accent-soft), 0 0 16px rgba(47, 111, 237, 0.5);
+}
+
+.local-sub {
+  color: var(--muted);
+  font-size: 0.84em;
+}
+
+.local-topbar .chips {
+  align-items: center;
+}
+
+.local-topbar .chips button {
+  padding: 7px 13px;
+  font-size: 0.9em;
+}
+
+/* 启动器主画面 */
+.launcher-shell {
+  min-height: calc(100vh - 61px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px 84px;
+}
+
+.launcher-card {
+  position: relative;
+  width: min(760px, 100%);
+  overflow: hidden;
+  padding: 52px 48px 42px;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 26px 70px rgba(16, 24, 40, 0.13);
+}
+
+.launcher-card::before {
+  content: "";
+  position: absolute;
+  inset: -1px -1px auto;
+  height: 5px;
+  background: linear-gradient(90deg, transparent, var(--accent), #7c5cff, var(--accent), transparent);
+  background-size: 220% 100%;
+  animation: local-flow 5s linear infinite;
+}
+
+.launcher-card::after {
+  content: "";
+  position: absolute;
+  width: 420px;
+  height: 420px;
+  right: -180px;
+  top: -230px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-soft), transparent 68%);
+  pointer-events: none;
+}
+
+@keyframes local-flow {
+  from { background-position: 0% 0; }
+  to { background-position: 220% 0; }
+}
+
+.launcher-mark {
+  position: relative;
+  width: 78px;
+  height: 78px;
+  margin: 0 auto 22px;
+  border-radius: 22px;
+  border: 1px solid var(--line-strong);
+  background:
+    linear-gradient(90deg, var(--thumb-grid) 1px, transparent 1px) 0 0 / 14px 14px,
+    linear-gradient(var(--thumb-grid) 1px, transparent 1px) 0 0 / 14px 14px,
+    var(--surface-2);
+  box-shadow: inset 0 0 0 8px var(--panel), 0 14px 30px rgba(47, 111, 237, 0.18);
+}
+
+.launcher-mark::before,
+.launcher-mark::after {
+  content: "";
+  position: absolute;
+  border-radius: 6px;
+  background: var(--accent);
+  box-shadow: 0 0 20px rgba(47, 111, 237, 0.45);
+}
+
+.launcher-mark::before {
+  width: 23px;
+  height: 23px;
+  left: 19px;
+  top: 20px;
+}
+
+.launcher-mark::after {
+  width: 16px;
+  height: 16px;
+  right: 18px;
+  bottom: 19px;
+  opacity: 0.72;
+}
+
+.launcher-title {
+  margin: 0;
+  font-size: clamp(1.55em, 3vw, 2.15em);
+  letter-spacing: 0.02em;
+}
+
+.launcher-sub {
+  margin: 12px auto 0;
+  max-width: 500px;
+  color: var(--muted);
+  line-height: 1.7;
+  font-size: 0.95em;
+}
+
+.launcher-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 34px;
+}
+
+.launcher-actions button {
+  min-width: 168px;
+  padding: 13px 24px;
+  border-radius: 12px;
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.launcher-actions .launch-main {
+  min-width: 220px;
+  box-shadow: 0 12px 28px rgba(47, 111, 237, 0.3);
+}
+
+.launcher-status {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 28px;
+  padding-top: 22px;
+  border-top: 1px dashed var(--line);
+}
+
+.launcher-status .chip {
+  background: var(--surface-2);
+}
+
+.launcher-foot {
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+/* 接口通道设置窗口 */
+.channels-shell {
+  max-width: 1180px;
+  padding-top: 24px;
+}
+
+.channels-card {
+  padding: 20px 22px 22px;
+}
+
+.channels-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.channels-titlebar .section-title {
+  margin: 0;
+}
+
+.channels-titlebar .hint {
+  margin: 0 0 0 auto;
+}
+
+.local-note {
+  margin: 10px 0 2px;
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.86em;
+  line-height: 1.65;
+}
+
+.local-note b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.channel-add-row .grow {
+  flex: 1 1 auto;
+}
+
+.ch-keyrow > button { flex: 0 0 auto; white-space: nowrap; }
+
+@media (max-width: 620px) {
+  .launcher-card {
+    padding: 38px 22px 30px;
+    border-radius: 20px;
+  }
+
+  .launcher-actions button,
+  .launcher-actions .launch-main {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .local-sub {
+    display: none;
+  }
+
+  .channels-card {
+    padding: 16px 14px;
+  }
+}

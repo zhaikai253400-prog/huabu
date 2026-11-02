@@ -1,0 +1,1818 @@
+(function () {
+  const KIND_TEXT = { image: '图片', video: '视频', audio: '音频' };
+  const KIND_ORDER = ['image', 'video', 'audio'];
+  const AUTH_STYLES = [
+    { value: 'bearer', label: 'Bearer（放 Authorization 头，最常用）' },
+    { value: 'header', label: '自定义请求头' },
+    { value: 'query', label: '放在 URL 参数里' },
+    { value: 'none', label: '不带密钥' },
+  ];
+  const METHODS = ['POST', 'GET', 'PUT', 'PATCH', 'DELETE'].map((v) => ({ value: v, label: v }));
+  const CONTENT_TYPES = [
+    { value: 'json', label: 'JSON（最常用）' },
+    { value: 'form', label: '表单 form-urlencoded' },
+    { value: 'text', label: '纯文本' },
+    { value: 'none', label: '不带请求体' },
+  ];
+  const UPLOAD_TYPES = [
+    { value: 'form', label: 'multipart 表单（最常用）' },
+    { value: 'base64', label: '把素材内容塞进 JSON' },
+    { value: 'binary', label: '原始字节直传' },
+    { value: 'session', label: '会话分片上传（建会话→分片→校验）' },
+  ];
+  const DEFAULT_REF_LIMITS = {
+    image: { exts: 'png,jpg,jpeg,webp,gif,bmp', maxMB: 20, maxSec: 0, totalMB: 0, maxCount: -1 },
+    video: { exts: 'mp4,mov,webm,mkv', maxMB: 200, maxSec: 0, totalMB: 0, maxCount: -1 },
+    audio: { exts: 'mp3,wav,m4a,aac,flac,ogg', maxMB: 50, maxSec: 0, totalMB: 0, maxCount: -1 },
+  };
+  const REF_COMPRESS_EDGES = [
+    { value: '1024', label: '最长边 1024（最省）' },
+    { value: '1280', label: '最长边 1280' },
+    { value: '1600', label: '最长边 1600' },
+    { value: '2048', label: '最长边 2048（推荐）' },
+    { value: '2560', label: '最长边 2560' },
+    { value: '3072', label: '最长边 3072' },
+    { value: '3840', label: '最长边 3840（最清晰）' },
+  ];
+  const REF_COMPRESS_QUALITY = [
+    { value: '1', label: '质量 1 · 最好' },
+    { value: '2', label: '质量 2 · 画质优先（推荐）' },
+    { value: '3', label: '质量 3 · 均衡' },
+    { value: '4', label: '质量 4 · 更省体积' },
+    { value: '5', label: '质量 5 · 最省体积' },
+  ];
+  const DEFAULT_BALANCE = {
+    enabled: false,
+    path: '/balance',
+    method: 'GET',
+    resultPath: 'credits',
+    namePath: 'name',
+    unitPath: 'unit',
+    unitText: '',
+    notePath: 'note',
+    tasksPath: 'tasks',
+  };
+  const DEFAULT_RIDE = {
+    enabled: false,
+    path: '/api/ride',
+    method: 'GET',
+    ridePath: 'ride',
+    idPath: 'id',
+    statePath: 'state',
+    departAtPath: 'departAt',
+    onboardPath: 'onboard',
+    triggerPath: 'batchTrigger',
+    stateText: 'open:开放上车,accepting:即将发车,boarded:已上车待发,running:发车中,done:已发车',
+  };
+  const DEFAULT_UPLOAD = {
+    enabled: false,
+    path: '/files/upload',
+    method: 'POST',
+    contentType: 'form',
+    field: 'file',
+    extra: {},
+    headers: {},
+    resultUrl: 'data.url',
+    resultId: 'data.id',
+    timeoutSec: 300,
+  };
+  const DEFAULT_SIZE_MAP = {
+    '1K': { '16:9': '1280x720', '9:16': '720x1280', '1:1': '1024x1024', '4:3': '1152x864', '3:4': '864x1152' },
+    '2K': { '16:9': '2048x1152', '9:16': '1152x2048', '1:1': '1440x1440', '4:3': '1536x1152', '3:4': '1152x1536' },
+    '4K': { '16:9': '3840x2160', '9:16': '2160x3840', '1:1': '2880x2880', '4:3': '3072x2304', '3:4': '2304x3072' },
+  };
+  const DEFAULT_VIDEO_SIZE_MAP = {
+    '480p': { '16:9': '854x480', '9:16': '480x854', '1:1': '480x480', '4:3': '640x480', '3:4': '480x640' },
+    '720p': { '16:9': '1280x720', '9:16': '720x1280', '1:1': '720x720', '4:3': '960x720', '3:4': '720x960' },
+    '1080p': { '16:9': '1920x1080', '9:16': '1080x1920', '1:1': '1080x1080', '4:3': '1440x1080', '3:4': '1080x1440' },
+    '2K': { '16:9': '2560x1440', '9:16': '1440x2560', '1:1': '1440x1440', '4:3': '1920x1440', '3:4': '1440x1920' },
+    '4K': { '16:9': '3840x2160', '9:16': '2160x3840', '1:1': '2160x2160', '4:3': '2880x2160', '3:4': '2160x2880' },
+  };
+  const ADD_PRESETS = [
+    { kinds: ['image'], label: '图片通道', name: '新图片通道' },
+    { kinds: ['video'], label: '视频通道', name: '新视频通道' },
+    { kinds: ['audio'], label: '音频通道', name: '新音频通道' },
+    { kinds: ['image', 'video', 'audio'], label: '全能通道', name: '新全能通道' },
+  ];
+
+  const listEl = document.getElementById('channel-list');
+  const countEl = document.getElementById('channel-count');
+  const saveStateEl = document.getElementById('channel-save-state');
+  const searchEl = document.getElementById('ch-search');
+  const ioPanel = document.getElementById('ch-io-panel');
+  const importText = document.getElementById('ch-import-text');
+  const includeKeysEl = document.getElementById('ch-include-keys');
+
+  let channels = [];
+  let channelTemplate = null;
+  let hooks = {};
+  let dirty = false;
+  let saveTimer = null;
+  let search = '';
+  const notices = new Map();
+  const tests = new Map();
+  const balances = new Map();
+  const autoQueried = new Set();
+  const rides = new Map();
+  const autoRideQueried = new Set();
+  const jsonDrafts = new Map();
+  const openIds = new Set();
+  const closedIds = new Set();
+  const advancedOpen = new Set();
+  const keyShown = new Set();
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+
+  function makeText(value, onInput, placeholder) {
+    const input = el('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.value = value === undefined || value === null ? '' : String(value);
+    if (placeholder) input.placeholder = placeholder;
+    input.addEventListener('input', () => onInput(input.value));
+    return input;
+  }
+
+  function makeNumber(value, onInput, min, max) {
+    const input = makeText(value, (text) => onInput(text));
+    input.type = 'number';
+    if (min !== undefined) input.min = String(min);
+    if (max !== undefined) input.max = String(max);
+    return input;
+  }
+
+  function makeArea(value, onInput, rows) {
+    const area = el('textarea');
+    area.rows = rows || 4;
+    area.spellcheck = false;
+    area.value = value === undefined || value === null ? '' : String(value);
+    area.addEventListener('input', () => onInput(area.value));
+    return area;
+  }
+
+  function makeSelect(value, options, onChange) {
+    const select = el('select');
+    options.forEach((item) => {
+      const opt = el('option', null, item.label);
+      opt.value = item.value;
+      if (String(item.value) === String(value)) opt.selected = true;
+      select.appendChild(opt);
+    });
+    select.addEventListener('change', () => onChange(select.value));
+    return select;
+  }
+
+  function makeCheckbox(labelText, checked, onChange) {
+    const wrap = el('label', 'kind-box');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.checked = Boolean(checked);
+    box.addEventListener('change', () => onChange(box.checked));
+    wrap.appendChild(box);
+    wrap.appendChild(el('span', null, labelText));
+    return wrap;
+  }
+
+  function fieldRow(labelText, control) {
+    const wrap = el('div', 'field-row');
+    wrap.appendChild(el('label', 'field-label', labelText));
+    const box = el('div', 'field-ctl');
+    box.appendChild(control);
+    wrap.appendChild(box);
+    return wrap;
+  }
+
+  function hintRow(text) {
+    return el('div', 'field-hint', text);
+  }
+
+  function jsonField(channel, draftKey, labelText, value, applySet, rows) {
+    const key = channel.id + '|' + draftKey;
+    if (!jsonDrafts.has(key)) jsonDrafts.set(key, JSON.stringify(value || {}, null, 2));
+    const area = makeArea(
+      jsonDrafts.get(key),
+      (text) => {
+        jsonDrafts.set(key, text);
+        try {
+          const parsed = JSON.parse(text);
+          area.classList.remove('bad');
+          area.title = '';
+          applySet(parsed);
+          queueSave();
+        } catch (error) {
+          area.classList.add('bad');
+          area.title = 'JSON 还没写对：' + error.message;
+        }
+      },
+      rows || 4
+    );
+    area.classList.add('json-area');
+    return fieldRow(labelText, area);
+  }
+
+  // 一行模型可以写“id”，也可以写“id | 显示名”，再加一段就是备注：“id | 显示名 | 备注”
+  function parseModelEntry(entry) {
+    const text = String(entry === undefined || entry === null ? '' : entry).trim();
+    if (!text) return { id: '', label: '', note: '' };
+    const parts = text
+      .split(/\s*[|｜]\s*/)
+      .map((item) => item.trim())
+      .filter((item) => item !== '');
+    if (parts.length >= 2) {
+      return { id: parts[0], label: parts[1], note: parts.slice(2).join(' · ') };
+    }
+    return { id: text, label: text, note: '' };
+  }
+
+  function modelId(entry) {
+    return parseModelEntry(entry).id;
+  }
+
+  function modelLabel(entry) {
+    return parseModelEntry(entry).label;
+  }
+
+  function modelNote(entry) {
+    return parseModelEntry(entry).note;
+  }
+
+  function splitModels(ids, filters) {
+    const out = { image: [], video: [], audio: [], other: [] };
+    const compiled = {};
+    KIND_ORDER.forEach((kind) => {
+      const pattern = String((filters && filters[kind]) || '').trim();
+      if (!pattern) return;
+      try {
+        compiled[kind] = new RegExp(pattern, 'i');
+      } catch {
+        compiled[kind] = null;
+      }
+    });
+    (ids || []).forEach((raw) => {
+      const id = modelId(raw);
+      if (!id) return;
+      for (const kind of KIND_ORDER) {
+        if (compiled[kind] && compiled[kind].test(id)) {
+          if (out[kind].indexOf(id) < 0) out[kind].push(id);
+          return;
+        }
+      }
+      if (out.other.indexOf(id) < 0) out.other.push(id);
+    });
+    return out;
+  }
+
+  function matches(channel) {
+    if (!search) return true;
+    const needle = search.toLowerCase();
+    const parts = [channel.name, channel.baseUrl, channel.notes];
+    KIND_ORDER.forEach((kind) => {
+      (channel.models[kind] || []).forEach((entry) => parts.push(String(entry)));
+    });
+    return parts.join(' ').toLowerCase().indexOf(needle) >= 0;
+  }
+
+  function isOpen(channel) {
+    if (openIds.has(channel.id)) return true;
+    if (closedIds.has(channel.id)) return false;
+    return channels.length <= 3;
+  }
+
+  function setNotice(id, text, tone) {
+    notices.set(id, { text: text, tone: tone || '' });
+    render();
+  }
+
+  function render() {
+    listEl.textContent = '';
+    const shown = channels.filter(matches);
+    countEl.textContent = channels.length
+      ? '共 ' + channels.length + ' 个' + (search ? '（显示 ' + shown.length + ' 个）' : '')
+      : '';
+    if (!channels.length) {
+      listEl.appendChild(
+        el('div', 'empty-inline', '还没有通道。点下面的「+ 图片通道」这类按钮新建，把平台地址和密钥填进去就能用。')
+      );
+      return;
+    }
+    if (!shown.length) {
+      listEl.appendChild(el('div', 'empty-inline', '没有匹配「' + search + '」的通道。'));
+      return;
+    }
+    shown.forEach((channel) => {
+      try {
+        listEl.appendChild(buildCard(channel));
+      } catch (error) {
+        const broken = el('div', 'channel-card');
+        broken.appendChild(el('div', 'channel-head', '通道「' + (channel && channel.name ? channel.name : '未命名') + '」读不出来：' + error.message));
+        listEl.appendChild(broken);
+      }
+    });
+  }
+
+  function badge(text, tone) {
+    return el('span', 'ch-badge' + (tone ? ' ' + tone : ''), text);
+  }
+
+  function buildCard(channel) {
+    const card = el('div', 'channel-card');
+    if (!isOpen(channel)) card.classList.add('collapsed');
+
+    const head = el('div', 'channel-head');
+    const toggle = el('button', 'ch-toggle', isOpen(channel) ? '▾' : '▸');
+    toggle.title = '展开 / 收起这个通道';
+    toggle.addEventListener('click', () => {
+      if (isOpen(channel)) {
+        closedIds.add(channel.id);
+        openIds.delete(channel.id);
+      } else {
+        openIds.add(channel.id);
+        closedIds.delete(channel.id);
+      }
+      render();
+    });
+    head.appendChild(toggle);
+
+    const nameInput = makeText(
+      channel.name,
+      (value) => {
+        channel.name = value;
+        queueSave();
+      },
+      '通道名字，例如 AICopy 生图'
+    );
+    nameInput.className = 'channel-name';
+    head.appendChild(nameInput);
+
+    const badges = el('div', 'ch-badges');
+    KIND_ORDER.forEach((kind) => {
+      if (channel.kinds.indexOf(kind) < 0) return;
+      badges.appendChild(badge(KIND_TEXT[kind] + ' ' + (channel.models[kind] || []).length));
+    });
+    if (!channel.baseUrl) badges.appendChild(badge('没填地址', 'warn'));
+    else if (!channel.apiKey) badges.appendChild(badge('没填密钥', 'warn'));
+    head.appendChild(badges);
+
+    const enabledBox = makeCheckbox('启用', channel.enabled !== false, (checked) => {
+      channel.enabled = checked;
+      queueSave();
+      render();
+    });
+    enabledBox.classList.add('channel-enabled');
+    head.appendChild(enabledBox);
+
+    const actions = el('div', 'ch-head-actions');
+    const iconButton = (label, title, handler, className) => {
+      const button = el('button', className || '', label);
+      button.title = title;
+      button.addEventListener('click', handler);
+      return button;
+    };
+    actions.appendChild(
+      iconButton('上移', '排在前面的通道优先使用', () => {
+        const index = channels.indexOf(channel);
+        if (index <= 0) return;
+        channels.splice(index, 1);
+        channels.splice(index - 1, 0, channel);
+        render();
+        queueSave(true);
+      })
+    );
+    actions.appendChild(
+      iconButton('下移', '往后排', () => {
+        const index = channels.indexOf(channel);
+        if (index < 0 || index >= channels.length - 1) return;
+        channels.splice(index, 1);
+        channels.splice(index + 1, 0, channel);
+        render();
+        queueSave(true);
+      })
+    );
+    actions.appendChild(
+      iconButton('复制', '复制成一个新通道，密钥也会一起复制', () => {
+        const copy = JSON.parse(JSON.stringify(channel));
+        copy.id = 'ch_' + Math.random().toString(16).slice(2, 10);
+        copy.name = channel.name + ' 副本';
+        channels.splice(channels.indexOf(channel) + 1, 0, copy);
+        openIds.add(copy.id);
+        closedIds.delete(copy.id);
+        render();
+        queueSave(true);
+      })
+    );
+    actions.appendChild(
+      iconButton('导出', '把这个通道复制成 JSON（不带密钥）', () => {
+        const plain = JSON.parse(JSON.stringify(channel));
+        plain.apiKey = '';
+        copyText(JSON.stringify(plain, null, 2)).then((ok) => {
+          saveStateEl.textContent = ok ? '这个通道的 JSON 已复制（密钥没带出去）' : '复制失败，请手动选中复制';
+          saveStateEl.className = 'hint ' + (ok ? 'ok' : 'bad');
+        });
+      })
+    );
+    actions.appendChild(
+      iconButton(
+        '删除',
+        '删掉这个通道',
+        () => {
+          if (!window.confirm('确定删掉通道「' + channel.name + '」吗？画布上已经生成的东西不受影响。')) return;
+          channels = channels.filter((item) => item.id !== channel.id);
+          render();
+          queueSave(true);
+        },
+        'danger'
+      )
+    );
+    head.appendChild(actions);
+    card.appendChild(head);
+
+    const body = el('div', 'channel-body');
+    body.appendChild(
+      fieldRow(
+        '备注',
+        makeText(channel.notes, (value) => { channel.notes = value; queueSave(); }, '提醒自己的话，比如「这个平台晚上便宜」')
+      )
+    );
+    body.appendChild(
+      fieldRow('Base URL', makeText(channel.baseUrl, (value) => { channel.baseUrl = value; queueSave(); }, 'https://api.xxx.com/v1'))
+    );
+
+    const keyRow = el('div', 'field-row');
+    keyRow.appendChild(el('label', 'field-label', '密钥'));
+    const keyBox = el('div', 'field-ctl ch-keyrow');
+    const keyInput = makeText(channel.apiKey, (value) => { channel.apiKey = value; queueSave(); }, 'sk-...');
+    keyInput.type = keyShown.has(channel.id) ? 'text' : 'password';
+    keyInput.autocomplete = 'off';
+    const showBtn = el('button', null, keyShown.has(channel.id) ? '隐藏' : '显示');
+    showBtn.addEventListener('click', () => {
+      if (keyShown.has(channel.id)) keyShown.delete(channel.id);
+      else keyShown.add(channel.id);
+      render();
+    });
+    keyBox.appendChild(keyInput);
+    keyBox.appendChild(showBtn);
+    keyRow.appendChild(keyBox);
+    body.appendChild(keyRow);
+    body.appendChild(
+      hintRow('密钥只保存在这台电脑的 data\\config.json 里，不写进画布文件。整个文件夹复制到别的电脑时密钥会跟着走，别随便外发。')
+    );
+
+    body.appendChild(buildBalanceRow(channel));
+    body.appendChild(buildRideRow(channel));
+
+    KIND_ORDER.forEach((kind) => {
+      if (channel.kinds.indexOf(kind) < 0) return;
+      body.appendChild(buildModelBlock(channel, kind));
+    });
+
+    if (channel.kinds.indexOf('image') >= 0) body.appendChild(buildTestRow(channel));
+    if (channel.kinds.indexOf('video') >= 0) body.appendChild(buildVideoTestRow(channel));
+    body.appendChild(buildAdvanced(channel));
+
+    const notice = notices.get(channel.id);
+    if (notice) body.appendChild(el('div', 'channel-notice ' + (notice.tone || ''), notice.text));
+
+    card.appendChild(body);
+    return card;
+  }
+
+
+  // 模型清单改了以后，把已经不存在的模型从人脸处理勾选里去掉
+  function pruneFacePicks(channel, kind) {
+    if (!channel.faceProcessing || typeof channel.faceProcessing !== 'object') return;
+    const picked = channel.faceProcessing[kind];
+    if (!Array.isArray(picked) || !picked.length) return;
+    const alive = (channel.models[kind] || []).map((entry) => modelId(entry));
+    channel.faceProcessing[kind] = picked.filter((id) => alive.indexOf(id) >= 0);
+  }
+  function buildModelBlock(channel, kind) {
+    const box = el('div', 'model-block');
+    const title = el('div', 'model-title');
+    const list = channel.models[kind] || [];
+    title.appendChild(el('span', null, KIND_TEXT[kind] + '模型（一行一个，可写「id | 显示名 | 备注」）'));
+    title.appendChild(el('span', 'model-count', list.length + ' 个'));
+    const probe = el('button', null, '拉取模型');
+    probe.title = '按高级设置里的路径去问平台要模型清单，拿回来自动分类填好';
+    probe.addEventListener('click', () => probeChannelModels(channel));
+    title.appendChild(probe);
+    const tidy = el('button', null, '重新归类');
+    tidy.title = '把框里的模型按「归类规则」重新分到图片 / 视频 / 音频';
+    tidy.addEventListener('click', () => reclassify(channel, kind));
+    title.appendChild(tidy);
+    const clear = el('button', null, '清空');
+    clear.addEventListener('click', () => {
+      if (!window.confirm('清空「' + KIND_TEXT[kind] + '模型」列表框？')) return;
+      channel.models[kind] = [];
+      render();
+      queueSave(true);
+    });
+    title.appendChild(clear);
+    box.appendChild(title);
+
+    const area = makeArea(
+      list.join('\n'),
+      (text) => {
+        channel.models[kind] = text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        pruneFacePicks(channel, kind);
+        queueSave();
+      },
+      4
+    );
+    area.placeholder = 'gpt-image-2.5-flare\n模型id | 显示名 | 备注（备注可省）\nseedance-2.5 | Seedance 2.5 | 新标中转';
+    box.appendChild(area);
+
+    const defaults = channel.defaults || (channel.defaults = { image: '', video: '', audio: '' });
+    const options = [{ value: '', label: '（不指定，默认用清单第一个）' }].concat(
+      list.map((entry) => ({
+        value: modelId(entry),
+        label:
+          modelLabel(entry) +
+          (modelNote(entry) ? ' · ' + modelNote(entry) : '') +
+          '（' + modelId(entry) + '）',
+      }))
+    );
+
+    // 人脸处理：平台级开关，按模型逐个勾。只有勾上的模型提交时才会带上，不勾就完全不带这个字段。
+    if (kind === 'image' || kind === 'video') {
+      if (!channel.faceProcessing || typeof channel.faceProcessing !== 'object') {
+        channel.faceProcessing = { image: [], video: [], audio: [] };
+      }
+      const faceConf = channel.faceProcessing;
+      if (!Array.isArray(faceConf[kind])) faceConf[kind] = [];
+      const picked = faceConf[kind];
+      const faceBox = el('div', 'model-block face-block');
+      const faceTitle = el('div', 'model-title');
+      faceTitle.appendChild(el('span', null, '参考图人脸处理（按模型勾选，默认关）'));
+      const faceCount = el('span', 'model-count', picked.length ? '已开 ' + picked.length + ' 个' : '全部关闭');
+      faceTitle.appendChild(faceCount);
+      faceBox.appendChild(faceTitle);
+      faceBox.appendChild(
+        hintRow(
+          '勾上的模型提交时会带上「人脸处理」：平台先对参考图做一次人脸处理，让模型更容易还原参考人物的长相。只对参考图生效，参考视频 / 音频 / 文字不受影响，不额外收费；但它是「开启」而不是「保证」，个别图处理失败就按原图提交。'
+        )
+      );
+      if (!list.length) {
+        faceBox.appendChild(hintRow('上面还没有' + KIND_TEXT[kind] + '模型，先填模型再回来勾。'));
+      } else {
+        const faceRow = el('div', 'kind-row face-picks');
+        list.forEach((entry) => {
+          const id = modelId(entry);
+          if (!id) return;
+          const hit = picked.indexOf(id) >= 0;
+          const box = makeCheckbox(modelLabel(entry) || id, hit, (checked) => {
+            const at = picked.indexOf(id);
+            if (checked && at < 0) picked.push(id);
+            if (!checked && at >= 0) picked.splice(at, 1);
+            faceCount.textContent = picked.length ? '已开 ' + picked.length + ' 个' : '全部关闭';
+            queueSave(true);
+          });
+          box.title = id + ' · 只影响这个模型';
+          faceRow.appendChild(box);
+        });
+        faceBox.appendChild(faceRow);
+      }
+      faceBox.appendChild(hintRow('只勾真正需要还原人物长相的模型就好；清单里删掉的模型会自动从勾选里清掉。这个字段要平台支持才行（通道2 的文档里有），不支持的平台勾了可能被拒单。'));
+      box.appendChild(faceBox);
+    }
+    box.appendChild(
+      fieldRow(
+        '默认用哪个',
+        makeSelect(defaults[kind], options, (value) => {
+          defaults[kind] = value;
+          queueSave();
+        })
+      )
+    );
+    return box;
+  }
+
+  function buildTestRow(channel) {
+    const wrap = el('div', 'channel-test');
+    const models = channel.models.image || [];
+    const select = makeSelect(models[0] ? modelId(models[0]) : '', models.map((id) => ({
+      value: modelId(id),
+      label: modelLabel(id) + (modelNote(id) ? ' · ' + modelNote(id) : ''),
+    })), () => {});
+    select.className = 'test-model';
+    const button = el('button', null, '试生成一张图');
+    if (!models.length) {
+      button.disabled = true;
+      button.title = '先在上面填一个图片模型';
+    }
+    const box = el('div', 'test-box');
+    button.addEventListener('click', () => runChannelTest(channel, select.value, box, button));
+    wrap.appendChild(el('span', 'field-label', '试一张'));
+    wrap.appendChild(select);
+    wrap.appendChild(button);
+    wrap.appendChild(box);
+    const remembered = tests.get(channel.id);
+    if (remembered) paintTest(box, remembered);
+    return wrap;
+  }
+
+  function paintTest(box, result) {
+    box.textContent = '';
+    if (result.url) {
+      const isVideo = result.kind === 'video' || /\.(mp4|webm|mov|m4v)(\?|$)/i.test(result.url);
+      if (isVideo) {
+        const video = el('video', 'test-thumb video');
+        video.src = result.url;
+        video.controls = true;
+        video.muted = true;
+        video.playsInline = true;
+        box.appendChild(video);
+      } else {
+        const img = el('img', 'test-thumb');
+        img.src = result.url;
+        box.appendChild(img);
+      }
+    }
+    box.appendChild(el('span', 'test-text ' + (result.tone || ''), result.text));
+  }
+
+  // 余额查询：只读接口，不扣次数
+  function buildBalanceRow(channel) {
+    const wrap = el('div', 'channel-test');
+    wrap.appendChild(el('span', 'field-label', '余额'));
+    const button = el('button', null, '查余额');
+    button.title = '问一下平台还剩多少次 / 多少钱，不会扣费';
+    if (!channel.balance || channel.balance.enabled !== true) {
+      button.disabled = true;
+      button.title = '先在高级设置里打开「余额查询」并填好路径';
+    }
+    const box = el('div', 'test-box');
+    box.dataset.balanceFor = channel.id;
+    button.addEventListener('click', () => runBalanceQuery(channel, box, button));
+    wrap.appendChild(button);
+    wrap.appendChild(box);
+    const remembered = balances.get(channel.id);
+    if (remembered) paintBalance(box, remembered);
+    return wrap;
+  }
+
+  function balanceTimeText(stamp) {
+    const d = new Date(stamp);
+    if (isNaN(d.getTime())) return '';
+    const pad = (n) => (n < 10 ? '0' + n : String(n));
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  function paintBalance(box, result) {
+    box.textContent = '';
+    if (!result) return;
+    box.appendChild(el('span', 'test-text ' + (result.tone || ''), result.text || '—'));
+    if (result.stamp) box.appendChild(el('span', 'balance-stamp', balanceTimeText(result.stamp)));
+  }
+
+  async function runBalanceQuery(channel, box, button) {
+    button.disabled = true;
+    paintBalance(box, { text: '正在查…' });
+    await flushSave();
+    try {
+      const res = await window.api.channelBalance(channel);
+      const done = { text: describeBalance(res), tone: 'ok', stamp: Date.now() };
+      balances.set(channel.id, done);
+      paintBalance(box, done);
+      paintBalanceElsewhere(channel.id, done);
+    } catch (error) {
+      const failed = { text: '查询失败：' + error.message, tone: 'bad', stamp: Date.now() };
+      balances.set(channel.id, failed);
+      paintBalance(box, failed);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  // 页面上可能同时有好几个「余额」行（重绘过），都跟着更新
+  function paintBalanceElsewhere(channelId, result) {
+    const boxes = document.querySelectorAll('[data-balance-for="' + channelId + '"]');
+    boxes.forEach((box) => {
+      if (box.classList && box.classList.contains('test-box')) paintBalance(box, result);
+    });
+  }
+
+  // 打开设置页时顺手查一遍已经打开余额查询的通道，省得每次都手动点
+  async function autoQueryBalances() {
+    const targets = channels.filter((channel) => channel.balance && channel.balance.enabled === true);
+    for (const channel of targets) {
+      if (autoQueried.has(channel.id)) continue;
+      autoQueried.add(channel.id);
+      try {
+        const res = await window.api.channelBalance(channel);
+        const done = { text: describeBalance(res), tone: 'ok', stamp: Date.now() };
+        balances.set(channel.id, done);
+        paintBalanceElsewhere(channel.id, done);
+      } catch (error) {
+        const failed = { text: '查询失败：' + error.message, tone: 'bad', stamp: Date.now() };
+        balances.set(channel.id, failed);
+        paintBalanceElsewhere(channel.id, failed);
+      }
+    }
+  }
+
+  // 下一班发车：只读接口，不扣次数
+  function buildRideRow(channel) {
+    const wrap = el('div', 'channel-test');
+    wrap.appendChild(el('span', 'field-label', '班次'));
+    const button = el('button', null, '查班次');
+    button.title = '看看平台现在这一班排到哪了，只读、不扣费';
+    if (!channel.ride || channel.ride.enabled !== true) {
+      button.disabled = true;
+      button.title = '先在高级设置里打开「班次查询」并填好路径';
+    }
+    const box = el('div', 'test-box');
+    box.dataset.rideFor = channel.id;
+    button.addEventListener('click', () => runRideQuery(channel, box, button));
+    wrap.appendChild(button);
+    wrap.appendChild(box);
+    const remembered = rides.get(channel.id);
+    if (remembered) paintRide(box, remembered);
+    return wrap;
+  }
+
+  function paintRide(box, result) {
+    box.textContent = '';
+    if (!result) return;
+    box.appendChild(el('span', 'test-text ' + (result.tone || ''), result.text || '—'));
+    if (result.stamp) box.appendChild(el('span', 'balance-stamp', balanceTimeText(result.stamp)));
+  }
+
+  function paintRideElsewhere(channelId, result) {
+    const boxes = document.querySelectorAll('[data-ride-for="' + channelId + '"]');
+    boxes.forEach((box) => {
+      if (box.classList && box.classList.contains('test-box')) paintRide(box, result);
+    });
+  }
+
+  async function runRideQuery(channel, box, button) {
+    button.disabled = true;
+    paintRide(box, { text: '正在查…' });
+    await flushSave();
+    try {
+      const res = await window.api.channelRide(channel);
+      const done = { text: describeRide(res), tone: 'ok', stamp: Date.now() };
+      rides.set(channel.id, done);
+      paintRide(box, done);
+      paintRideElsewhere(channel.id, done);
+    } catch (error) {
+      const failed = { text: '查询失败：' + error.message, tone: 'bad', stamp: Date.now() };
+      rides.set(channel.id, failed);
+      paintRide(box, failed);
+      paintRideElsewhere(channel.id, failed);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function describeRide(res) {
+    const ride = res && res.ride;
+    if (!ride) return '现在没有排班（平台还没开下一班）';
+    const parts = ['班次 ' + (ride.id || '?')];
+    const state = String(ride.state || '');
+    const stateLabel = ride.stateText && ride.stateText !== ride.state ? ride.stateText : state || '状态未知';
+    parts.push(stateLabel);
+    const boarded = ride.onboard === null || ride.onboard === undefined ? null : Number(ride.onboard);
+    const need = ride.trigger === null || ride.trigger === undefined ? null : Number(ride.trigger);
+    const waiting = state === 'open' || state === 'accepting' || state === 'boarded';
+    const departed = state === 'running' || state === 'done';
+    if (waiting && boarded !== null && need !== null && need > 0) {
+      parts.push('已上车 ' + boarded + ' / ' + need + ' 条');
+      const left = Math.max(0, need - boarded);
+      if (left > 0) parts.push('还差 ' + left + ' 条就发车');
+      else parts.push('够数了，马上就发');
+    } else if (boarded !== null) {
+      parts.push('本班 ' + boarded + ' 条');
+    } else if (need !== null && need > 0 && waiting) {
+      parts.push('满 ' + need + ' 条发车');
+    }
+    const depart = rideDepartText(ride);
+    if (depart) parts.push(depart);
+    if (waiting) parts.push('攒够一车才走，说不准几点');
+    else if (departed && need !== null && need > 0) parts.push('下一班凑满 ' + need + ' 条再发');
+    return parts.join(' · ');
+  }
+
+  // 只有真的发车了，平台给的时间才可信；还在候车时那个时间会滚动，写出来反而误导
+  function rideDepartText(ride) {
+    if (!ride || !ride.departAt) return '';
+    const state = String(ride.state || '');
+    if (state !== 'running' && state !== 'done') return '';
+    const d = new Date(ride.departAt);
+    if (isNaN(d.getTime())) return '';
+    const pad = (n) => (n < 10 ? '0' + n : String(n));
+    const now = new Date();
+    const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    const stamp = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    return '本班 ' + (sameDay ? '' : pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + ' ') + stamp + ' 已发车';
+  }
+
+  async function autoQueryRides() {
+    const targets = channels.filter((channel) => channel.ride && channel.ride.enabled === true);
+    for (const channel of targets) {
+      if (autoRideQueried.has(channel.id)) continue;
+      autoRideQueried.add(channel.id);
+      try {
+        const res = await window.api.channelRide(channel);
+        const done = { text: describeRide(res), tone: 'ok', stamp: Date.now() };
+        rides.set(channel.id, done);
+        paintRideElsewhere(channel.id, done);
+      } catch (error) {
+        const failed = { text: '查询失败：' + error.message, tone: 'bad', stamp: Date.now() };
+        rides.set(channel.id, failed);
+        paintRideElsewhere(channel.id, failed);
+      }
+    }
+  }
+
+  function describeBalance(res) {
+    const parts = [];
+    if (res.credits === null || res.credits === undefined) parts.push('余额没认出来（检查取值路径）');
+    else parts.push('剩余 ' + res.credits + (res.unit ? ' ' + res.unit : ''));
+    if (res.name) parts.push(res.name);
+    if (res.tasks) {
+      const t = res.tasks;
+      parts.push('完成 ' + t.done + ' / 失败 ' + t.failed + ' / 进行中 ' + t.running + ' / 排队 ' + t.pending);
+    }
+    if (res.note) parts.push(res.note);
+    return parts.join(' · ');
+  }
+
+  function buildVideoTestRow(channel) {
+    const wrap = el('div', 'channel-test');
+    const models = channel.models.video || [];
+    const select = makeSelect(models[0] ? modelId(models[0]) : '', models.map((id) => ({
+      value: modelId(id),
+      label: modelLabel(id) + (modelNote(id) ? ' · ' + modelNote(id) : ''),
+    })), () => {});
+    select.className = 'test-model';
+    const button = el('button', null, '试生成一段视频');
+    button.title = '会按 5 秒、720P 试一段，真的扣费，通常要等几分钟到几十分钟';
+    if (!models.length) {
+      button.disabled = true;
+      button.title = '先在上面填一个视频模型';
+    }
+    const box = el('div', 'test-box');
+    button.addEventListener('click', () => runVideoTest(channel, select.value, box, button));
+    wrap.appendChild(el('span', 'field-label', '试一段'));
+    wrap.appendChild(select);
+    wrap.appendChild(button);
+    wrap.appendChild(box);
+    const remembered = tests.get(channel.id + '|video');
+    if (remembered) paintTest(box, remembered);
+    return wrap;
+  }
+
+  async function runVideoTest(channel, model, box, button) {
+    if (!model) return;
+    if (
+      !window.confirm(
+        '试生成视频会真的扣费，而且要等几分钟到几十分钟。\n\n确认要用「' + model + '」试一段 5 秒、720P 的视频吗？'
+      )
+    ) {
+      return;
+    }
+    button.disabled = true;
+    paintTest(box, { text: '正在提交…' });
+    await flushSave();
+    let task = null;
+    try {
+      const res = await window.api.testChannelVideo({
+        channelId: channel.id,
+        model: model,
+        duration: 5,
+        resolution: '720p',
+        ratio: '16:9',
+      });
+      task = res.task;
+    } catch (error) {
+      paintTest(box, { text: '提交失败：' + error.message, tone: 'bad' });
+      button.disabled = false;
+      return;
+    }
+    const startedAt = Date.now();
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      let current = null;
+      try {
+        const res = await window.api.task(task.id);
+        current = res.task;
+      } catch (error) {
+        paintTest(box, { text: '读取进度失败：' + error.message, tone: 'bad' });
+        break;
+      }
+      if (!current) {
+        paintTest(box, { text: '这条试生成任务找不到了（服务可能重启过）', tone: 'bad' });
+        break;
+      }
+      if (current.status === 'done') {
+        const result = current.result || {};
+        const done = {
+          url: result.url || '',
+          kind: 'video',
+          text: '成功，' + model + ' 能出视频（已存到 素材\\视频）',
+          tone: 'ok',
+        };
+        tests.set(channel.id + '|video', done);
+        paintTest(box, done);
+        break;
+      }
+      if (current.status === 'failed' || current.status === 'canceled') {
+        const failed = { text: (current.status === 'canceled' ? '已取消：' : '失败：') + (current.error || ''), tone: 'bad' };
+        tests.set(channel.id + '|video', failed);
+        paintTest(box, failed);
+        break;
+      }
+      const mins = Math.floor((Date.now() - startedAt) / 60000);
+      paintTest(box, { text: (current.stage || '生成中') + '（已等 ' + mins + ' 分钟，可以离开这个页面，服务会一直等）' });
+    }
+    button.disabled = false;
+  }
+
+  async function runChannelTest(channel, model, box, button) {
+    if (!model) return;
+    button.disabled = true;
+    paintTest(box, { text: '正在试生成，可能要等一分钟…' });
+    await flushSave();
+    try {
+      const res = await window.api.testChannelImage({
+        channelId: channel.id,
+        model: model,
+        sizeKey: '1K',
+        ratio: '16:9',
+      });
+      const done = { url: res.result.url, text: '成功，' + model + ' 能出图（已存到素材目录）', tone: 'ok' };
+      tests.set(channel.id, done);
+      paintTest(box, done);
+    } catch (error) {
+      const failed = { text: '失败：' + error.message, tone: 'bad' };
+      tests.set(channel.id, failed);
+      paintTest(box, failed);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function buildAdvanced(channel) {
+    const details = el('details', 'channel-advanced');
+    if (advancedOpen.has(channel.id)) details.open = true;
+    details.addEventListener('toggle', () => {
+      if (details.open) advancedOpen.add(channel.id);
+      else advancedOpen.delete(channel.id);
+    });
+    details.appendChild(
+      el('summary', null, '高级设置：鉴权 / 接口路径 / 请求体模板 / 结果取值 / 归类规则 / 异步轮询（默认按 OpenAI 兼容接口填好了）')
+    );
+    const body = el('div', 'advanced-body');
+
+    body.appendChild(el('div', 'advanced-title', '鉴权'));
+    const authGrid = el('div', 'grid-2');
+    authGrid.appendChild(
+      fieldRow(
+        '鉴权方式',
+        makeSelect(channel.auth.style, AUTH_STYLES, (v) => {
+          channel.auth.style = v;
+          queueSave();
+        })
+      )
+    );
+    authGrid.appendChild(
+      fieldRow('请求头名字', makeText(channel.auth.header, (v) => { channel.auth.header = v; queueSave(); }))
+    );
+    body.appendChild(authGrid);
+    const authGrid2 = el('div', 'grid-2');
+    authGrid2.appendChild(fieldRow('前缀', makeText(channel.auth.prefix, (v) => { channel.auth.prefix = v; queueSave(); }, 'Bearer ')));
+    authGrid2.appendChild(fieldRow('URL 参数名', makeText(channel.auth.query, (v) => { channel.auth.query = v; queueSave(); }, 'key')));
+    body.appendChild(authGrid2);
+
+    const extraGrid = el('div', 'grid-2');
+    extraGrid.appendChild(jsonField(channel, 'headers', '固定请求头（JSON）', channel.headers, (parsed) => { channel.headers = parsed; }, 4));
+    extraGrid.appendChild(jsonField(channel, 'query', '固定 URL 参数（JSON）', channel.query, (parsed) => { channel.query = parsed; }, 4));
+    body.appendChild(extraGrid);
+
+    body.appendChild(el('div', 'advanced-title', '拉模型清单的接口'));
+    body.appendChild(
+      makeCheckbox('这个平台没有模型清单接口（模型我手动填）', channel.lists.enabled === false, (checked) => {
+        channel.lists.enabled = !checked;
+        queueSave();
+        render();
+      })
+    );
+    if (channel.lists.enabled === false) {
+      body.appendChild(hintRow('模型请直接写在上面「可用模型」框里，一行一个，格式：模型ID | 显示名 | 备注。'));
+      body.appendChild(el('div', 'advanced-title', '拉模型时按这些正则归类'));
+      const fg = el('div', 'grid-3');
+      KIND_ORDER.forEach((kind) => {
+        fg.appendChild(
+          fieldRow(KIND_TEXT[kind], makeText(channel.filters[kind], (v) => { channel.filters[kind] = v; queueSave(); }))
+        );
+      });
+      body.appendChild(fg);
+      return body;
+    }
+    const listGrid = el('div', 'grid-3');
+    listGrid.appendChild(fieldRow('路径', makeText(channel.lists.path, (v) => { channel.lists.path = v; queueSave(); }, '/models')));
+    listGrid.appendChild(
+      fieldRow(
+        '方法',
+        makeSelect(channel.lists.method || 'GET', METHODS, (v) => {
+          channel.lists.method = v;
+          queueSave();
+        })
+      )
+    );
+    listGrid.appendChild(
+      fieldRow('模型名字段', makeText(channel.lists.itemId, (v) => { channel.lists.itemId = v; queueSave(); }, 'id'))
+    );
+    body.appendChild(listGrid);
+    body.appendChild(
+      fieldRow('模型清单取值路径', makeText(channel.lists.resultPath, (v) => { channel.lists.resultPath = v; queueSave(); }, 'data'))
+    );
+
+    body.appendChild(el('div', 'advanced-title', '拉模型时按这些正则归类'));
+    const filterGrid = el('div', 'grid-3');
+    KIND_ORDER.forEach((kind) => {
+      filterGrid.appendChild(
+        fieldRow(KIND_TEXT[kind], makeText(channel.filters[kind], (v) => { channel.filters[kind] = v; queueSave(); }))
+      );
+    });
+    body.appendChild(filterGrid);
+
+    KIND_ORDER.forEach((kind) => {
+      if (channel.kinds.indexOf(kind) < 0) return;
+      body.appendChild(buildKindSpec(channel, kind));
+    });
+
+    const sizeBox = el('div', 'model-block');
+    const sizeHead = el('div', 'model-title');
+    sizeHead.appendChild(el('span', null, '尺寸对照表（档位 → 比例 → 实际像素）'));
+    const resetSize = el('button', null, '恢复成默认表');
+    resetSize.addEventListener('click', () => {
+      channel.sizeMap = JSON.parse(JSON.stringify(DEFAULT_SIZE_MAP));
+      jsonDrafts.delete(channel.id + '|sizeMap');
+      render();
+      queueSave(true);
+    });
+    sizeHead.appendChild(resetSize);
+    sizeBox.appendChild(sizeHead);
+    sizeBox.appendChild(
+      jsonField(channel, 'sizeMap', '尺寸对照表（JSON）', channel.sizeMap, (parsed) => { channel.sizeMap = parsed; }, 8)
+    );
+    body.appendChild(sizeBox);
+
+    if (channel.kinds.indexOf('video') >= 0) {
+      const videoBox = el('div', 'model-block');
+      const videoHead = el('div', 'model-title');
+      videoHead.appendChild(el('span', null, '视频尺寸对照表（分辨率档位 → 比例 → 实际像素）'));
+      const resetVideo = el('button', null, '恢复成默认表');
+      resetVideo.addEventListener('click', () => {
+        channel.videoSizeMap = JSON.parse(JSON.stringify(DEFAULT_VIDEO_SIZE_MAP));
+        jsonDrafts.delete(channel.id + '|videoSizeMap');
+        render();
+        queueSave(true);
+      });
+      videoHead.appendChild(resetVideo);
+      videoBox.appendChild(videoHead);
+      videoBox.appendChild(
+        jsonField(
+          channel,
+          'videoSizeMap',
+          '视频尺寸对照表（JSON）',
+          channel.videoSizeMap,
+          (parsed) => { channel.videoSizeMap = parsed; },
+          8
+        )
+      );
+      videoBox.appendChild(hintRow('卡片上选「720P / 1080P」时，接口里的 {{size}} 就按这张表换算；视频模板里也可以直接用 {{resolution}}。'));
+      body.appendChild(videoBox);
+    }
+
+    if (!channel.balance) channel.balance = JSON.parse(JSON.stringify(DEFAULT_BALANCE));
+    const balance = channel.balance;
+    body.appendChild(el('div', 'advanced-title', '余额查询（可选，只读，不扣次数）'));
+    body.appendChild(
+      hintRow(
+        '平台有专门的「查余量 / 查余额」接口时可以打开。怎么查：先填路径，点卡片上的「查余额」，看结果里的取值路径对不对；不对就照着平台返回的字段名改。'
+      )
+    );
+    body.appendChild(
+      makeCheckbox('这个通道可以查余额', balance.enabled === true, (checked) => {
+        balance.enabled = checked;
+        queueSave(true);
+        render();
+      })
+    );
+    if (balance.enabled === true) {
+      const balGrid = el('div', 'grid-2');
+      balGrid.appendChild(
+        fieldRow('查询路径', makeText(balance.path, (v) => { balance.path = v; queueSave(); }, '/api/balance'))
+      );
+      balGrid.appendChild(
+        fieldRow(
+          '方法',
+          makeSelect(balance.method || 'GET', METHODS, (v) => {
+            balance.method = v;
+            queueSave();
+          })
+        )
+      );
+      body.appendChild(balGrid);
+      const balGrid2 = el('div', 'grid-3');
+      balGrid2.appendChild(
+        fieldRow('余额取值路径', makeText(balance.resultPath, (v) => { balance.resultPath = v; queueSave(); }, 'credits'))
+      );
+      balGrid2.appendChild(
+        fieldRow('账号名取值路径', makeText(balance.namePath, (v) => { balance.namePath = v; queueSave(); }, 'name'))
+      );
+      balGrid2.appendChild(
+        fieldRow('单位取值路径', makeText(balance.unitPath, (v) => { balance.unitPath = v; queueSave(); }, 'unit'))
+      );
+      body.appendChild(balGrid2);
+      const balGrid3 = el('div', 'grid-3');
+      balGrid3.appendChild(
+        fieldRow('说明取值路径', makeText(balance.notePath, (v) => { balance.notePath = v; queueSave(); }, 'note'))
+      );
+      balGrid3.appendChild(
+        fieldRow('任务统计取值路径', makeText(balance.tasksPath, (v) => { balance.tasksPath = v; queueSave(); }, 'tasks'))
+      );
+      body.appendChild(balGrid3);
+      body.appendChild(
+        fieldRow('固定单位（填了就不读接口，例如「积分」）', makeText(balance.unitText, (v) => { balance.unitText = v; queueSave(); }, '积分'))
+      );
+      body.appendChild(hintRow('取值路径留空就表示这一项不要；余额读不出来时会自动试 remaining 字段。'));
+    }
+
+    if (!channel.ride) channel.ride = JSON.parse(JSON.stringify(DEFAULT_RIDE));
+    const rideConf = channel.ride;
+    body.appendChild(el('div', 'advanced-title', '班次查询（可选，只读，不扣次数）'));
+    body.appendChild(
+      hintRow(
+        '平台首页上会显示「下一班发车」这类排班信息时，可以打开这里，把卡片上的「查班次」接到同一个接口。'
+      )
+    );
+    body.appendChild(
+      makeCheckbox('这个通道可以查下一班发车', rideConf.enabled === true, (checked) => {
+        rideConf.enabled = checked;
+        queueSave(true);
+        render();
+      })
+    );
+    if (rideConf.enabled === true) {
+      const rideGrid = el('div', 'grid-2');
+      rideGrid.appendChild(
+        fieldRow('查询路径', makeText(rideConf.path, (v) => { rideConf.path = v; queueSave(); }, '/api/ride'))
+      );
+      rideGrid.appendChild(
+        fieldRow(
+          '方法',
+          makeSelect(rideConf.method || 'GET', METHODS, (v) => {
+            rideConf.method = v;
+            queueSave();
+          })
+        )
+      );
+      body.appendChild(rideGrid);
+      const rideGrid2 = el('div', 'grid-3');
+      rideGrid2.appendChild(
+        fieldRow('班次对象路径', makeText(rideConf.ridePath, (v) => { rideConf.ridePath = v; queueSave(); }, 'ride'))
+      );
+      rideGrid2.appendChild(
+        fieldRow('班次号路径', makeText(rideConf.idPath, (v) => { rideConf.idPath = v; queueSave(); }, 'id'))
+      );
+      rideGrid2.appendChild(
+        fieldRow('状态路径', makeText(rideConf.statePath, (v) => { rideConf.statePath = v; queueSave(); }, 'state'))
+      );
+      body.appendChild(rideGrid2);
+      const rideGrid3 = el('div', 'grid-3');
+      rideGrid3.appendChild(
+        fieldRow('发车时刻路径', makeText(rideConf.departAtPath, (v) => { rideConf.departAtPath = v; queueSave(); }, 'departAt'))
+      );
+      rideGrid3.appendChild(
+        fieldRow('已上车条数路径', makeText(rideConf.onboardPath, (v) => { rideConf.onboardPath = v; queueSave(); }, 'onboard'))
+      );
+      rideGrid3.appendChild(
+        fieldRow('满车条数路径', makeText(rideConf.triggerPath, (v) => { rideConf.triggerPath = v; queueSave(); }, 'batchTrigger'))
+      );
+      body.appendChild(rideGrid3);
+      body.appendChild(
+        fieldRow(
+          '状态文字对照',
+          makeText(rideConf.stateText, (v) => { rideConf.stateText = v; queueSave(); }, 'open:开放上车,running:发车中')
+        )
+      );
+      body.appendChild(hintRow('格式是「英文状态:中文说明」，用英文逗号隔开；没写到的状态就原样显示英文。'));
+    }
+
+    if (!channel.upload) channel.upload = JSON.parse(JSON.stringify(DEFAULT_UPLOAD));
+    const upload = channel.upload;
+    body.appendChild(el('div', 'advanced-title', '参考素材：先上传再引用'));
+    body.appendChild(
+      hintRow(
+        '有的平台要求先把参考图 / 参考视频 / 参考音频传上去、拿到素材地址或编号，才能下单。打开下面的开关并填好上传接口；不开就直接把素材内容随请求发出去。'
+      )
+    );
+    body.appendChild(
+      makeCheckbox('先把参考素材上传到平台，再带着素材地址 / 编号下单', upload.enabled === true, (checked) => {
+        upload.enabled = checked;
+        queueSave(true);
+      })
+    );
+    const upGrid = el('div', 'grid-3');
+    upGrid.appendChild(fieldRow('上传路径', makeText(upload.path, (v) => { upload.path = v; queueSave(); }, '/files/upload')));
+    upGrid.appendChild(fieldRow('方法', makeSelect(upload.method, METHODS, (v) => { upload.method = v; queueSave(); })));
+    upGrid.appendChild(
+      fieldRow('上传方式', makeSelect(upload.contentType, UPLOAD_TYPES, (v) => { upload.contentType = v; queueSave(); }))
+    );
+    body.appendChild(upGrid);
+    const upGrid2 = el('div', 'grid-3');
+    upGrid2.appendChild(fieldRow('文件字段名', makeText(upload.field, (v) => { upload.field = v; queueSave(); }, 'file')));
+    upGrid2.appendChild(
+      fieldRow('素材地址取值路径', makeText(upload.resultUrl, (v) => { upload.resultUrl = v; queueSave(); }, 'data.url'))
+    );
+    upGrid2.appendChild(
+      fieldRow('素材编号取值路径', makeText(upload.resultId, (v) => { upload.resultId = v; queueSave(); }, 'data.id'))
+    );
+    body.appendChild(upGrid2);
+    const upGrid3 = el('div', 'grid-2');
+    upGrid3.appendChild(jsonField(channel, 'uploadExtra', '上传附加参数（JSON）', upload.extra, (parsed) => { upload.extra = parsed; }, 4));
+    upGrid3.appendChild(jsonField(channel, 'uploadHeaders', '上传附加请求头（JSON）', upload.headers, (parsed) => { upload.headers = parsed; }, 4));
+    body.appendChild(upGrid3);
+    body.appendChild(
+      fieldRow('上传超时（秒）', makeNumber(upload.timeoutSec, (v) => { upload.timeoutSec = v; queueSave(); }, 10, 3600))
+    );
+    body.appendChild(
+      hintRow(
+        '传完之后下单模板里可以用 {{refIds}} {{refUploadUrls}} {{refImageIds}} {{refVideoIds}} {{refAudioIds}}；没上传或没拿到地址时，{{refs}} 系列仍然装的是素材内容本身。'
+      )
+    );
+
+    if (!channel.refLimits) channel.refLimits = JSON.parse(JSON.stringify(DEFAULT_REF_LIMITS));
+    const limits = channel.refLimits;
+    body.appendChild(el('div', 'advanced-title', '参考素材收件要求（提交前先校验，不合规就不浪费一次调用）'));
+    KIND_ORDER.forEach((kind) => {
+      if (!limits[kind]) limits[kind] = JSON.parse(JSON.stringify(DEFAULT_REF_LIMITS[kind]));
+      const rule = limits[kind];
+      if (rule.totalMB === undefined) rule.totalMB = 0;
+      if (rule.maxCount === undefined) rule.maxCount = -1;
+      const row = el('div', 'grid-3');
+      row.appendChild(fieldRow(KIND_TEXT[kind] + '允许格式', makeText(rule.exts, (v) => { rule.exts = v; queueSave(); })));
+      row.appendChild(
+        fieldRow(KIND_TEXT[kind] + '单张最大 MB', makeNumber(rule.maxMB, (v) => { rule.maxMB = v; queueSave(); }, 1, 4096))
+      );
+      row.appendChild(
+        fieldRow(
+          KIND_TEXT[kind] + '最多几个',
+          makeNumber(rule.maxCount, (v) => { rule.maxCount = v === '' ? -1 : v; queueSave(); }, -1, 99)
+        )
+      );
+      body.appendChild(row);
+      const row2 = el('div', 'grid-3');
+      row2.appendChild(
+        fieldRow(
+          KIND_TEXT[kind] + '合计最大 MB',
+          makeNumber(rule.totalMB, (v) => { rule.totalMB = v; queueSave(); }, 0, 4096)
+        )
+      );
+      row2.appendChild(
+        fieldRow(KIND_TEXT[kind] + '最长秒数', makeNumber(rule.maxSec, (v) => { rule.maxSec = v; queueSave(); }, 0, 3600))
+      );
+      body.appendChild(row2);
+    });
+    body.appendChild(
+      hintRow('「最多几个」填 -1 表示不限、填 0 表示这个通道不收这类素材；「合计最大 MB」和「最长秒数」填 0 表示不限。')
+    );
+
+    if (!channel.refCompress || typeof channel.refCompress !== 'object') {
+      channel.refCompress = { enabled: true, maxEdge: 2048, quality: 2, alphaFormat: 'webp' };
+    }
+    const compress = channel.refCompress;
+    body.appendChild(el('div', 'advanced-title', '参考图压缩清晰度'));
+    body.appendChild(
+      hintRow('是否压缩由画布左侧的「提交压缩」统一决定：打开时每次提交都压；关闭时只在超出上面的限制才压。下面的设置是压缩时用的清晰度。')
+    );
+    const cGrid = el('div', 'grid-3');
+    cGrid.appendChild(
+      fieldRow(
+        '最长边',
+        makeSelect(compress.maxEdge || 2048, REF_COMPRESS_EDGES, (v) => {
+          compress.maxEdge = Number(v);
+          queueSave(true);
+        })
+      )
+    );
+    cGrid.appendChild(
+      fieldRow(
+        '压缩质量',
+        makeSelect(compress.quality || 2, REF_COMPRESS_QUALITY, (v) => {
+          compress.quality = Number(v);
+          queueSave(true);
+        })
+      )
+    );
+    cGrid.appendChild(
+      fieldRow(
+        '透明图输出',
+        makeSelect(compress.alphaFormat || 'webp', [
+          { value: 'webp', label: 'WebP（推荐，体积小）' },
+          { value: 'png', label: 'PNG（更通用）' },
+        ], (v) => {
+          compress.alphaFormat = v;
+          queueSave(true);
+        })
+      )
+    );
+    body.appendChild(cGrid);
+    body.appendChild(
+      hintRow(
+        '压缩的是这次提交用的临时副本，画布上的原图和素材目录里的文件都不会改。压一次不够时会逐级提高压缩，达标就停；打开左侧「提交压缩」时，没超限也会先按这里的清晰度压一遍。'
+      )
+    );
+
+    details.appendChild(body);
+    return details;
+  }
+
+  function buildKindSpec(channel, kind) {
+    const spec = channel[kind];
+    const box = el('div', 'model-block ch-spec');
+    box.appendChild(el('div', 'advanced-title', KIND_TEXT[kind] + '接口'));
+
+    const grid = el('div', 'grid-3');
+    grid.appendChild(fieldRow('路径', makeText(spec.path, (v) => { spec.path = v; queueSave(); }, '/images/generations')));
+    grid.appendChild(
+      fieldRow(
+        '方法',
+        makeSelect(spec.method, METHODS, (v) => {
+          spec.method = v;
+          queueSave();
+        })
+      )
+    );
+    grid.appendChild(
+      fieldRow(
+        '请求体编码',
+        makeSelect(spec.contentType || 'json', CONTENT_TYPES, (v) => {
+          spec.contentType = v;
+          queueSave();
+        })
+      )
+    );
+    box.appendChild(grid);
+
+    const grid2 = el('div', 'grid-2');
+    grid2.appendChild(fieldRow('超时（秒）', makeNumber(spec.timeoutSec, (v) => { spec.timeoutSec = v; queueSave(); }, 10, 3600)));
+    grid2.appendChild(
+      fieldRow('结果取值路径', makeText(spec.resultUrl, (v) => { spec.resultUrl = v; queueSave(); }, 'data.0.url'))
+    );
+    box.appendChild(grid2);
+    box.appendChild(
+      fieldRow('base64 取值路径', makeText(spec.resultB64, (v) => { spec.resultB64 = v; queueSave(); }, 'data.0.b64_json'))
+    );
+    box.appendChild(fieldRow('请求体模板', makeArea(spec.body, (v) => { spec.body = v; queueSave(); }, 6)));
+    if (kind === 'video') {
+      box.appendChild(
+        fieldRow(
+          '首尾帧专用请求体（可选，留空则用上面的模板）',
+          makeArea(spec.framesBody || '', (v) => { spec.framesBody = v; queueSave(); }, 4)
+        )
+      );
+    }
+    box.appendChild(
+      hintRow(
+        '可用占位：{{prompt}} {{promptRaw}} {{model}} {{n}} {{size}} {{sizeKey}} {{ratio}} {{duration}} {{resolution}} {{mode}} {{refs}} {{refCount}} {{refNames}} {{ref0}} {{ref1}}…'
+      )
+    );
+    box.appendChild(
+      jsonField(channel, kind + '.extra', '附加固定参数（JSON，自动并进请求体）', spec.extra, (parsed) => { spec.extra = parsed; }, 3)
+    );
+    box.appendChild(
+      jsonField(channel, kind + '.headers', '这类接口单独加的请求头（JSON）', spec.headers, (parsed) => { spec.headers = parsed; }, 3)
+    );
+    box.appendChild(buildPollEditor(channel, kind, spec));
+    return box;
+  }
+
+  function buildPollEditor(channel, kind, spec) {
+    const poll = spec.poll || (spec.poll = {});
+    const wrap = el('div', 'ch-poll');
+    const head = el('div', 'model-title');
+    head.appendChild(
+      makeCheckbox('异步接口：先返回任务号，再轮询拿结果', poll.enabled === true, (checked) => {
+        poll.enabled = checked;
+        queueSave();
+        render();
+      })
+    );
+    wrap.appendChild(head);
+    if (poll.enabled !== true) return wrap;
+
+    const g1 = el('div', 'grid-3');
+    g1.appendChild(fieldRow('任务号取值路径', makeText(poll.taskIdPath, (v) => { poll.taskIdPath = v; queueSave(); }, 'data.0.task_id')));
+    g1.appendChild(fieldRow('查询路径', makeText(poll.path, (v) => { poll.path = v; queueSave(); }, '/videos/{{taskId}}')));
+    g1.appendChild(
+      fieldRow('查询方法', makeSelect(poll.method || 'GET', METHODS, (v) => {
+        poll.method = v;
+        queueSave();
+      }))
+    );
+    wrap.appendChild(g1);
+
+    const gl = el('div', 'grid-2');
+    gl.appendChild(
+      fieldRow(
+        '列表字段（只能拉列表时填）',
+        makeText(poll.listField, (v) => { poll.listField = v; queueSave(); }, 'tasks')
+      )
+    );
+    gl.appendChild(
+      fieldRow('列表里的任务号字段', makeText(poll.listIdField, (v) => { poll.listIdField = v; queueSave(); }, 'id'))
+    );
+    wrap.appendChild(gl);
+    wrap.appendChild(
+      hintRow('平台没有「按任务号查一条」的接口时：查询路径填列表地址，上面两个填列表字段和任务号字段，画布会自己从列表里挑出这条任务。')
+    );
+
+    const g2 = el('div', 'grid-3');
+    g2.appendChild(fieldRow('状态字段', makeText(poll.statusField, (v) => { poll.statusField = v; queueSave(); }, 'data.0.status')));
+    g2.appendChild(fieldRow('完成时的值', makeText(poll.doneValues, (v) => { poll.doneValues = v; queueSave(); }, 'success,completed')));
+    g2.appendChild(fieldRow('失败时的值', makeText(poll.failValues, (v) => { poll.failValues = v; queueSave(); }, 'failed,error')));
+    wrap.appendChild(g2);
+
+    const g3 = el('div', 'grid-3');
+    g3.appendChild(fieldRow('轮询结果地址路径', makeText(poll.resultUrl, (v) => { poll.resultUrl = v; queueSave(); }, 'data.0.url')));
+    g3.appendChild(fieldRow('轮询 base64 路径', makeText(poll.resultB64, (v) => { poll.resultB64 = v; queueSave(); })));
+    g3.appendChild(fieldRow('错误信息字段', makeText(poll.errorField, (v) => { poll.errorField = v; queueSave(); }, 'data.0.error')));
+    wrap.appendChild(g3);
+
+    const g5 = el('div', 'grid-2');
+    g5.appendChild(fieldRow('取件路径（可选）', makeText(poll.downloadPath, (v) => { poll.downloadPath = v; queueSave(); }, '/media/files/{{fileId}}/download')));
+    g5.appendChild(fieldRow('取件文件号路径', makeText(poll.downloadIdPath, (v) => { poll.downloadIdPath = v; queueSave(); }, 'resultFileIds.0')));
+    wrap.appendChild(g5);
+
+    const g6 = el('div', 'grid-2');
+    g6.appendChild(fieldRow('取件地址字段', makeText(poll.downloadUrlField, (v) => { poll.downloadUrlField = v; queueSave(); }, 'downloadUrl')));
+    g6.appendChild(hintRow('任务返回里只有文件号时填这两项：先按取件路径换出下载地址，再下载。'));
+    wrap.appendChild(g6);
+
+    const g4 = el('div', 'grid-2');
+    g4.appendChild(fieldRow('每隔几秒问一次', makeNumber(poll.intervalSec, (v) => { poll.intervalSec = v; queueSave(); }, 1, 600)));
+    g4.appendChild(fieldRow('最长等多少秒', makeNumber(poll.maxWaitSec, (v) => { poll.maxWaitSec = v; queueSave(); }, 30, 86400)));
+    wrap.appendChild(g4);
+    wrap.appendChild(hintRow('查询路径里的 {{taskId}} 会换成任务号；状态值可以写多个，用逗号分开。'));
+    return wrap;
+  }
+
+  function queueSave(immediate) {
+    dirty = true;
+    saveStateEl.textContent = '有改动，正在自动保存…';
+    saveStateEl.className = 'hint';
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      saveNow();
+    }, immediate ? 0 : 900);
+  }
+
+  async function saveNow() {
+    if (!dirty) return;
+    dirty = false;
+    saveStateEl.textContent = '正在保存…';
+    try {
+      await window.api.saveChannels(channels);
+      saveStateEl.textContent = '已保存';
+      saveStateEl.className = 'hint ok';
+      if (hooks.onSaved) hooks.onSaved();
+    } catch (error) {
+      dirty = true;
+      saveStateEl.textContent = '保存失败：' + error.message;
+      saveStateEl.className = 'hint bad';
+    }
+  }
+
+  async function flushSave() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    await saveNow();
+  }
+
+  async function probeChannelModels(channel) {
+    setNotice(channel.id, '正在拉取模型清单…', '');
+    let res;
+    try {
+      res = await window.api.probeChannel(channel);
+    } catch (error) {
+      setNotice(channel.id, '拉取失败：' + error.message, 'bad');
+      return;
+    }
+    let added = 0;
+    const other = (res.split && res.split.other) || [];
+    KIND_ORDER.forEach((kind) => {
+      const list = (res.split && res.split[kind]) || [];
+      if (!list.length) return;
+      if (channel.kinds.indexOf(kind) < 0) return;
+      const current = (channel.models[kind] || []).map((entry) => String(entry));
+      const seen = new Set(current.map((entry) => modelId(entry)));
+      list.forEach((id) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        current.push(id);
+        added += 1;
+      });
+      channel.models[kind] = current;
+    });
+    let text = '拉到 ' + res.models.length + ' 个模型，新加 ' + added + ' 个。';
+    if (other.length) text += ' 还有 ' + other.length + ' 个没归类：' + other.slice(0, 6).join('、') + '（可以在归类规则里补关键词）';
+    setNotice(channel.id, text, 'ok');
+    queueSave(true);
+  }
+
+  function reclassify(channel, kind) {
+    const current = (channel.models[kind] || []).map((entry) => String(entry));
+    if (!current.length) {
+      setNotice(channel.id, KIND_TEXT[kind] + '模型框是空的，先填或先拉。', '');
+      return;
+    }
+    const split = splitModels(current, channel.filters);
+    const moved = [];
+    KIND_ORDER.forEach((target) => {
+      if (target === kind) return;
+      if (channel.kinds.indexOf(target) < 0) return;
+      const list = split[target] || [];
+      if (!list.length) return;
+      const existing = (channel.models[target] || []).map((entry) => String(entry));
+      const seen = new Set(existing.map((entry) => modelId(entry)));
+      list.forEach((id) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        existing.push(id);
+      });
+      channel.models[target] = existing;
+      moved.push(KIND_TEXT[target] + ' ' + list.length + ' 个');
+    });
+    const keep = [];
+    current.forEach((entry) => {
+      const id = modelId(entry);
+      const target = KIND_ORDER.find((item) => (split[item] || []).indexOf(id) >= 0);
+      if (!target || target === kind) keep.push(entry);
+    });
+    channel.models[kind] = keep;
+    render();
+    queueSave(true);
+    setNotice(channel.id, moved.length ? '归好了：挪走 ' + moved.join('、') + '。' : '没有需要挪走的模型，都留在原位。', 'ok');
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard
+        .writeText(text)
+        .then(() => true)
+        .catch(() => false);
+    }
+    try {
+      if (importText) {
+        importText.value = text;
+        importText.select();
+        document.execCommand('copy');
+        return Promise.resolve(true);
+      }
+    } catch {
+      /* 复制不了就退回去手动复制 */
+    }
+    return Promise.resolve(false);
+  }
+
+  function exportPayload(withKeys) {
+    const plain = channels.map((channel) => {
+      const item = JSON.parse(JSON.stringify(channel));
+      if (!withKeys) item.apiKey = '';
+      return item;
+    });
+    return JSON.stringify(
+      { kind: 'canvas-channels', version: 1, exportedAt: new Date().toISOString(), channels: plain },
+      null,
+      2
+    );
+  }
+
+  function downloadText(text, filename) {
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = el('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 200);
+  }
+
+  function parseImport(text) {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.channels)) return parsed.channels;
+    if (parsed && typeof parsed === 'object' && parsed.id && parsed.baseUrl !== undefined) return [parsed];
+    throw new Error('这段 JSON 里没有通道配置');
+  }
+
+  // 填平缺项：导入的 JSON 可能只写了一半，缺的部分用模板补上，免得渲染出错
+  function fillDefaults(base, value) {
+    if (Array.isArray(base)) return Array.isArray(value) ? value.slice() : base.slice();
+    if (base && typeof base === 'object') {
+      const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      const out = {};
+      Object.keys(base).forEach((key) => {
+        out[key] = fillDefaults(base[key], src[key]);
+      });
+      Object.keys(src).forEach((key) => {
+        if (!(key in out)) out[key] = src[key];
+      });
+      return out;
+    }
+    return value === undefined || value === null ? base : value;
+  }
+
+  const FALLBACK_TEMPLATE = {
+    id: '',
+    name: '新通道',
+    notes: '',
+    enabled: true,
+    kinds: ['image'],
+    baseUrl: '',
+    apiKey: '',
+    auth: { style: 'bearer', header: 'Authorization', prefix: 'Bearer ', query: 'key' },
+    headers: {},
+    query: {},
+    models: { image: [], video: [], audio: [] },
+    defaults: { image: '', video: '', audio: '' },
+    filters: { image: '', video: '', audio: '' },
+    lists: { path: '/models', method: 'GET', resultPath: 'data', itemId: 'id' },
+    balance: DEFAULT_BALANCE,
+    ride: DEFAULT_RIDE,
+    faceProcessing: { image: [], video: [], audio: [] },
+    sizeMap: DEFAULT_SIZE_MAP,
+    videoSizeMap: DEFAULT_VIDEO_SIZE_MAP,
+    image: { path: '/images/generations', method: 'POST', contentType: 'json', body: '{}', extra: {}, headers: {}, resultUrl: 'data.0.url', resultB64: 'data.0.b64_json', timeoutSec: 300, poll: { enabled: false } },
+    video: { path: '/videos', method: 'POST', contentType: 'json', body: '{}', extra: {}, headers: {}, resultUrl: 'data.0.url', resultB64: '', timeoutSec: 600, poll: { enabled: false } },
+    audio: { path: '/audio/speech', method: 'POST', contentType: 'json', body: '{}', extra: {}, headers: {}, resultUrl: 'data.0.url', resultB64: '', timeoutSec: 300, poll: { enabled: false } },
+  };
+
+  function normalizeImported(item) {
+    const shaped = fillDefaults(channelTemplate || FALLBACK_TEMPLATE, item);
+    if (!Array.isArray(shaped.kinds) || !shaped.kinds.length) shaped.kinds = ['image'];
+    shaped.kinds = shaped.kinds.filter((kind) => KIND_ORDER.indexOf(kind) >= 0);
+    if (!shaped.kinds.length) shaped.kinds = ['image'];
+    KIND_ORDER.forEach((kind) => {
+      if (!Array.isArray(shaped.models[kind])) shaped.models[kind] = [];
+    });
+    if (!shaped.id) shaped.id = 'ch_' + Math.random().toString(16).slice(2, 10);
+    if (!shaped.name) shaped.name = '导入的通道';
+    return shaped;
+  }
+
+  async function doImport(mode) {
+    let incoming;
+    try {
+      incoming = parseImport(importText.value.trim()).map((item) => normalizeImported(item));
+    } catch (error) {
+      window.alert('导入失败：' + error.message);
+      return;
+    }
+    if (!incoming.length) {
+      window.alert('这段 JSON 里没有通道。');
+      return;
+    }
+    if (mode === 'replace') {
+      if (!window.confirm('确定用这 ' + incoming.length + ' 个通道替换掉现有的 ' + channels.length + ' 个吗？')) return;
+      channels = incoming;
+    } else {
+      incoming.forEach((item) => {
+        const copy = JSON.parse(JSON.stringify(item));
+        if (!copy.id || channels.some((channel) => channel.id === copy.id)) {
+          copy.id = 'ch_' + Math.random().toString(16).slice(2, 10);
+        }
+        if (!copy.name) copy.name = (channelTemplate && channelTemplate.name) || '导入的通道';
+        channels.push(copy);
+      });
+    }
+    importText.value = '';
+    if (ioPanel) ioPanel.classList.add('hidden');
+    render();
+    dirty = true;
+    await flushSave();
+    saveStateEl.textContent = '已导入 ' + incoming.length + ' 个通道并保存';
+    saveStateEl.className = 'hint ok';
+  }
+
+  function bindToolbar() {
+    if (searchEl) {
+      searchEl.addEventListener('input', () => {
+        search = searchEl.value.trim();
+        render();
+      });
+    }
+    const expandAll = document.getElementById('ch-expand-all');
+    const collapseAll = document.getElementById('ch-collapse-all');
+    if (expandAll) {
+      expandAll.addEventListener('click', () => {
+        channels.forEach((channel) => {
+          openIds.add(channel.id);
+          closedIds.delete(channel.id);
+        });
+        render();
+      });
+    }
+    if (collapseAll) {
+      collapseAll.addEventListener('click', () => {
+        channels.forEach((channel) => {
+          closedIds.add(channel.id);
+          openIds.delete(channel.id);
+        });
+        render();
+      });
+    }
+    ADD_PRESETS.forEach((preset, index) => {
+      const button = document.getElementById('btn-add-channel-' + index);
+      if (!button) return;
+      button.addEventListener('click', async () => {
+        await flushSave();
+        const base = channelTemplate ? JSON.parse(JSON.stringify(channelTemplate)) : {};
+        base.id = 'ch_' + Math.random().toString(16).slice(2, 10);
+        base.name = preset.name + ' ' + (channels.length + 1);
+        base.kinds = preset.kinds.slice();
+        base.enabled = true;
+        channels.push(base);
+        openIds.add(base.id);
+        closedIds.delete(base.id);
+        render();
+        queueSave(true);
+        const last = listEl.lastElementChild;
+        if (last && last.scrollIntoView) last.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    });
+    const saveBtn = document.getElementById('btn-save-channels');
+    if (saveBtn) saveBtn.addEventListener('click', () => queueSave(true));
+    const ioBtn = document.getElementById('btn-ch-io');
+    if (ioBtn) {
+      ioBtn.addEventListener('click', () => {
+        if (ioPanel) ioPanel.classList.toggle('hidden');
+      });
+    }
+    const exportFile = document.getElementById('btn-ch-export');
+    if (exportFile) {
+      exportFile.addEventListener('click', () => {
+        const withKeys = includeKeysEl && includeKeysEl.checked;
+        downloadText(exportPayload(withKeys), '通道配置-' + new Date().toISOString().slice(0, 10) + '.json');
+        saveStateEl.textContent = withKeys ? '已导出（含密钥，注意保管）' : '已导出（不含密钥）';
+        saveStateEl.className = 'hint ' + (withKeys ? 'warn' : 'ok');
+      });
+    }
+    const exportCopy = document.getElementById('btn-ch-copy');
+    if (exportCopy) {
+      exportCopy.addEventListener('click', () => {
+        const withKeys = includeKeysEl && includeKeysEl.checked;
+        copyText(exportPayload(withKeys)).then((ok) => {
+          saveStateEl.textContent = ok
+            ? withKeys
+              ? '已复制到剪贴板（含密钥）'
+              : '已复制到剪贴板（不含密钥）'
+            : '复制失败，请改用「导出到文件」';
+          saveStateEl.className = 'hint ' + (ok ? (withKeys ? 'warn' : 'ok') : 'bad');
+        });
+      });
+    }
+    const mergeBtn = document.getElementById('btn-ch-import-merge');
+    if (mergeBtn) mergeBtn.addEventListener('click', () => doImport('merge'));
+    const replaceBtn = document.getElementById('btn-ch-import-replace');
+    if (replaceBtn) replaceBtn.addEventListener('click', () => doImport('replace'));
+  }
+
+  async function mount(options) {
+    hooks = options || {};
+    bindToolbar();
+    try {
+      const data = await window.api.listChannels();
+      channels = Array.isArray(data.channels) ? data.channels : [];
+      channelTemplate = data.template || null;
+      render();
+      if (hooks.onLoaded) hooks.onLoaded();
+      autoQueryBalances();
+      autoQueryRides();
+    } catch (error) {
+      listEl.textContent = '';
+      listEl.appendChild(el('div', 'empty-inline', '读取通道配置失败：' + error.message));
+    }
+  }
+
+  window.ChannelAdmin = { mount: mount };
+})();

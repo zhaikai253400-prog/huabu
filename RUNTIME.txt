@@ -1,0 +1,56 @@
+内置运行时与第三方二进制说明
+==============================
+
+以下文件体积较大且不会随开发变动，统一不纳入 Git 版本管理。
+克隆仓库后需要按本文件说明单独获取，放回对应位置。
+
+--------------------------------------------------------------------
+1. runtime/node.exe
+--------------------------------------------------------------------
+  版本：Node v24.16.0
+  体积：约 89MB
+  用途：服务端唯一的运行时依赖
+
+  本项目零第三方 npm 依赖，所有服务端模块均使用 Node 内置模块：
+    node:http        手写 HTTP 服务与路由
+    node:sqlite      DatabaseSync 做持久化（data/canvas.db）
+    node:crypto      ID 生成、哈希
+    node:child_process  调用 ffmpeg / ffprobe
+
+  关键版本要求
+    Node >= 22.5.0  必须。node:sqlite 的 DatabaseSync 是该版本引入的，
+                    低于此版本服务无法启动。
+
+  重新获取
+    访问 https://nodejs.org/dist/v24.16.0/
+    下载 win-x64 压缩包，将其中的 node.exe 单独复制到 runtime/ 即可。
+    无需安装、无需 node_modules。
+
+--------------------------------------------------------------------
+2. tools/ffmpeg.exe + tools/ffprobe.exe
+--------------------------------------------------------------------
+  体积：各约 100MB，合计约 200MB
+  用途：
+    ffmpeg    生成卡片缩略图（server/thumbs.js，压成 720px webp）
+              视频抽首帧、视频转码
+    ffprobe   读取视频/音频的时长与分辨率
+
+  重新获取
+    访问 https://www.gyan.dev/ffmpeg/builds/ 或 https://ffmpeg.org/download.html
+    下载 Windows 静态构建（essentials 版即可），
+    将 bin/ 下的 ffmpeg.exe 与 ffprobe.exe 复制到 tools/ 目录。
+
+  验证
+    在项目根目录执行：tools/ffmpeg.exe -version
+    能输出版本信息即可。
+
+--------------------------------------------------------------------
+3. 已纳入版本管理的二进制（体积小，无需单独获取）
+--------------------------------------------------------------------
+  无限画布.exe          约 0.2MB   启动器
+  server/tray/CanvasTray.exe       系统托盘程序（由 CanvasTray.cs 编译）
+  tools/icon-gen/MakeIcon.exe      图标生成工具
+  web/vendor/three/                本地 three.js（3D 导演台用）
+    three.module.min.js   约 672KB
+    OrbitControls.js
+    TransformControls.js
