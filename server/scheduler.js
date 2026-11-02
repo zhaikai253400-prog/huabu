@@ -7,6 +7,8 @@ const store = require('./store');
 const tasks = require('./tasks');
 const generate = require('./generate');
 const channels = require('./channels');
+// 参数装配规则与前端、generate.js 共用同一份源码（web 目录下的 UMD 模块）
+const payloadRules = require('../web/assets/payload-rules.js');
 
 // 备用模型失败后隔几秒再提交，避免接口还在限流时马上又撞一次
 const RETRY_DELAY_MS = 5000;
@@ -536,23 +538,25 @@ function submitItem(run, item, node) {
     markNodeRunning(run.canvasId, item.nodeId, false, { error: item.error });
     return;
   }
-  const payload = {
+  // C5：定时组的 payload 不再自己拼，改走与单卡 / 批量同一套装配规则
+  // （web/assets/payload-rules.js）。原来这里把没选模式的快照写死成 'reference'，
+  // 而单卡那条路原样传空串，同一张卡片在 {{mode}} 上会忽空忽有。
+  // nodeType 用卡片自己的类型：组里既有 video 卡也有 quick 卡，两者规则不同。
+  const payload = payloadRules.assemble({
     canvasId: run.canvasId,
     nodeId: item.nodeId,
+    nodeType: member.type,
     channelId: channelId,
     channelName: channelName,
     model: model,
     prompt: submission.apiPrompt,
     promptRaw: submission.mainPrompt,
-    frozenTail: frozenTail,
-    sizeKey: params.size || '',
-    ratio: params.ratio || '',
-    count: Number(params.count) || 1,
-    duration: Number(params.duration) || 0,
-    resolution: params.resolution || '',
-    mode: params.mode === 'frames' || params.mode === 'text' ? params.mode : 'reference',
+    params: params,
     refs: Array.isArray(snap.refs) ? snap.refs : [],
-  };
+  });
+  // 定时组的尾部提示词在开始那一刻就冻结，运行期间改预设不串味：
+  // 它是「取用哪一套」，不属于参数规则，所以装配完再挂上去。
+  payload.frozenTail = frozenTail;
   try {
     item.status = 'running';
     item.startedAt = now();

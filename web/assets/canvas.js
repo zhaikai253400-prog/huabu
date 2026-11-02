@@ -1,6 +1,45 @@
 (function () {
   'use strict';
 
+  // C5：参数装配规则与前端其它入口、服务端共用同一份源码（web/assets/payload-rules.js）。
+  // 兜底留一份等价实现：老页面缓存里可能还没这个脚本，缺了也不能让画布整个打不开。
+  // 这里的取值规则必须与共享模块逐字一致 —— 两边一旦分叉，C5 就白做了。
+  const FALLBACK_MODES = ['reference', 'frames', 'text'];
+  const FALLBACK_TAIL_KINDS = { video: 1, quick: 1 };
+  const rules = window.CanvasPayloadRules || {
+    TAIL_KINDS: FALLBACK_TAIL_KINDS,
+    kindOf: (t) => (String(t || 'image') === 'quick' ? 'video' : String(t || 'image')),
+    isTailKind: (t) => Boolean(FALLBACK_TAIL_KINDS[String(t || '')]),
+    normalizeMode: (t, m) => {
+      const type = String(t || '');
+      // 图片 / 音频没有模式概念，硬塞值会让通道模板里的判断走偏
+      if (!FALLBACK_TAIL_KINDS[type] && type !== 'video') return '';
+      if (type === 'quick') return 'reference';
+      const value = String(m == null ? '' : m);
+      return FALLBACK_MODES.indexOf(value) >= 0 ? value : 'reference';
+    },
+    clampCount: (v) => {
+      const n = Math.floor(Number(v));
+      if (!Number.isFinite(n) || n < 1) return 1;
+      return Math.min(4, n);
+    },
+    normalizeRefs: (list) =>
+      (Array.isArray(list) ? list : [])
+        .filter((item) => item && (item.url || item.src))
+        .map((item) => ({
+          url: String(item.url || item.src),
+          kind: String(item.kind == null ? '' : item.kind),
+          name: String(item.name == null ? '' : item.name),
+          role: String(item.role == null ? '' : item.role),
+        })),
+    normalizeTailChoice: (value) => {
+      if (value === true) return { enabled: true, presetId: '' };
+      if (value === false || value == null || typeof value !== 'object') return { enabled: false, presetId: '' };
+      return { enabled: value.enabled !== false, presetId: String(value.presetId || '') };
+    },
+    assemble: null,
+  };
+
   const PRESETS = {
     image: {
       w: 360,
@@ -290,7 +329,8 @@
   // ---------- 尾部提示词 ----------
   // 卡片只保存 { enabled, presetId }，正文永远从设置里的预设读取。
   // presetId 为空表示「跟随全局默认」，换默认预设不用回头改每张卡。
-  const TAIL_KINDS = { video: 1, quick: 1 };
+  // 支持尾部的类型清单同样从共享规则里取，避免两处清单各写一份慢慢走偏
+  const TAIL_KINDS = window.CanvasPayloadRules ? window.CanvasPayloadRules.TAIL_KINDS : { video: 1, quick: 1 };
 
   function tailConfig() {
     const fallback = { enabled: false, defaultId: '', presets: [] };
@@ -5079,7 +5119,9 @@
         count: Number(params.count) || 1,
         duration: Number(params.duration) || 0,
         resolution: params.resolution || '',
-        mode: member.type === 'quick' ? 'reference' : params.mode || 'reference',
+        // C5：快照只记卡片上的原值，模式归一到装配时统一做（rules.assemble）。
+        // 这里曾经把空值写死成 'reference'，与单卡那条「原样传空串」的规则分叉。
+        mode: String(params.mode || ''),
       },
       refs: refsForApi(member),
       tailPrompt: data.tailPrompt ? { ...data.tailPrompt } : undefined,
@@ -6872,24 +6914,41 @@
   }
 
   // 单卡、批量、预检都用这一份请求，避免三条路各拼一套参数。
+  // 参数规则本身收在 window.CanvasPayloadRules 里，与服务端共用同一份源码 ——
+  // 这里只负责把画布上的卡片信息读出来喂给它，不再自己判 mode / count 的默认值。
   function buildGeneratePayload(node) {
     const data = nodeData(node);
-    return {
+    const params = data.params || {};
+    const raw = {
       canvasId: canvasId,
       nodeId: node.id,
-      kind: node.type === 'quick' ? 'video' : node.type,
+      nodeType: node.type,
       prompt: displayText(data.text),
       promptRaw: data.text,
       model: data.model,
       channelId: data.channelId || '',
-      sizeKey: (data.params && data.params.size) || '',
-      ratio: (data.params && data.params.ratio) || '',
-      count: Number(data.params && data.params.count) || 1,
-      duration: Number(data.params && data.params.duration) || 0,
-      resolution: (data.params && data.params.resolution) || '',
-      mode: node.type === 'quick' ? 'reference' : (data.params && data.params.mode) || '',
+      params: params,
       refs: refsForApi(node),
       tailPrompt: cardTailChoice(node),
+    };
+    if (typeof rules.assemble === 'function') return rules.assemble(raw);
+    // 共享模块没加载上（老页面缓存）时的兜底：规则与共享模块保持一致
+    return {
+      canvasId: raw.canvasId,
+      nodeId: raw.nodeId,
+      kind: rules.kindOf(node.type),
+      prompt: raw.prompt,
+      promptRaw: raw.promptRaw,
+      model: raw.model,
+      channelId: raw.channelId,
+      sizeKey: params.size || '',
+      ratio: params.ratio || '',
+      count: rules.clampCount(params.count),
+      duration: Number(params.duration) || 0,
+      resolution: params.resolution || '',
+      mode: rules.normalizeMode(node.type, params.mode),
+      refs: raw.refs,
+      tailPrompt: rules.isTailKind(node.type) ? raw.tailPrompt : { enabled: false, presetId: '' },
     };
   }
 

@@ -11,6 +11,8 @@ const lastframe = require('./lastframe');
 const store = require('./store');
 const modelSpecs = require('./model-specs');
 const errorKinds = require('./error-kinds');
+// 参数装配规则与前端共用同一份源码（web 目录下的 UMD 模块，浏览器 <script> 直接加载）
+const payloadRules = require('../web/assets/payload-rules.js');
 
 const KIND_FOLDER = { image: '图片', video: '视频', audio: '音频' };
 
@@ -62,10 +64,8 @@ function promptForApi(text) {
 // 卡片只记「用哪一套」；真正的文字每轮提交时从设置里取，改预设不用回头改卡片。
 // 旧卡片没有 tailPrompt 字段时视为不启用，绝不擅自追加。
 function normalizeTailChoice(value) {
-  if (value === true) return { enabled: true, presetId: '' };
-  if (value === false || value == null) return { enabled: false, presetId: '' };
-  if (typeof value !== 'object') return { enabled: false, presetId: '' };
-  return { enabled: value.enabled !== false, presetId: String(value.presetId || '') };
+  // 与前端共用同一份规则，避免「前端认 true、服务端只认对象」这类漂移
+  return payloadRules.normalizeTailChoice(value);
 }
 
 function tailPresetsOf(config) {
@@ -1103,33 +1103,54 @@ function kindMatches(kind, found) {
 }
 
 // 一次生成：选通道 → 组装请求 → 调用 → （需要就轮询）→ 存素材
+// 服务端的统一收敛点：不管 payload 是谁拼的，进来都过一遍同一套参数规则。
+//
+// 之前三条入口各拼各的：单卡 / 批量走前端的 buildGeneratePayload，定时组在
+// scheduler.js 里自己拼。同一个字段在两条路上含义不同（例如 mode：单卡没选就是空串，
+// 定时组快照写死 reference），通道模板里的 {{mode}} 就会忽空忽有。
+// 现在把规则收进 web/assets/payload-rules.js，前后端共用，这里做最后一道归一。
+//
+// 注意：只归一「参数」，不碰提示词 —— promptRaw / frozenTail 由调用方各自负责，
+// resumeTask 还要靠它们接续重启前的任务。
+function normalizePayload(payload, kind) {
+  const src = payload && typeof payload === 'object' ? payload : {};
+  const nodeType = kind === 'video' ? src.nodeType || 'video' : kind || src.kind || 'image';
+  return Object.assign({}, src, {
+    kind: kind || src.kind || 'image',
+    count: payloadRules.clampCount(src.count),
+    mode: payloadRules.normalizeMode(nodeType, src.mode),
+    refs: payloadRules.normalizeRefs(src.refs),
+  });
+}
+
 async function runKind(config, kind, payload, ctx) {
   const progress = (ctx && ctx.progress) || function () {};
+  const input = normalizePayload(payload, kind);
   const channel = channels.findChannel(config, {
-    channelId: payload.channelId,
-    channelName: payload.channelName,
+    channelId: input.channelId,
+    channelName: input.channelName,
     kind: kind,
-    model: payload.model,
+    model: input.model,
   });
   const label = kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频';
   if (!channel) throw new Error('还没有能生成' + label + '的通道，先到门户页的「接口通道」里加一个');
   if (!channel.baseUrl) throw new Error('通道「' + channel.name + '」还没填 Base URL');
   const spec = channel[kind];
-  const model = resolveModel(channel, kind, payload.model);
-  const composed = composePrompt(config, payload);
+  const model = resolveModel(channel, kind, input.model);
+  const composed = composePrompt(config, input);
   const prompt = composed.apiPrompt;
   if (!prompt) throw new Error('提示词是空的，先写点内容再生成');
-  const count = Math.max(1, Math.min(4, Number(payload.count) || 1));
-  const refs = await prepareRefs(config, payload.refs, channel, progress, {
+  const count = input.count;
+  const refs = await prepareRefs(config, input.refs, channel, progress, {
     always: submitCompressEnabled(config),
   });
   checkModelRefs(model, refs, kind);
   await uploadRefs(channel, refs, ctx, progress);
   // 视频按分辨率算像素，图片按 1K/2K/4K 算
-  const size = channels.sizeFor(channel, kind === 'video' ? payload.resolution : payload.sizeKey, payload.ratio, kind);
-  const vars = buildVars(payload, channel, model, size, count, refs, kind);
+  const size = channels.sizeFor(channel, kind === 'video' ? input.resolution : input.sizeKey, input.ratio, kind);
+  const vars = buildVars(input, channel, model, size, count, refs, kind);
   // 首尾帧任务字段往往和参考图任务不一样：通道里另写了 framesBody 就用它
-  const frameJob = String(payload.mode || '') === 'frames' && String(spec.framesBody || '').trim();
+  const frameJob = String(input.mode || '') === 'frames' && String(spec.framesBody || '').trim();
   const bodyTemplate = frameJob ? spec.framesBody : spec.body;
   let bodyText = pruneEmptyMedia(mergeExtra(channels.fillTemplate(bodyTemplate, vars), spec.extra));
   // 首尾帧只给了一张图时，平台要的是「首帧」模式：空着尾帧会被直接拒单
@@ -1191,7 +1212,7 @@ async function runKind(config, kind, payload, ctx) {
           snippet(data.text, 200)
       );
     }
-    const record = buildWaitRecord(channel, kind, spec, payload, model, size, prompt, remoteId, refs);
+    const record = buildWaitRecord(channel, kind, spec, input, model, size, prompt, remoteId, refs);
     // 记下这条记录：万一服务重启，起来后还能接着等，不用重新生成一遍
     if (ctx && ctx.attach) ctx.attach(record);
     progress({ stage: '已提交，正在等接口出结果…' });
@@ -1201,7 +1222,7 @@ async function runKind(config, kind, payload, ctx) {
     throw new Error('接口返回里没找到素材地址，检查通道的「结果取值路径」。返回片段：' + snippet(data.text, 220));
   }
   progress({ stage: '正在保存到 素材\\' + (KIND_FOLDER[kind] || '图片') });
-  const saved = await saveResult(config, found, channel, prompt, kind, subFolderOf(config, payload));
+  const saved = await saveResult(config, found, channel, prompt, kind, subFolderOf(config, input));
   return {
     relPath: saved.relPath,
     url: saved.url,
@@ -1226,7 +1247,10 @@ async function runKind(config, kind, payload, ctx) {
 async function preflight(config, payload) {
   const asked = String((payload && payload.kind) || 'image');
   const kinds = Object.keys(KIND_FOLDER);
-  const kind = kinds.indexOf(asked) >= 0 ? asked : 'image';
+  const askedKind = kinds.indexOf(asked) >= 0 ? asked : 'image';
+  // 预检必须按「真正提交时的那套参数」走，否则用户看到的检查结果和实际生成对不上
+  payload = normalizePayload(payload, askedKind);
+  const kind = askedKind;
   const label = kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频';
   const out = {
     ok: false,
@@ -1431,6 +1455,9 @@ module.exports = {
   pruneUnsupportedParams,
   promptForApi,
   normalizeTailChoice,
+  // C5：三入口参数统一的收敛点，导出供测试直接比对前后端规则是否一致
+  normalizePayload,
+  payloadRules,
   resolveTail,
   composePrompt,
   composeSubmission,
