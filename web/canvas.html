@@ -137,8 +137,11 @@
       <div class="viewport" id="viewport">
         <div class="grid-layer" id="grid-layer"></div>
         <!-- 一块卡都没有时的引导：画布上什么提示都没有，新用户不知道从哪儿开始。
-             单独一层，不跟着画布平移缩放跑，居中显示，鼠标事件穿透给下面的画布。 -->
-        <div class="board-empty" id="board-empty" hidden>
+             单独一层，不跟着画布平移缩放跑，居中显示，鼠标事件穿透给下面的画布。
+             初始隐藏用 .hidden 类（display:none !important）而不是 hidden 属性 ——
+             本元素自己设了 display:grid，会压过浏览器默认的 [hidden]{display:none}，
+             用属性写的话「隐藏」根本不生效。显隐全部由 refreshBoardEmpty() 接管。 -->
+        <div class="board-empty hidden" id="board-empty">
           <div class="board-empty-card">
             <div class="board-empty-title">这块画布还是空的</div>
             <ul class="board-empty-list">

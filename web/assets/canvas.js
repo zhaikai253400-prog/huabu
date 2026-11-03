@@ -1584,11 +1584,17 @@
   // 只认「画布上真的一张都没有」——被隐藏或被区域折叠的不算，
   // 那种情况有专门的恢复入口（隐藏徽章 / 展开区域），再叠一层空状态只会误导。
   // 节点是同步数组，这里不用额外缓存，跟着 renderNodes 走就行。
+  //
+  // 用 .hidden 类而不是 hidden 属性：这个元素自己有 `.board-empty { display: grid }`，
+  // 而作者级样式**优先级高于浏览器默认的 `[hidden] { display: none }`**（UA 样式最低）。
+  // 之前写 `boardEmptyEl.hidden = true` 时，JS 明明执行了、属性也确实挂上了，
+  // 但 display 仍是 grid —— 于是画布上有卡片时，中央那句「这块画布还是空的」一直挂着。
+  // .hidden 是 `display: none !important`，压得住任何自定义 display，是这里唯一可靠的开关。
   let boardEmptyEl = null;
   function refreshBoardEmpty() {
     if (!boardEmptyEl) boardEmptyEl = document.getElementById('board-empty');
     if (!boardEmptyEl) return;
-    boardEmptyEl.hidden = nodes.length > 0;
+    boardEmptyEl.classList.toggle('hidden', nodes.length > 0);
   }
 
   // 编辑面板固定宽度（屏幕像素），不跟着卡片大小伸缩：所有卡片弹出来一样大
