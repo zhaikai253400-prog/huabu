@@ -422,7 +422,120 @@
     return value;
   }
 
-  function refreshNode(node) {
+  // 卡片各区块的「按需重建」（清单 32 / 33）
+  //
+  // 背景：refreshNode 原来是 el.replaceWith(buildNode(node)) —— 整卡重建。
+  // <img src> 虽然没变，但 DOM 节点换了，浏览器会重新走一次解码；
+  // <video> 更明显：元素被替换会中断播放、重新缓冲。一张卡片上有个正在放的视频，
+  // 旁边另一张卡片改了个参数，谁都想不到正在放的视频会黑一下。
+  //
+  // 做法：把卡片内部几个独立区域各自抽成「就地重画」的函数，
+  // refreshNode(node, ['status']) 只碰状态区，媒体元素一个都不动。
+  //
+  // parts 不传 = 整卡重建，保持与从前完全一致的行为（47 个调用点可以逐个迁移，不会一次全炸）。
+  //
+  // 哪些区块能单独换、哪些必须整卡换：
+  //   media  —— 媒体区（图片 / 视频 / 占位 / 状态 / 悬停条）整体换。图片换 src 时先预加载
+  //   status —— 状态框（进度、失败原因、本次提交）
+  //   panel  —— 下面的控制面板（模型、参数、提示词、动作按钮）
+  //   title  —— 标题牌与编号牌
+  // 端口、缩放手柄、锁定角标这些只跟卡片类型和锁定状态有关，几乎不变，不单独给入口。
+
+  // 卡片的直接子元素里按类名找一个（不往下钻，免得命中面板里的同名元素）
+  function directChildOf(el, className) {
+    for (let i = 0; i < el.children.length; i += 1) {
+      if (el.children[i].classList.contains(className)) return el.children[i];
+    }
+    return null;
+  }
+
+  // 媒体区：只换 .node-media 这一个子树。
+  function replaceMediaPart(el, node, data, preset) {
+    const old = directChildOf(el, 'node-media');
+    const next = buildMedia(node, data, preset);
+    // 图片换源时先等新图解码好再换进去，避免「旧图已经撤掉、新图还没解码完」的空白一闪。
+    // 只在两边都是图片、且地址真的变了时才走这条慢路径 —— 视频换源没法这么等，
+    // 而且视频本来就是「换源即重载」，没有可比的白闪问题。
+    const oldImg = old && old.querySelector('img:not(.node-video-poster)');
+    const nextImg = next.querySelector('img:not(.node-video-poster)');
+    const sameSrc = oldImg && nextImg && oldImg.getAttribute('src') === nextImg.getAttribute('src');
+    if (oldImg && nextImg && !sameSrc && !nextImg.complete) {
+      const swap = () => {
+        // 期间可能又被别的更新换过一次，确认旧节点还在树上再换
+        if (old.parentNode === el) old.replaceWith(next);
+      };
+      nextImg.addEventListener('load', swap, { once: true });
+      nextImg.addEventListener('error', swap, { once: true });
+      return;
+    }
+    if (old) old.replaceWith(next);
+    else el.insertBefore(next, el.firstChild);
+  }
+
+  // 状态区：状态框就在媒体区里。只更新文字，不碰图片和播放器。
+  function replaceStatusPart(el, node, data) {
+    const box = ensureStatusBox(el, data, node);
+    bindStatusToggle(box);
+    paintStatusBox(box, data, node);
+    const state = el.querySelector('.task-state');
+    if (state) state.textContent = taskStateText(data);
+  }
+
+  // 标题 / 编号：这两块是独立的直接子元素，各自原地换
+  function replaceTitlePart(el, node, data) {
+    const oldTag = directChildOf(el, 'node-title-tag');
+    const nextTag = buildTitleTag(node, data);
+    if (oldTag) oldTag.replaceWith(nextTag);
+    else el.appendChild(nextTag);
+    const oldBadge = directChildOf(el, 'node-index');
+    const nextBadge = buildIndexBadge(node);
+    if (oldBadge && nextBadge) oldBadge.replaceWith(nextBadge);
+    else if (oldBadge) oldBadge.remove();
+    else if (nextBadge) el.appendChild(nextBadge);
+  }
+
+  // 面板：下面的控制面板整体换（模型下拉、参数芯片、提示词、生成按钮都在里面）。
+  // 正在打字时不动，免得光标被打断。
+  function replacePanelPart(el, node, data, preset) {
+    if (el.contains(document.activeElement)) return;
+    const old = directChildOf(el, 'node-panel');
+    if (!old) return;
+    old.replaceWith(buildPanel(node, data, preset, el));
+    placePanel();
+  }
+
+  // 只要「部分区块」的话，走这条路：保留卡片本体与未列出的区块
+  function refreshNodeParts(node, parts) {
+    const el = elements.get(node.id);
+    if (!el) return;
+    const data = nodeData(node);
+    const preset = presetOf(node.type);
+    // 卡片本身的尺寸 / 位置 / 锁定态也可能变了，这些是轻量的样式更新，顺手带上
+    const size = sizeOf(node);
+    if (el.style.width !== size.w + 'px') el.style.width = size.w + 'px';
+    if (el.style.height !== size.h + 'px') el.style.height = size.h + 'px';
+    el.classList.toggle('is-locked', isLocked(node));
+    el.classList.toggle('is-generating', isTaskActive(data));
+
+    if (parts.indexOf('media') >= 0) replaceMediaPart(el, node, data, preset);
+    // 媒体区刚重建过的话，状态框已经跟着是新的了，不用再来一遍
+    else if (parts.indexOf('status') >= 0) replaceStatusPart(el, node, data);
+    if (parts.indexOf('title') >= 0) replaceTitlePart(el, node, data);
+    if (parts.indexOf('panel') >= 0) replacePanelPart(el, node, data, preset);
+    if (parts.indexOf('hover') >= 0) refreshHoverBar(node);
+
+    paintFilter();
+    refreshSelection();
+    syncPromptEditorRefs(node);
+    syncPromptEditorParams(node);
+    syncPromptEditorTail(node);
+  }
+
+  function refreshNode(node, parts) {
+    if (Array.isArray(parts) && parts.length) {
+      refreshNodeParts(node, parts);
+      return;
+    }
     // 正在这张卡片的提示词里挑 @ 素材时，重建卡片不能把列表一起收掉
     const keepMention = Boolean(mentionEl && mentionNode && mentionNode.id === node.id);
     const el = elements.get(node.id);
@@ -2533,7 +2646,8 @@
     if (next === prev) return;
     pushHistory();
     data.title = next;
-    refreshNode(node);
+    // 只改标题：标题牌和面板里的「本次提交」相关文案要更新，媒体区一个像素都不用动
+    refreshNode(node, ['title', 'panel', 'hover']);
     scheduleSave();
     toast(next ? '标题已改成「' + next + '」' : '标题已清空');
   }
@@ -7911,7 +8025,8 @@
       data.progress = '';
       data.error = error.message;
       data.pendingSubmission = null;
-      refreshNode(node);
+      // 只是状态变了：不重建卡片，已经解好码的封面 / 正在放的视频都不动
+      refreshNode(node, ['status']);
       scheduleSave();
       if (!options.quiet) toast('没提交成功：' + error.message);
       return { ok: false, error: error.message };
@@ -7996,7 +8111,12 @@
       const label = data.result.kind === 'video' ? '视频' : data.result.kind === 'audio' ? '音频' : '图片';
       toast(label + '生成好了，已存进 素材\\' + label + ' 目录');
     }
-    refreshNode(node);
+    // 出结果了：面板里的版本条要跟着多一版，状态也要变。
+    // 但「结果 URL 跟原来一样」时（重跑同一版参数、平台返回同一个文件），
+    // 图片没必要重新解码一遍，正在放的视频更不该被打断 —— 这时只换面板与状态区。
+    const urlChanged = String(result.url || '') !== String((oldResult && oldResult.url) || '');
+    if (urlChanged || !result.url) refreshNode(node);
+    else refreshNode(node, ['status', 'panel']);
     scheduleSave();
     // 生成期间点过「用新参数再跑一次」：这一版已经留下，接着跑新参数那一版
     runQueuedRerun(node);
@@ -8010,7 +8130,8 @@
     // 服务端认得出错误类别时带一份结构化信息（分类 / 建议 / 平台原文），
     // 卡片上就能显示成「通道密钥不对」+ 该怎么做，而不是一长串英文。
     data.errorInfo = errorInfo || null;
-    refreshNode(node);
+    // 失败只影响状态框：封面还留在卡片上，没必要重解码一遍
+    refreshNode(node, ['status']);
     scheduleSave();
     // 这一版失败了：如果排队里有新参数的版本，接着跑（用户既然点了再跑一次，
     // 多半就是冲着重试来的，不该因为上一次失败就把队列丢掉）。
@@ -8081,7 +8202,8 @@
           data.running = false;
           data.progress = '';
           data.error = '';
-          refreshNode(node);
+          // 取消只影响状态：旧封面留在卡片上，用户还能看见上次生成的结果
+          refreshNode(node, ['status']);
           scheduleSave();
           return;
         }
@@ -8109,7 +8231,8 @@
     data.running = false;
     data.progress = '';
     data.error = '';
-    refreshNode(node);
+    // 取消只影响状态区：卡片上的封面、正在别的卡片上播的视频都不用动
+    refreshNode(node, ['status']);
     scheduleSave();
     if (taskId) {
       try {
@@ -8128,7 +8251,8 @@
     data.running = true;
     data.error = '';
     data.progress = '正在核对任务状态…';
-    refreshNode(node);
+    // 只是把卡片从「失败」改回「在跑」，封面还该留着
+    refreshNode(node, ['status']);
     scheduleSave();
     watchTask(node.id, data.taskId);
   }
@@ -8149,7 +8273,7 @@
       data.running = false;
       data.preparing = '';
       data.progress = '';
-      refreshNode(node);
+      refreshNode(node, ['status']);
       scheduleSave();
     });
     recheck.forEach(reclaimMistakenFailure);
@@ -8247,7 +8371,7 @@
         data.running = false;
         data.progress = '';
         data.error = '';
-        refreshNode(node);
+        refreshNode(node, ['status']);
         scheduleSave();
       } else if (task.status === 'failed' || task.status === 'interrupted') {
         failTask(node, task.error || '生成失败', task.errorInfo);
