@@ -83,6 +83,10 @@ const sandbox = {
   sizeOf: (node) => ({ w: Number(node.w) || 100, h: Number(node.h) || 100 }),
   MIN_ZOOM: 0.1,
   MAX_ZOOM: 4,
+  // 清单 38 第 7 步之后，canvas.js 里的 fitTransformOf / centerOn 都转发给 viewport.js。
+  // 沙箱里直接放**真的那份模块**（不是替身）—— 一来它不依赖 DOM，能直接 require；
+  // 二来这样这里验的就是真实实现，与 viewport.test.js 验的是同一份代码。
+  viewMath: require(path.join(ROOT, 'web', 'assets', 'viewport.js')),
   Date: Date,
   Math: Math,
   Number: Number,
@@ -395,16 +399,20 @@ check('被藏起来的卡片会提示先放出来，而不是谎报「没有」'
 });
 
 check('单选跳转保持当前缩放（不硬拉近拉远）', () => {
-  const at = canvasSrc.indexOf('function locateNodes(');
-  const body = canvasSrc.slice(at, at + 700);
+  // 用 pickFunction 按花括号配对抠整个函数，不用「取前 N 个字符」的固定窗口 ——
+  // 那种写法在函数变长之后会静默切掉后半段（清单 38 第 7 步加 viewMath 分支时
+  // 就踩了：`arr.length === 1` 掉到窗口外，测试看着红其实是在测半截源码）。
+  const body = pickFunction('locateNodes');
   assert(body.indexOf('arr.length === 1') >= 0, '没区分单选');
-  assert(body.indexOf('viewportEl.clientWidth / 2') >= 0, '单选时该居中而不是缩放');
+  const single = body.slice(0, body.indexOf('} else {'));
+  assert(
+    single.indexOf('clientWidth / 2') >= 0 || single.indexOf('centerOn(') >= 0,
+    '单选时该居中而不是缩放'
+  );
 });
 
 check('定位结果会同步保存视口（刷新后还在同一个位置）', () => {
-  const at = canvasSrc.indexOf('function locateNodes(');
-  const body = canvasSrc.slice(at, at + 800);
-  assert(body.indexOf('scheduleSave()') >= 0, '跳完没安排保存');
+  assert(pickFunction('locateNodes').indexOf('scheduleSave()') >= 0, '跳完没安排保存');
 });
 
 check('fitView 复用同一套几何计算，没有第二份缩放规则', () => {

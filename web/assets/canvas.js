@@ -634,8 +634,8 @@
 
   const MIN_W = 140;
   const MIN_H = 80;
-  const MIN_ZOOM = 0.1;
-  const MAX_ZOOM = 4;
+  // MIN_ZOOM / MAX_ZOOM 跟着坐标映射一起搬到了 viewport.js（清单 38 第 7 步），
+  // 定义在下面 toWorld 之前，因为那三处算 zoom 的地方都要用。
   const GRID = 8;
   const SNAP_PX = 6;
   // 撤销栈从 window.CanvasHistory 取（清单 38 拆分的第三步）。
@@ -1046,7 +1046,24 @@
     applyViewport();
   }
 
+  // 坐标映射收在 viewport.js（清单 38 第 7 步）。
+  // 抽它的理由：屏幕↔世界来回换算散在十几处，写反了不报错 —— 乘写成除是缩放方向反、
+  // x 与 y 写串是画面斜着跑、锚点缩放少减一次平移就是「缩放中心不在鼠标处」。
+  // 原来「锚点缩放」在 zoomAt / applyZoomStep 里逐字重复两份，
+  // 「视口中心世界坐标」重复三处（其中一个干脆没用 centerOfView）。
+  //
+  // 兜底留一份等价实现：老页面缓存里可能还没有 viewport.js，缺了也不能让画布打不开。
+  const viewMath = window.CanvasViewport || null;
+  const MIN_ZOOM = viewMath ? viewMath.MIN_ZOOM : 0.1;
+  const MAX_ZOOM = viewMath ? viewMath.MAX_ZOOM : 4;
+
+  function viewOrigin() {
+    const rect = viewportBox();
+    return { left: rect.left, top: rect.top };
+  }
+
   function toWorld(clientX, clientY) {
+    if (viewMath) return viewMath.toWorld(viewOrigin(), viewport, clientX, clientY);
     const rect = viewportBox();
     return {
       x: (clientX - rect.left - viewport.x) / viewport.zoom,
@@ -1055,6 +1072,7 @@
   }
 
   function toScreen(worldX, worldY) {
+    if (viewMath) return viewMath.toScreen(viewOrigin(), viewport, worldX, worldY);
     const rect = viewportBox();
     return {
       x: worldX * viewport.zoom + viewport.x + rect.left,
@@ -7246,10 +7264,7 @@
     const size = defaultSize('zone', null);
     const pad = 28;
     const headH = ZONE_HEAD_FALLBACK;
-    const spot = center || {
-      x: (viewportEl.clientWidth / 2 - viewport.x) / viewport.zoom,
-      y: (viewportEl.clientHeight / 2 - viewport.y) / viewport.zoom,
-    };
+    const spot = center || centerOfView();
     // 有卡片就刚好圈住它们；没有就摆在新区域「左上角落在点击处」的位置
     const x = bounds ? Math.round(bounds.minX - pad) : Math.round(spot.x);
     const y = bounds ? Math.round(bounds.minY - headH - pad * 0.5) : Math.round(spot.y);
@@ -9814,6 +9829,7 @@
   }
 
   function centerOfView() {
+    if (viewMath) return viewMath.centerOf(viewportEl.clientWidth, viewportEl.clientHeight, viewport);
     return {
       x: (viewportEl.clientWidth / 2 - viewport.x) / viewport.zoom,
       y: (viewportEl.clientHeight / 2 - viewport.y) / viewport.zoom,
@@ -10252,10 +10268,7 @@
     const keepExpanded = opts && opts.keepExpanded ? String(opts.keepExpanded) : '';
     const preset = presetOf(type);
     const presetSize = defaultSize(type, PARAM_DEFAULTS[type]);
-    const point = center || {
-      x: (viewportEl.clientWidth / 2 - viewport.x) / viewport.zoom,
-      y: (viewportEl.clientHeight / 2 - viewport.y) / viewport.zoom,
-    };
+    const point = center || centerOfView();
     const spot = freeSpot(Math.round(point.x - presetSize.w / 2), Math.round(point.y - presetSize.h / 2), presetSize.w, presetSize.h);
     const node = {
       id: uid('n'),
@@ -11715,16 +11728,29 @@
     window.addEventListener('pointercancel', onUp);
   }
 
+// 以某个屏幕点为锚点缩放。这段数学原来和下面的 applyZoomStep 逐字抄了两份，
+  // 现在都走 viewMath.zoomAround（清单 38 第 7 步）。
+  // 兜底那份是等价实现，只为老页面缓存里取不到 viewport.js 的情况留着。
+  function zoomAroundPoint(anchorX, anchorY, factor) {
+    if (viewMath) {
+      const next = viewMath.zoomAround(viewport, anchorX, anchorY, factor);
+      viewport.x = next.x;
+      viewport.y = next.y;
+      viewport.zoom = next.zoom;
+      return;
+    }
+    const zoom = viewport.zoom;
+    const worldX = (anchorX - viewport.x) / zoom;
+    const worldY = (anchorY - viewport.y) / zoom;
+    const next = clamp(zoom * factor, MIN_ZOOM, MAX_ZOOM);
+    viewport.x = anchorX - worldX * next;
+    viewport.y = anchorY - worldY * next;
+    viewport.zoom = next;
+  }
+
   function zoomAt(clientX, clientY, factor) {
     const rect = viewportBox();
-    const mx = clientX - rect.left;
-    const my = clientY - rect.top;
-    const worldX = (mx - viewport.x) / viewport.zoom;
-    const worldY = (my - viewport.y) / viewport.zoom;
-    const next = clamp(viewport.zoom * factor, MIN_ZOOM, MAX_ZOOM);
-    viewport.x = mx - worldX * next;
-    viewport.y = my - worldY * next;
-    viewport.zoom = next;
+    zoomAroundPoint(clientX - rect.left, clientY - rect.top, factor);
     applyViewport();
     scheduleSave();
   }
@@ -11761,14 +11787,7 @@
 
   function applyZoomStep(clientX, clientY, factor) {
     const rect = viewportBox();
-    const mx = clientX - rect.left;
-    const my = clientY - rect.top;
-    const worldX = (mx - viewport.x) / viewport.zoom;
-    const worldY = (my - viewport.y) / viewport.zoom;
-    const next = clamp(viewport.zoom * factor, MIN_ZOOM, MAX_ZOOM);
-    viewport.x = mx - worldX * next;
-    viewport.y = my - worldY * next;
-    viewport.zoom = next;
+    zoomAroundPoint(clientX - rect.left, clientY - rect.top, factor);
     scheduleViewport();
   }
 
@@ -11813,8 +11832,9 @@
   }
 
   // 由外接矩形算出「刚好框住」的缩放与平移。view 是可视区尺寸。
-  // 抽成纯函数是为了单测能直接验算，不用真起一个浏览器。
+  // 算式本体在 viewport.js（清单 38 第 7 步），这里留等价兜底。
   function fitTransformOf(bounds, view, pad) {
+    if (viewMath) return viewMath.fitTransformOf(bounds, view, pad);
     const gap = Math.max(24, Number(pad) || 70);
     const width = Math.max(60, (Number(view && view.w) || 0) - gap * 2);
     const height = Math.max(60, (Number(view && view.h) || 0) - gap * 2);
@@ -11851,10 +11871,20 @@
     if (arr.length === 1) {
       const node = arr[0];
       const size = sizeOf(node);
-      const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1;
-      viewport.zoom = zoom;
-      viewport.x = viewportEl.clientWidth / 2 - (node.x + size.w / 2) * zoom;
-      viewport.y = viewportEl.clientHeight / 2 - (node.y + size.h / 2) * zoom;
+      // 居中算式收在 viewport.js（清单 38 第 7 步）—— 与 focusNodeById 原来是两份抄本
+      const spot = viewMath
+        ? viewMath.centerOn(size, node, viewportEl.clientWidth, viewportEl.clientHeight, viewport)
+        : (function () {
+            const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1;
+            return {
+              zoom: zoom,
+              x: viewportEl.clientWidth / 2 - (node.x + size.w / 2) * zoom,
+              y: viewportEl.clientHeight / 2 - (node.y + size.h / 2) * zoom,
+            };
+          })();
+      viewport.zoom = spot.zoom;
+      viewport.x = spot.x;
+      viewport.y = spot.y;
       applyViewport();
     } else {
       fitToNodes(arr, opts);
@@ -12105,10 +12135,18 @@
     const node = byId(String(id || ''));
     if (!node) return false;
     const size = sizeOf(node);
-    const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1;
-    viewport.zoom = zoom;
-    viewport.x = viewportEl.clientWidth / 2 - (node.x + size.w / 2) * zoom;
-    viewport.y = viewportEl.clientHeight / 2 - (node.y + size.h / 2) * zoom;
+    // 居中算式与 locateNodes 共用同一份（清单 38 第 7 步），不再各抄一遍
+    if (viewMath) {
+      const spot = viewMath.centerOn(size, node, viewportEl.clientWidth, viewportEl.clientHeight, viewport);
+      viewport.zoom = spot.zoom;
+      viewport.x = spot.x;
+      viewport.y = spot.y;
+    } else {
+      const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1;
+      viewport.zoom = zoom;
+      viewport.x = viewportEl.clientWidth / 2 - (node.x + size.w / 2) * zoom;
+      viewport.y = viewportEl.clientHeight / 2 - (node.y + size.h / 2) * zoom;
+    }
     applyViewport();
     selectNode(node.id, false);
     return true;
@@ -12937,8 +12975,15 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       const rect = mmCanvas.getBoundingClientRect();
       const wx = (event.clientX - rect.left - mmView.ox) / mmView.scale;
       const wy = (event.clientY - rect.top - mmView.oy) / mmView.scale;
-      viewport.x = viewportEl.clientWidth / 2 - wx * viewport.zoom;
-      viewport.y = viewportEl.clientHeight / 2 - wy * viewport.zoom;
+      // 把世界坐标挪到视口正中。算式收在 viewport.js 的 panTo（清单 38 第 7 步）。
+      if (viewMath) {
+        const pan = viewMath.panTo(wx, wy, viewportEl.clientWidth, viewportEl.clientHeight, viewport.zoom);
+        viewport.x = pan.x;
+        viewport.y = pan.y;
+      } else {
+        viewport.x = viewportEl.clientWidth / 2 - wx * viewport.zoom;
+        viewport.y = viewportEl.clientHeight / 2 - wy * viewport.zoom;
+      }
       applyViewport();
       scheduleSave();
     };
