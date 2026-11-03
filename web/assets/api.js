@@ -95,12 +95,17 @@
     preflight: (payload) => request('POST', '/api/preflight', payload),
     generate: (payload) => request('POST', '/api/generate', payload),
     tailFrame: (payload) => request('POST', '/api/tailframe', payload),
-    importAsset: (file, kind, canvasId) =>
+    // mode 决定碰到重复文件时怎么办：
+    //   'ask'（默认）—— 先不落盘，回 duplicate 让用户挑
+    //   'reuse'      —— 直接用已有素材，不复制
+    //   'copy'       —— 不管重复，照样存一份新的
+    importAsset: (file, kind, canvasId, mode) =>
       uploadFile(
         '/api/assets/import?name=' +
           encodeURIComponent(file.name || '本地素材') +
           '&kind=' + encodeURIComponent(kind || '') +
-          (canvasId ? '&canvasId=' + encodeURIComponent(canvasId) : ''),
+          (canvasId ? '&canvasId=' + encodeURIComponent(canvasId) : '') +
+          '&dup=' + encodeURIComponent(mode || 'ask'),
         file
       ),
     task: (id) => request('GET', '/api/tasks/' + encodeURIComponent(id)),

@@ -8905,46 +8905,154 @@
   }
 
   // 本地挑的文件 / 从桌面拖进来的文件：先收进素材目录，再各建一张卡片
+  // 同一个文件重复上传时问一句：用已有的，还是再存一份？
+  // 用已有的不复制文件、不占磁盘；再存一份保留原来的行为（有人就是想要两个独立文件）。
+  // 卡片一律指向选中的那个路径，所以「用已有的」之后删掉卡片也不会动到别人的素材。
+  function askDuplicateChoice(info) {
+    return new Promise((resolve) => {
+      const mask = document.createElement('div');
+      mask.className = 'modal-mask dup-mask';
+      const dialog = document.createElement('div');
+      dialog.className = 'modal modal-duplicate';
+      dialog.setAttribute('role', 'dialog');
+      dialog.setAttribute('aria-modal', 'true');
+      dialog.setAttribute('aria-label', '这个文件已经有了');
+
+      const head = document.createElement('div');
+      head.className = 'modal-head';
+      const title = document.createElement('b');
+      title.textContent = '这个文件素材库里已经有了';
+      head.appendChild(title);
+
+      const body = document.createElement('div');
+      body.className = 'modal-body dup-body';
+
+      const line = document.createElement('div');
+      line.className = 'dup-line';
+      const existing = document.createElement('span');
+      existing.className = 'dup-name';
+      existing.textContent = info.name || info.relPath || '已有素材';
+      existing.title = info.relPath || '';
+      line.appendChild(existing);
+      body.appendChild(line);
+
+      const meta = document.createElement('div');
+      meta.className = 'dup-meta';
+      const bits = [];
+      if (info.bytes) bits.push(sizeTextOf(info.bytes));
+      if (info.at) bits.push('上传于 ' + timeTextOf(info.at));
+      if (info.width && info.height) bits.push(info.width + '×' + info.height);
+      meta.textContent = bits.join(' · ');
+      body.appendChild(meta);
+
+      const note = document.createElement('div');
+      note.className = 'dup-note muted-line';
+      note.textContent = '内容一模一样，再存一份会在素材目录里多出一个文件。';
+      body.appendChild(note);
+
+      const foot = document.createElement('div');
+      foot.className = 'modal-foot';
+      const footGrow = document.createElement('span');
+      footGrow.className = 'grow';
+      foot.appendChild(footGrow);
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'ghost';
+      copyBtn.type = 'button';
+      copyBtn.textContent = '仍然存一份';
+      copyBtn.title = '在素材目录里另存一个新文件（两个文件互相独立）';
+      const reuseBtn = document.createElement('button');
+      reuseBtn.className = 'primary';
+      reuseBtn.type = 'button';
+      reuseBtn.textContent = '用已有的';
+      reuseBtn.title = '不复制文件，卡片直接引用素材库里这一份';
+      foot.append(footGrow, copyBtn, reuseBtn);
+
+      dialog.append(head, body, foot);
+      mask.appendChild(dialog);
+      document.body.appendChild(mask);
+
+      let done = false;
+      const finish = (choice) => {
+        if (done) return;
+        done = true;
+        mask.remove();
+        resolve(choice);
+      };
+      reuseBtn.addEventListener('click', () => finish('reuse'));
+      copyBtn.addEventListener('click', () => finish('copy'));
+      mask.addEventListener('click', (event) => {
+        if (event.target === mask) finish('reuse');
+      });
+      document.addEventListener('keydown', function onKey(event) {
+        if (!document.body.contains(mask)) {
+          document.removeEventListener('keydown', onKey);
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish('reuse');
+          document.removeEventListener('keydown', onKey);
+        }
+      });
+      reuseBtn.focus();
+    });
+  }
+
   async function importLocalFiles(files, at, opts) {
     if (!files || !files.length) return;
     const from = at || centerOfView();
     const connectFrom = opts && opts.connectFrom ? String(opts.connectFrom) : '';
     const created = [];
     let placed = 0;
+    let reused = 0;
     const failed = [];
+    // 多选时依次错开摆放，别叠成一摞
+    const gapX = 170;
+    const gapY = 150;
+    const putCard = (asset, name) => {
+      const card = addAssetCard(
+        {
+          url: asset.url,
+          relPath: asset.relPath,
+          kind: asset.kind,
+          name: name,
+          width: asset.width,
+          height: asset.height,
+        },
+        {
+          x: Math.round(from.x + (placed % 2) * gapX),
+          y: Math.round(from.y + Math.floor(placed / 2) * gapY),
+        },
+        '本地素材',
+        { center: true }
+      );
+      created.push(card);
+      placed += 1;
+    };
     for (const file of files) {
       try {
-        const res = await window.api.importAsset(file, '', canvasId);
+        let res = await window.api.importAsset(file, '', canvasId, 'ask');
+        if (res && res.duplicate) {
+          const choice = await askDuplicateChoice(res.duplicate);
+          if (choice === 'reuse') {
+            res = await window.api.importAsset(file, '', canvasId, 'reuse');
+            reused += 1;
+          } else {
+            res = await window.api.importAsset(file, '', canvasId, 'copy');
+          }
+        }
         const asset = (res && res.asset) || {};
-        // 多选时依次错开摆放，别叠成一摞
-        const gapX = 170;
-        const gapY = 150;
-        const card = addAssetCard(
-          {
-            url: asset.url,
-            relPath: asset.relPath,
-            kind: asset.kind,
-            name: file.name,
-            width: asset.width,
-            height: asset.height,
-          },
-          {
-            x: Math.round(from.x + (placed % 2) * gapX),
-            y: Math.round(from.y + Math.floor(placed / 2) * gapY),
-          },
-          '本地素材',
-          { center: true }
-        );
-        created.push(card);
-        placed += 1;
+        if (!asset.url) throw new Error('上传之后没有拿到素材地址');
+        putCard(asset, file.name);
       } catch (error) {
-        failed.push(file.name + '：' + error.message);
+        failed.push(file.name + '：' + (error && error.message ? error.message : '上传失败'));
       }
     }
     if (placed) {
       scheduleSave();
+      const tail = reused ? '，其中 ' + reused + ' 个用的是素材库里已有的' : '';
       toast(
-        '已上传 ' + placed + ' 个素材，存在 素材 目录里' +
+        '已上传 ' + placed + ' 个素材' + tail + '，存在 素材 目录里' +
           (failed.length ? '（' + failed.length + ' 个没成功）' : '')
       );
     }

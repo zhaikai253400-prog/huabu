@@ -5017,3 +5017,20 @@ input::placeholder { color: var(--placeholder); }
   font-size: 0.82em;
   line-height: 1.55;
 }
+
+/* ---------- 上传重复检测（清单 24）---------- */
+.dup-mask { z-index: 340; }
+.modal-duplicate { width: min(460px, 92vw); }
+.dup-body { display: flex; flex-direction: column; gap: 7px; }
+.dup-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dup-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text);
+}
+.dup-meta { font-size: 0.84em; color: var(--muted); }
+.dup-note { font-size: 0.84em; }

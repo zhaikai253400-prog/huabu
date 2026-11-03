@@ -10,6 +10,7 @@ const paths = require('./paths');
 const configStore = require('./config');
 const store = require('./store');
 const assets = require('./assets');
+const assetIndex = require('./asset-index');
 const channels = require('./channels');
 const modelSpecs = require('./model-specs');
 const generate = require('./generate');
@@ -667,22 +668,57 @@ async function handleApi(req, res, pathname, query) {
   }
 
   // 把本地挑的文件收进 素材 目录（原始字节直接传上来）
+  //
+  // 同一个文件第二次上传时默认不重复存：先算内容指纹，命中已有素材就把选择权交给前端
+  // （dup=ask 时不落盘，回 duplicate 让用户挑；dup=reuse 直接用已有的；dup=copy 存新的一份）。
+  // 老的调用方不带 dup，行为与从前一致（直接存），不会因为这次改动而坏掉。
   if (pathname === '/api/assets/import' && method === 'POST') {
     const name = String(query.get('name') || '本地素材');
     let kind = String(query.get('kind') || '');
+    const dup = String(query.get('dup') || '');
     const buffer = await readRaw(req);
     if (!buffer.length) return sendJson(res, 400, { error: '没收到文件内容' });
     if (['image', 'video', 'audio'].indexOf(kind) < 0) kind = assets.kindOfFile(name, buffer).kind;
     if (!kind) {
       return sendJson(res, 400, { error: '认不出「' + name + '」是什么类型，只支持图片 / 视频 / 音频' });
     }
-    const saved = assets.importAsset(
-      config.assetRoot,
-      kind,
-      name,
-      buffer,
-      generate.subFolderOf(config, { canvasId: query.get('canvasId') })
-    );
+    const subFolder = generate.subFolderOf(config, { canvasId: query.get('canvasId') });
+
+    if (dup === 'ask' || dup === 'reuse') {
+      const hit = assetIndex.findDuplicate(config.assetRoot, buffer);
+      if (hit) {
+        if (dup === 'reuse') {
+          log('本地素材命中已有的一份，直接引用：' + hit.relPath);
+          return sendJson(res, 200, {
+            asset: {
+              relPath: hit.relPath,
+              url: hit.url,
+              width: hit.width,
+              height: hit.height,
+              bytes: hit.bytes,
+              kind: hit.kind || kind,
+            },
+            reused: true,
+          });
+        }
+        // dup=ask：先不落盘，把选择交给用户
+        return sendJson(res, 200, {
+          duplicate: {
+            name: hit.name,
+            relPath: hit.relPath,
+            url: hit.url,
+            bytes: hit.bytes,
+            at: hit.at,
+            width: hit.width,
+            height: hit.height,
+            kind: hit.kind || kind,
+          },
+        });
+      }
+    }
+
+    const saved = assets.importAsset(config.assetRoot, kind, name, buffer, subFolder);
+    assetIndex.remember(config.assetRoot, buffer, saved, name);
     log('本地素材已收进：' + saved.relPath);
     return sendJson(res, 200, { asset: saved });
   }
