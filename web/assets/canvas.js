@@ -638,7 +638,10 @@
   const MAX_ZOOM = 4;
   const GRID = 8;
   const SNAP_PX = 6;
-  const HISTORY_LIMIT = 60;
+  // 撤销栈从 window.CanvasHistory 取（清单 38 拆分的第三步）。
+  // 兜底留一份等价实现：老页面缓存里可能还没有 history.js，缺了也不能让画布打不开。
+  const historyMod = window.CanvasHistory || null;
+  const HISTORY_LIMIT = historyMod ? historyMod.HISTORY_LIMIT : 60;
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   const viewportEl = document.getElementById('viewport');
@@ -717,7 +720,44 @@
   // 拉线期间如果原来正展开着编辑面板，记下它，连线结束后再展开回来
   let keepExpandedAfterConnect = null;
   let pendingSnapshot = null;
-  const history = { past: [], future: [] };
+  // 撤销 / 重做的栈本体住在 history.js（清单 38 第 3 步），这里只拿一个实例。
+  // 下面 historyFallback 是「拿不到模块」时的等价兜底：老页面缓存里可能还没有
+  // history.js。兜底之所以要在这里而不是在模块里，是因为它得用同一份 HISTORY_LIMIT。
+  const historyFallback = (function () {
+    const past = [];
+    const future = [];
+    return {
+      push(snap) {
+        past.push(snap);
+        if (past.length > HISTORY_LIMIT) past.shift();
+        future.length = 0;
+      },
+      undo(current) {
+        if (!past.length) return null;
+        if (typeof current === 'string') {
+          future.push(current);
+          if (future.length > HISTORY_LIMIT) future.shift();
+        }
+        return past.pop();
+      },
+      redo(current) {
+        if (!future.length) return null;
+        if (typeof current === 'string') {
+          past.push(current);
+          if (past.length > HISTORY_LIMIT) past.shift();
+        }
+        return future.pop();
+      },
+      canUndo: () => past.length > 0,
+      canRedo: () => future.length > 0,
+      sizes: () => ({ past: past.length, future: future.length }),
+      reset: () => {
+        past.length = 0;
+        future.length = 0;
+      },
+    };
+  })();
+  const history = historyMod ? historyMod.createStack(HISTORY_LIMIT) : historyFallback;
   // 拖卡片时的对齐辅助线（标尺线）：默认关，用户想要时再开，状态记在本地
   const SNAP_GUIDE_KEY = 'canvas.snap-guide';
   let snapGuideOn = readSnapGuide();
@@ -9514,9 +9554,8 @@
   function pushHistory() {
     const snap = pendingSnapshot !== null ? pendingSnapshot : snapshot();
     pendingSnapshot = null;
-    history.past.push(snap);
-    if (history.past.length > HISTORY_LIMIT) history.past.shift();
-    history.future.length = 0;
+    // 压栈、截断、清掉「未来」三件事的顺序由 history.js 收着，这里不再重复一遍
+    history.push(snap);
     updateHistoryButtons();
   }
 
@@ -9543,14 +9582,29 @@
   }
 
   function undo() {
-    if (!history.past.length) return;
-    restoreState(history.past.pop());
+    // 先把「现在这样」拍下来交给栈 —— 它要留在「未来」里，重做才有地方去。
+    // 顺序不能反：restoreState 一跑，nodes 就变成上一步的样子，再拍就拍成历史了。
+    const target = history.undo(snapshot());
+    if (target === null) return;
+    restoreState(target);
     updateHistoryButtons();
-    toast('已撤销');
+    toast('已撤销', 6000, history.canRedo() ? [{ label: '重做', run: () => redo() }] : null);
+  }
+
+  function redo() {
+    // 与 undo 对称：先拍下现在，再取「未来」里的那一条
+    const target = history.redo(snapshot());
+    if (target === null) return;
+    restoreState(target);
+    updateHistoryButtons();
+    toast('已重做', 6000, history.canUndo() ? [{ label: '撤销', run: () => undo() }] : null);
   }
 
   function updateHistoryButtons() {
-    document.getElementById('btn-undo').disabled = history.past.length === 0;
+    const undoBtn = document.getElementById('btn-undo');
+    if (undoBtn) undoBtn.disabled = !history.canUndo();
+    const redoBtn = document.getElementById('btn-redo');
+    if (redoBtn) redoBtn.disabled = !history.canRedo();
   }
 
   function clearGuides() {
@@ -12326,6 +12380,7 @@
     fit: 'shift+1',
     reset: 'ctrl+0',
     undo: 'ctrl+z',
+    redo: 'ctrl+shift+z',
     remove: 'delete',
     tidy: 'ctrl+shift+l',
     export: 'ctrl+shift+e',
@@ -12656,6 +12711,11 @@
       if (action === 'undo') {
         event.preventDefault();
         undo();
+        return;
+      }
+      if (action === 'redo') {
+        event.preventDefault();
+        redo();
         return;
       }
       if (action === 'reset') {
@@ -14848,6 +14908,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       title: '撤销与返回',
       items: [
         { name: '撤销', key: 'undo' },
+        { name: '重做', key: 'redo' },
         { name: '关掉弹层 / 取消选中', caps: ['Esc'] },
         { name: '回到门户页', caps: ['左栏「门户页」'] },
       ],
@@ -15350,6 +15411,8 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       });
     }
     document.getElementById('btn-undo').addEventListener('click', undo);
+    const redoBtnEl = document.getElementById('btn-redo');
+    if (redoBtnEl) redoBtnEl.addEventListener('click', redo);
     document.getElementById('btn-fit').addEventListener('click', fitView);
     document.getElementById('btn-reset').addEventListener('click', resetView);
     const locateBtn = document.getElementById('btn-locate');
@@ -15537,6 +15600,13 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       : { x: 0, y: 0, zoom: 1 };
     // 版本号跟着服务端走，之后保存都基于这一版
     canvasRev = state.canvas && Number.isInteger(state.canvas.rev) ? state.canvas.rev : 0;
+    // 读进来的是一份全新的数据：历史栈必须清空。
+    // 不清的话，「保存冲突 → 用最新的（丢掉我这次的改动）」之后一按撤销，
+    // 会把刚被丢掉的那份旧内容原样写回来 —— 用户明明选了「丢掉」，结果又回来了。
+    // 启动时这一次清空是空操作（栈本来就是空的），代价为零。
+    history.reset();
+    pendingSnapshot = null;
+    updateHistoryButtons();
     return { migrated: migrated };
   }
 

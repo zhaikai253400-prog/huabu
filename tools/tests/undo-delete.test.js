@@ -71,15 +71,11 @@ function pickFunction(name) {
   throw new Error('函数 ' + name + ' 的花括号没配对');
 }
 
-function constOf(name) {
-  const at = canvasSrc.indexOf('const ' + name + ' =');
-  if (at < 0) throw new Error('源码里找不到常量 ' + name);
-  const hit = canvasSrc.slice(at, at + 80).match(/=\s*(-?\d+(?:\.\d+)?)/);
-  if (!hit) throw new Error('常量 ' + name + ' 不是数字');
-  return Number(hit[1]);
-}
-
 // ---------------------------------------------------------------- 沙箱
+// 清单 38 第 3 步之后，撤销栈本体住在 web/assets/history.js，这里直接 require 真实实现
+// ——不再靠「切源码 + 抠数字常量」，栈怎么截断、怎么清未来都由模块自己说了算。
+const historyMod = require(path.join(ROOT, 'web', 'assets', 'history.js'));
+
 const sandbox = {
   console: console,
   Math: Math,
@@ -93,16 +89,18 @@ const sandbox = {
   Set: Set,
   Map: Map,
   Infinity: Infinity,
-  // updateHistoryButtons 会去禁 / 启用「撤销」按钮。给个最小替身，
-  // 这样能跑真实实现（也顺带确认它真的动了那个按钮）。
+  // updateHistoryButtons 会去禁 / 启用「撤销」「重做」按钮。给个最小替身，
+  // 这样能跑真实实现（也顺带确认它真的动了那两个按钮）。
   document: {
     getElementById: function (id) {
-      if (id !== 'btn-undo') return null;
-      return sandbox.undoBtn;
+      if (id === 'btn-undo') return sandbox.undoBtn;
+      if (id === 'btn-redo') return sandbox.redoBtn;
+      return null;
     },
   },
   undoBtn: { disabled: false },
-  log: { toast: [], renders: 0, saves: 0, badges: [] },
+  redoBtn: { disabled: true },
+  log: { toast: [], toastActions: [], renders: 0, saves: 0, badges: [] },
   PRESETS: {
     image: { w: 360, h: 203, label: '图片' },
     video: { w: 480, h: 270, label: '视频' },
@@ -113,6 +111,8 @@ const sandbox = {
     zone: { w: 640, h: 420, label: '区域' },
   },
 };
+sandbox.HISTORY_FACTORY = historyMod;
+
 vm.createContext(sandbox);
 
 vm.runInContext(
@@ -123,7 +123,7 @@ vm.runInContext(
     'var selection = new Set();',
     'var selectedEdgeId = null;',
     'var editingId = null;',
-    'var history = { past: [], future: [] };',
+    'var history = HISTORY_FACTORY.createStack(HISTORY_FACTORY.HISTORY_LIMIT);',
     'var pendingSnapshot = null;',
     // ---- 替身 ----
     'function presetOf(type) { return PRESETS[type] || PRESETS.image; }',
@@ -132,7 +132,7 @@ vm.runInContext(
     'function renderAll() { log.renders += 1; }',
     'function refreshSelection() {}',
     'function scheduleSave() { log.saves += 1; }',
-    'function toast(text) { log.toast.push(text); }',
+    'function toast(text, stay, actions) { log.toast.push(text); (Array.isArray(actions) ? actions : []).forEach(function (a) { log.toastActions.push(a.label); }); }',
     'function updateHistoryButtons() {}',
     'function byId(id) { for (var i = 0; i < nodes.length; i += 1) { if (nodes[i].id === id) return nodes[i]; } return null; }',
     'function isSchedule(node) { return Boolean(node && node.type === "schedule"); }',
@@ -147,8 +147,9 @@ vm.runInContext(
     pickFunction('dropTransaction'),
     pickFunction('restoreState'),
     pickFunction('undo'),
+    pickFunction('redo'),
     pickFunction('updateHistoryButtons'),
-    'var HISTORY_LIMIT = ' + String(constOf('HISTORY_LIMIT')) + ';',
+    'var HISTORY_LIMIT = HISTORY_FACTORY.HISTORY_LIMIT;',
   ].join('\n'),
   sandbox
 );
@@ -182,10 +183,10 @@ function scene() {
   S.selection = new Set();
   S.selectedEdgeId = null;
   S.editingId = null;
-  S.history.past.length = 0;
-  S.history.future.length = 0;
+  S.history.reset();
   S.pendingSnapshot = null;
   S.log.toast.length = 0;
+  S.log.toastActions.length = 0;
   S.log.renders = 0;
   S.log.saves = 0;
   S.log.badges.length = 0;
@@ -216,17 +217,20 @@ check('快照取整坐标（不会被浮点差异压出一堆看起来一样的�
 
 check('pushHistory 往 past 压一条，并清空 future', () => {
   scene();
-  S.history.future.push('旧的未来');
+  // 先造一条「未来」：撤销一次就有了（现在撤销会把当前状态存进 future）
   S.pushHistory();
-  eq(S.history.past.length, 1);
-  eq(S.history.future.length, 0, '新快照之后「未来」必须清掉（否则重做会跳回去）');
+  S.undo();
+  eq(S.history.sizes().future, 1, '撤销后应该有一条可以重做');
+  S.pushHistory();
+  eq(S.history.sizes().past, 1);
+  eq(S.history.sizes().future, 0, '新快照之后「未来」必须清掉（否则重做会跳回去）');
 });
 
 check('一次删除只压一条：连压两次是两条，不是「每张卡一条」', () => {
   scene();
   // 删除整个选区时只调一次 pushHistory
   S.pushHistory();
-  eq(S.history.past.length, 1, '删 3 张只该压 1 条');
+  eq(S.history.sizes().past, 1, '删 3 张只该压 1 条');
 });
 
 check('撤销后 past 少一条，能一路退到底', () => {
@@ -235,21 +239,21 @@ check('撤销后 past 少一条，能一路退到底', () => {
   S.nodes = [mkCard('a'), mkCard('b')];
   S.pushHistory();
   S.nodes = [mkCard('a')];
-  eq(S.history.past.length, 2);
+  eq(S.history.sizes().past, 2);
   S.undo();
   eq(S.nodes.length, 2, '第一次撤销应回到两张');
-  eq(S.history.past.length, 1);
+  eq(S.history.sizes().past, 1);
   S.undo();
   eq(S.nodes.length, 3, '第二次撤销应回到三张');
-  eq(S.history.past.length, 0);
+  eq(S.history.sizes().past, 0);
 });
 
 check('退到底之后再撤销：什么都不做（不许把栈弹成负数或崩掉）', () => {
   scene();
   S.undo();
-  eq(S.history.past.length, 0);
+  eq(S.history.sizes().past, 0);
   S.undo();
-  eq(S.history.past.length, 0);
+  eq(S.history.sizes().past, 0);
   eq(S.nodes.length, 3, '没得撤销时不该动数据');
 });
 
@@ -259,10 +263,11 @@ check('撤销栈有上限，超过后从最老的一头丢（不是丢掉刚压�
     S.nodes = [mkCard('n' + i, { createdAt: i })];
     S.pushHistory();
   }
-  eq(S.history.past.length, S.HISTORY_LIMIT, '栈长度应被截到上限');
-  // 最新的那一条必须还在（丢的是最老的）
-  const last = JSON.parse(S.history.past[S.history.past.length - 1]);
-  eq(last.nodes[0].id, 'n' + (S.HISTORY_LIMIT + 9), '丢掉的是最新那条，说明方向反了');
+  eq(S.history.sizes().past, S.HISTORY_LIMIT, '栈长度应被截到上限');
+  // 退到底：剩下的是「栈里最老的那条」= 压了 70 条、只留 60 条时的那条 n10
+  // （n0~n9 被 shift 丢掉了）。若截断方向反了，退到底会落在最新那批附近。
+  while (S.history.canUndo()) S.undo();
+  eq(S.nodes[0].id, 'n10', '退到底落在了错误的起点，截断方向可能反了');
 });
 
 check('上限是 60 这个量级（足够退回去，又不至于把内存吃光）', () => {
@@ -391,7 +396,7 @@ check('dropTransaction 丢弃快照（这次操作不算数，不该进撤销栈
   S.dropTransaction();
   S.pushHistory();
   // 丢掉事务快照后，pushHistory 应退回去自己取一份当下的
-  eq(S.history.past.length, 1);
+  eq(S.history.sizes().past, 1);
   eq(S.pendingSnapshot, null);
 });
 
@@ -399,8 +404,10 @@ check('事务快照为空串 / null 时也走正常路径（不许把 null 压�
   scene();
   S.pendingSnapshot = null;
   S.pushHistory();
-  const top = S.history.past[S.history.past.length - 1];
-  assert(typeof top === 'string' && top.length > 2, '压进栈的不是一份有效快照');
+  // 压进去的东西必须是能 JSON.parse 的字符串：撤销时不能再取一次当下状态
+  S.nodes = [];
+  S.undo();
+  eq(S.nodes.length, 3, '压进栈的不是一份有效快照');
 });
 
 console.log('\n[5] 源码级约束：删除流程与入口');
@@ -464,6 +471,49 @@ check('删除时不重建整块画布（只摘掉被删的那几张，别的卡�
   assert(body.indexOf('renderAll()') < 0, '删除里调了 renderAll，会让全画布的图片重新加载');
 });
 
+check('撤销 / 重做都把「现在」先交给栈再恢复（顺序反了会把历史拍成历史）', () => {
+  const undoAt = canvasSrc.indexOf('function undo()');
+  const undoBody = canvasSrc.slice(undoAt, undoAt + 600);
+  const undoCall = undoBody.indexOf('history.undo(snapshot())');
+  const undoRestore = undoBody.indexOf('restoreState(target)');
+  assert(undoCall >= 0, 'undo 没把当前状态交给栈（那样就永远不能重做）');
+  assert(undoRestore >= 0, 'undo 没走 restoreState');
+  assert(undoCall < undoRestore, 'undo 里先恢复再拍快照，拍到的会是历史');
+
+  const redoAt = canvasSrc.indexOf('function redo()');
+  const redoBody = canvasSrc.slice(redoAt, redoAt + 600);
+  const redoCall = redoBody.indexOf('history.redo(snapshot())');
+  const redoRestore = redoBody.indexOf('restoreState(target)');
+  assert(redoCall >= 0, 'redo 没把当前状态交给栈');
+  assert(redoCall < redoRestore, 'redo 里先恢复再拍快照，拍到的会是历史');
+});
+
+check('栈的三个动作只有一处实现（push 截断 / 清未来不许在 canvas.js 里再抄一遍）', () => {
+  assert(canvasSrc.indexOf('history.past.push') < 0, 'canvas.js 里还在直接往 past 里塞');
+  assert(canvasSrc.indexOf('history.future.length = 0') < 0, 'canvas.js 里还在自己清「未来」');
+  assert(canvasSrc.indexOf('history.past.length > HISTORY_LIMIT') < 0, 'canvas.js 里还在自己截断');
+});
+
+check('canvas.html 引了 history.js，且排在 canvas.js 之前', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'web', 'canvas.html'), 'utf8');
+  const historyAt = html.indexOf('/assets/history.js');
+  const canvasAt = html.indexOf('/assets/canvas.js');
+  assert(historyAt >= 0, '没有引 history.js');
+  assert(canvasAt > 0 && historyAt < canvasAt, 'history.js 排在 canvas.js 之后，画布起来时取不到模块');
+});
+
+check('读服务端状态时清空历史（否则「用最新的」之后还能撤销回被丢掉的那份）', () => {
+  const at = canvasSrc.indexOf('function applyServerState(state)');
+  const body = canvasSrc.slice(at, at + 4000);
+  assert(body.indexOf('history.reset()') >= 0, 'applyServerState 里没有清空历史');
+});
+
+check('重做按钮接上了事件，快捷键表里也有 redo', () => {
+  assert(canvasSrc.indexOf("btn-redo") >= 0, '没有重做按钮');
+  assert(canvasSrc.indexOf("redo: 'ctrl+shift+z'") >= 0, '快捷键表里没有 redo');
+  assert(canvasSrc.indexOf("action === 'redo'") >= 0, '快捷键处理里没有 redo 分支');
+});
+
 console.log('\n[6] 撤销栈与删除的衔接：一次删除一条，退一步就够');
 
 check('「删除 → 撤销」是一次往返：数据回到删除前', () => {
@@ -489,6 +539,113 @@ check('连续两次删除 → 连续两次撤销，逐级退回去', () => {
   eq(S.snapshot(), step1, '第一次撤销没退回上一步');
   S.undo();
   eq(S.snapshot(), step0, '第二次撤销没退回最初');
+});
+
+console.log('\n[7] 重做：撤销错了能再走回来（清单 38 第 3 步新补）');
+
+check('撤销之后能重做，数据回到撤销前', () => {
+  scene();
+  const before = S.snapshot();
+  S.pushHistory();
+  S.nodes = S.nodes.filter((node) => node.id !== 'b');
+  const afterDelete = S.snapshot();
+  S.undo();
+  eq(S.snapshot(), before, '撤销没回去');
+  S.redo();
+  eq(S.snapshot(), afterDelete, '重做没回到删除后的样子');
+});
+
+check('重做之后的「未来」少一条、过去多一条（否则会无限重做同一步）', () => {
+  scene();
+  S.pushHistory();
+  S.nodes = [S.nodes[0]];
+  S.undo();
+  eq(S.history.sizes().past, 0, '撤销后过去该空了');
+  eq(S.history.sizes().future, 1, '撤销后该留下一条可重做的');
+  S.redo();
+  eq(S.history.sizes().past, 1, '重做之后过去该长回来');
+  eq(S.history.sizes().future, 0, '重做之后未来该空了');
+});
+
+check('没得重做时重做：什么都不做（不许把数据改成空）', () => {
+  scene();
+  const before = S.snapshot();
+  S.redo();
+  eq(S.snapshot(), before, '空重做动了数据');
+  eq(S.log.toast.filter((item) => item === '已重做').length, 0, '空重做不该给反馈');
+});
+
+check('撤销 → 改一笔 → 重做：不能再跳回那条已经作废的分支', () => {
+  scene();
+  S.pushHistory();
+  S.nodes = [mkCard('a')];
+  S.undo();
+  eq(S.nodes.length, 3);
+  // 撤销之后用户改了别的东西（这里模拟一次新的编辑并被压栈）
+  S.nodes = [mkCard('a'), mkCard('b')];
+  S.pushHistory();
+  eq(S.history.sizes().future, 0, '压了新快照之后「未来」必须清空');
+  const kept = S.snapshot();
+  S.redo();
+  eq(S.snapshot(), kept, '重做跳进了已作废的分支');
+});
+
+check('多步撤销后连续重做，能一路走回最新', () => {
+  scene();
+  const step0 = S.snapshot();
+  S.pushHistory();
+  S.nodes = S.nodes.filter((node) => node.id !== 'c');
+  const step1 = S.snapshot();
+  S.pushHistory();
+  S.nodes = S.nodes.filter((node) => node.id !== 'b');
+  const step2 = S.snapshot();
+  S.undo();
+  S.undo();
+  eq(S.snapshot(), step0);
+  S.redo();
+  eq(S.snapshot(), step1, '第一次重做没到 step1');
+  S.redo();
+  eq(S.snapshot(), step2, '第二次重做没到 step2');
+});
+
+check('重做同样会重画并安排保存（不然界面和库都是旧的）', () => {
+  scene();
+  S.pushHistory();
+  S.nodes = [S.nodes[0]];
+  S.undo();
+  S.log.renders = 0;
+  S.log.saves = 0;
+  S.redo();
+  assert(S.log.renders > 0, '重做后没有重画');
+  assert(S.log.saves > 0, '重做后没有安排保存');
+});
+
+check('撤销给出的提示里带「重做」入口，重做给出的提示里带「撤销」入口', () => {
+  scene();
+  S.pushHistory();
+  S.nodes = [S.nodes[0]];
+  S.log.toastActions.length = 0;
+  S.undo();
+  const undoActions = S.log.toastActions.slice();
+  S.redo();
+  const redoActions = S.log.toastActions.slice();
+  assert(undoActions.indexOf('重做') >= 0, '撤销的提示里没有「重做」按钮');
+  assert(redoActions.indexOf('撤销') >= 0, '重做的提示里没有「撤销」按钮');
+});
+
+check('两个按钮的禁用状态跟着栈走', () => {
+  scene();
+  S.updateHistoryButtons();
+  eq(S.undoBtn.disabled, true, '空栈时「撤销」该是灰的');
+  eq(S.redoBtn.disabled, true, '空栈时「重做」该是灰的');
+  S.pushHistory();
+  S.updateHistoryButtons();
+  eq(S.undoBtn.disabled, false, '有历史时「撤销」该能点');
+  eq(S.redoBtn.disabled, true, '还没撤销过，「重做」该是灰的');
+  S.undo();
+  S.updateHistoryButtons();
+  eq(S.undoBtn.disabled, true, '撤到底了，「撤销」该变灰');
+  eq(S.redoBtn.disabled, false, '有可重做的，「重做」该能点');
 });
 
 console.log('\n' + '─'.repeat(52));

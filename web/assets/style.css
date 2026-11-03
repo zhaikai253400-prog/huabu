@@ -518,6 +518,10 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
 
 .rail-btn:hover { background: var(--surface-3); color: var(--text); }
 .rail-btn:active { transform: scale(0.93); }
+/* 撤销 / 重做：没得退（或没得进）时压暗，且不该有悬浮反馈 —— 免得用户以为点了没反应 */
+.rail-btn:disabled { opacity: 0.35; cursor: default; }
+.rail-btn:disabled:hover { background: transparent; color: var(--text); }
+.rail-btn:disabled:active { transform: none; }
 .rail-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .rail-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .rail-btn.primary:hover { filter: brightness(1.07); color: #fff; }
