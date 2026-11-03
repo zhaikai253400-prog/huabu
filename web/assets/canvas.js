@@ -6819,7 +6819,8 @@
     try {
       res = await window.api.schedules(canvasId);
     } catch (error) {
-      return;
+      // 断线时保持「有定时组」的判断，节奏别掉到待机档，下一轮再试
+      return { groups: list.length, live: false };
     }
     const next = new Map();
     (res.schedules || []).forEach((run) => next.set(run.nodeId, run));
@@ -6844,14 +6845,51 @@
       if (scheduleSyncTimer) clearTimeout(scheduleSyncTimer);
       scheduleSyncTimer = setTimeout(() => syncMemberResults(needSync), 400);
     }
+    return { groups: list.length, live: liveIds.size > 0 };
+  }
+
+  // 定时组的状态查询同样按需降频：
+  //   有成员正在跑 → 1.5 秒（要盯住每张的进展）
+  //   有定时组但都空闲 → 5 秒（到点触发是服务端的事，前端慢一点没关系）
+  //   本画布没有定时组 → 15 秒心跳（留着是为了发现新建的定时组，别一直问）
+  //   页面藏起来 → 不排，切回来统一唤醒
+  const POLL_SCHEDULE_LIVE_MS = 1500;
+  const POLL_SCHEDULE_IDLE_MS = 5000;
+  const POLL_SCHEDULE_EMPTY_MS = 15000;
+
+  function nextSchedulePollDelay(state) {
+    const s = state || {};
+    if (s.hidden) return 0;
+    if (s.live) return POLL_SCHEDULE_LIVE_MS;
+    if (s.groups) return POLL_SCHEDULE_IDLE_MS;
+    return POLL_SCHEDULE_EMPTY_MS;
+  }
+
+  function scheduleScheduleRound(delay) {
+    if (scheduleTimer) clearTimeout(scheduleTimer);
+    if (!delay) {
+      scheduleTimer = null;
+      return;
+    }
+    scheduleTimer = setTimeout(runScheduleRound, delay);
+  }
+
+  function runScheduleRound() {
+    scheduleTimer = null;
+    // 同 runAdoptRound：到点时页面可能刚切到后台，先判再发
+    if (document.hidden) return;
+    Promise.resolve()
+      .then(pollSchedules)
+      .then((state) => {
+        scheduleScheduleRound(nextSchedulePollDelay({ hidden: document.hidden, groups: state.groups, live: state.live }));
+      })
+      .catch(() => {
+        scheduleScheduleRound(POLL_SCHEDULE_IDLE_MS);
+      });
   }
 
   function startSchedulePolling() {
-    if (scheduleTimer) clearInterval(scheduleTimer);
-    scheduleTimer = setInterval(() => {
-      pollSchedules();
-    }, 1500);
-    pollSchedules();
+    runScheduleRound();
   }
 
   // 组合卡片的正面：组名 + 组里素材的缩略图，点缩略图跳到那张卡片
@@ -7511,6 +7549,49 @@
     }
   }
 
+  // ===== 轮询频率自适应 =====
+  // 以前不管什么情况都是固定频率问接口：页面缩在后台、任务还在平台排队、
+  // 甚至本画布根本没有任务在跑，也照样按点问一遍。挂着页面开会一天，
+  // 光这些问不出新东西的请求就成千上万次。
+  // 改成「每轮跑完自己决定下次隔多久」，按当前状态分档。
+  // 下面这几个常量与两个 nextXxxDelay 都是纯函数，不碰 DOM，方便直接单测；
+  // 返回 0 表示「这一轮先不排下一轮」，等页面切回来时统一唤醒。
+  const POLL_ADOPT_BUSY_MS = 5000; // 本画布有任务在跑：跟原来一样
+  const POLL_ADOPT_QUEUED_MS = 10000; // 任务都还在平台排队：拉长一倍
+  const POLL_ADOPT_IDLE_MS = 30000; // 本画布没有任务在跑：降到 30 秒心跳
+  const POLL_TASK_MS = 2000; // 单张卡片：正常跟进
+  const POLL_TASK_QUEUED_MS = 10000; // 单张卡片：还在排队，问那么勤也没用
+
+  // 「还在平台排队」的判据。后端的 stage 文案实际有这几种：
+  //   「排队中」（server/tasks.js 建任务时）
+  //   「已提交，正在等结果」（server/tasks.js 的 attach）
+  //   「生成中…（还排在队列里，已等 3 分钟）」（server/generate.js 拉列表还没找到自己那条）
+  // 注意第三种是「排在队列里」，中间并没有连着的「排队」两字，所以关键词取
+  // 「排队」「队列」「正在等结果」三个，单靠「排队」会漏掉第三种。
+  function isQueuedStage(stage) {
+    const text = String(stage || '');
+    return (
+      text.indexOf('排队') >= 0 || text.indexOf('队列') >= 0 || text.indexOf('正在等结果') >= 0
+    );
+  }
+
+  // 下一轮「接管别处提交的任务」该隔多久。
+  // hidden：页面藏起来了，先不排，切回来时 immediately 补一次。
+  function nextAdoptDelay(state) {
+    const s = state || {};
+    if (s.hidden) return 0;
+    if (s.busy) return s.queuedOnly ? POLL_ADOPT_QUEUED_MS : POLL_ADOPT_BUSY_MS;
+    return POLL_ADOPT_IDLE_MS;
+  }
+
+  // 单张卡片下一轮该隔多久。hidden 同样先不排，等切回页面统一唤醒。
+  function nextTaskPollDelay(state) {
+    const s = state || {};
+    if (s.hidden) return 0;
+    if (s.queued) return POLL_TASK_QUEUED_MS;
+    return POLL_TASK_MS;
+  }
+
   // ===== 生成任务：提交 → 轮询 → 结果回到卡片 =====
   // 轮询只改卡片上的字，不重建整张卡片，免得用户在打字时光标乱跳
   const taskTimers = new Map();
@@ -8156,6 +8237,12 @@
         stopWatch(nodeId);
         return;
       }
+      // 页面被切到后台：已排定的这一跳不发请求，直接停掉。
+      // 切回页面时由 resumeWatches() 按卡片当前状态重新叫起来。
+      if (document.hidden) {
+        taskTimers.delete(nodeId);
+        return;
+      }
       let task = null;
       try {
         const res = await window.api.task(taskId);
@@ -8214,7 +8301,14 @@
       const data = nodeData(node);
       data.progress = task.stage || '正在生成';
       updateTaskUi(node);
-      taskTimers.set(nodeId, setTimeout(tick, 2000));
+      // 还在平台排队时问得再勤也快不了，拉长到 10 秒；进了实际生成阶段再恢复 2 秒。
+      // 页面藏起来就先不排，切回来时由唤醒逻辑补一次。
+      const delay = nextTaskPollDelay({ hidden: document.hidden, queued: isQueuedStage(task.stage) });
+      if (!delay) {
+        taskTimers.delete(nodeId);
+        return;
+      }
+      taskTimers.set(nodeId, setTimeout(tick, delay));
     };
     tick();
   }
@@ -8283,8 +8377,9 @@
   // 卡片上的 running / taskId 存在库里，但页面只有在「自己点的生成」或「刚打开画布」时
   // 才会去盯任务。接口直接提交、另一个标签页提交、或后台定时组提交的任务，
   // 当前页面并不知道，卡片就一直停在旧封面（任务面板里却能看到在跑）。
-  // 这里每 5 秒问一次「本画布还有哪些任务在跑」，把卡片状态补齐并接管轮询。
-  const TASK_ADOPT_MS = 5000;
+  // 这里周期性地问「本画布还有哪些任务在跑」，把卡片状态补齐并接管轮询。
+  // 间隔不是固定的：跑完一轮按当前状态定下一次（见上面的 nextAdoptDelay），
+  // 没任务时降到 30 秒心跳，页面藏起来时直接停排。
   let taskAdoptTimer = null;
   let taskAdoptBusy = false;
   const taskAdoptMute = new Map(); // 刚在本页点过「取消」的卡片，短时间内不要又被接管回来
@@ -8301,23 +8396,32 @@
     return false;
   }
 
+  // 跑一轮「接管」。返回值告诉调度器下一轮该隔多久：
+  //   busy        —— 本轮有没有看见在跑的任务
+  //   queuedOnly  —— 看见的任务是不是全都还在平台排队（没有一个进入实际生成）
+  // 查询失败 / 断线时不改档位（busy 置 false 会掉到待机档，反倒错过任务），
+  // 用 busy:true 保持跟上一轮一样的节奏，等下一轮再试。
   async function adoptActiveTasks() {
-    if (taskAdoptBusy || document.hidden) return;
+    if (taskAdoptBusy || document.hidden) return { busy: false, queuedOnly: false, skipped: true };
     taskAdoptBusy = true;
     let res = null;
     try {
       res = await window.api.tasks(80, { canvasId: canvasId, active: true });
     } catch (error) {
       taskAdoptBusy = false;
-      return;
+      return { busy: true, queuedOnly: false };
     }
     taskAdoptBusy = false;
     const active = new Map();
+    let queuedOnly = true;
     ((res && res.tasks) || []).forEach((task) => {
       if (task && task.nodeId && (task.status === 'queued' || task.status === 'running')) {
         active.set(task.nodeId, task);
+        // 只要有任意一条已经跳出排队（在真正生成了），就不算「全在排队」
+        if (!isQueuedStage(task.stage)) queuedOnly = false;
       }
     });
+    const busy = active.size > 0;
     const stale = [];
     let changed = false;
     nodes.forEach((node) => {
@@ -8353,7 +8457,7 @@
       refreshSelection();
     }
     // 卡片写着生成中、任务却不在 active 列表：逐条核对真实结果
-    if (!stale.length) return;
+    if (!stale.length) return { busy: busy, queuedOnly: busy && queuedOnly };
     for (const item of stale) {
       const node = byId(item.node.id);
       if (!node || taskTimers.has(node.id)) continue;
@@ -8382,17 +8486,82 @@
         data.progress = task.stage || '正在生成';
         updateTaskUi(node);
         watchTask(node.id, task.id);
+        // 这些是 active 列表没覆盖到的存量任务，虽然不是本轮接口返回的，
+        // 但确实还有东西在跑，调度器不能据此掉进待机档。
+        if (isQueuedStage(task.stage)) {
+          /* 仍然在排队，不影响 queuedOnly */
+        } else {
+          queuedOnly = false;
+        }
       }
     }
+    return { busy: busy || stale.length > 0, queuedOnly: queuedOnly };
+  }
+
+  // 自调度：跑完一轮再决定下一轮隔多久。
+  // 页面藏起来（hidden）时不再排下一轮（0 表示不排），
+  // 切回页面时 wakePolling() 会立刻补一次并把节奏接上。
+  let wakePolling = null;
+
+  function scheduleAdoptRound(delay) {
+    if (taskAdoptTimer) clearTimeout(taskAdoptTimer);
+    if (!delay) {
+      taskAdoptTimer = null;
+      return;
+    }
+    taskAdoptTimer = setTimeout(runAdoptRound, delay);
+  }
+
+  function runAdoptRound() {
+    taskAdoptTimer = null;
+    // 已排定的那一跳到点时，页面可能刚被切到后台。
+    // 这里必须先判一次再发请求，否则「藏起来不发请求」会漏掉这一跳。
+    if (document.hidden) return;
+    Promise.resolve()
+      .then(adoptActiveTasks)
+      .then((state) => {
+        scheduleAdoptRound(nextAdoptDelay({ hidden: document.hidden, busy: state.busy, queuedOnly: state.queuedOnly }));
+      })
+      .catch(() => {
+        // 出异常也别停掉心跳，按「有任务在跑」的节奏重试
+        scheduleAdoptRound(POLL_ADOPT_BUSY_MS);
+      });
   }
 
   function startTaskAdoption() {
-    if (taskAdoptTimer) clearInterval(taskAdoptTimer);
-    taskAdoptTimer = setInterval(adoptActiveTasks, TASK_ADOPT_MS);
+    // 页面切回来的那一刻：这一轮先问一次，把「接管」和「单卡进度」都补上。
+    // 藏起来时单卡轮询会主动停排（见 nextTaskPollDelay），所以要在这里把它们
+    // 重新叫起来，否则切回来卡片会一直停在「正在生成」的旧文案上。
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) adoptActiveTasks();
+      if (document.hidden) return;
+      runAdoptRound();
+      resumeWatches();
+      if (scheduleGroupsPresent()) runScheduleRound();
     });
-    setTimeout(adoptActiveTasks, 1200);
+    // 提醒外部：藏在后台的定时器都被停掉了，需要显式叫醒
+    wakePolling = () => {
+      if (document.hidden) return;
+      if (!taskAdoptTimer) runAdoptRound();
+      resumeWatches();
+      if (!scheduleTimer && scheduleGroupsPresent()) runScheduleRound();
+    };
+    setTimeout(runAdoptRound, 1200);
+  }
+
+  function scheduleGroupsPresent() {
+    return nodes.some((node) => isSchedule(node) && !isHidden(node));
+  }
+
+  // 页面藏起来时，单卡轮询会停下不再排下一轮（省掉后台白问）；
+  // 切回页面后按卡片当前状态重新起跳，进度接着跟。
+  function resumeWatches() {
+    if (document.hidden) return;
+    nodes.forEach((node) => {
+      const data = nodeData(node);
+      if (!data.running || !data.taskId) return;
+      if (taskTimers.has(node.id)) return;
+      watchTask(node.id, data.taskId);
+    });
   }
 
   function startTailFrame(node) {
@@ -11869,8 +12038,10 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     window.addEventListener('resize', () => {
       if (expandedId) placePanel();
     });
-    // 兜底：卡片被别处改动（粘贴、撤销、生成回填）时也不会漏画
+    // 兜底：卡片被别处改动（粘贴、撤销、生成回填）时也不会漏画。
+    // 页面藏起来时小地图根本看不见，没必要重画——后台画了也没人看，纯费电。
     window.setInterval(() => {
+      if (document.hidden) return;
       if (mmShown) scheduleMinimap();
     }, 2500);
     scheduleMinimap();
