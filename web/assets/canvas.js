@@ -13280,8 +13280,16 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
   }
 
   // ---------- 一键整理排版：按连线分层（左→右）或者排成网格 ----------
-  const LAYOUT_COL_GAP = 96;
-  const LAYOUT_ROW_GAP = 56;
+  // 排布算法收在 layout.js（清单 38 第 6 步）。
+  // 抽它的理由不是「少 190 行」：排版算错**不会报错**，只是把卡片摆歪 ——
+  // 分层方向反了是左右镜像、环没挡住会让 depthOf 递归到卡死、列数算错是排成一长条。
+  // 这几种都读代码读不出来、也很难肉眼验收（得先有一块连线复杂的画布），
+  // 能直接 require 喂数据断言，才是它值得单独成文件的理由。
+  //
+  // 兜底留一份等价实现：老页面缓存里可能还没有 layout.js，缺了也不能让整理排版失效。
+  const layoutKit = window.CanvasLayout || null;
+  const LAYOUT_COL_GAP = layoutKit ? layoutKit.COL_GAP : 96;
+  const LAYOUT_ROW_GAP = layoutKit ? layoutKit.ROW_GAP : 56;
 
   // 排版时「组合卡片 + 组里的素材」算一个整体，一起挪，不会散架
   function layoutUnits(scopeIds) {
@@ -13342,6 +13350,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
 
   // 只算「整体与整体之间」的连线，组合内部的连线不参与排版
   function unitLinks(units) {
+    if (layoutKit) return layoutKit.unitLinks(units, edges);
     const unitOf = new Map();
     units.forEach((unit) => unit.nodes.forEach((node) => unitOf.set(node.id, unit.id)));
     const outs = new Map();
@@ -13362,6 +13371,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
 
   // 按连线分层：没接别人素材的排最左，由它衍生出来的往右排；环上的连线忽略掉，不会算不完
   function flowPlan(units, boxes, origin) {
+    if (layoutKit) return layoutKit.flowPlan(units, boxes, origin, edges);
     const links = unitLinks(units);
     const state = new Map();
     const depth = new Map();
@@ -13433,6 +13443,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
 
   // 网格排布：保持原来的上下左右顺序，一行一行摆齐
   function gridPlan(units, boxes, origin) {
+    if (layoutKit) return layoutKit.gridPlan(units, boxes, origin);
     const list = units
       .slice()
       .sort((a, b) => boxes.get(a.id).y - boxes.get(b.id).y || boxes.get(a.id).x - boxes.get(b.id).x);
@@ -13505,7 +13516,11 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     const origin = { x: Math.round(left), y: Math.round(top) };
     const plan = kind === 'grid' ? gridPlan(units, boxes, origin) : flowPlan(units, boxes, origin);
     const before = boundsOf(nodes);
-    pushHistory();
+    // 先把每个整体要挪多少算出来，一张都不需要动就别压历史。
+    // 原来 pushHistory 在算位移之前无条件调用，于是「对已经整理好的画布再点一次整理」
+    // 什么都不会变、却往撤销栈里塞了一条空记录 —— 用户按 Ctrl+Z 会「按了没反应」，
+    // 得连按好几次才动，看起来像是撤销坏了。
+    const moves = [];
     units.forEach((unit) => {
       const target = plan.get(unit.id);
       if (!target) return;
@@ -13513,9 +13528,17 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       const dx = Math.round(target.x - box.x);
       const dy = Math.round(target.y - box.y);
       if (!dx && !dy) return;
-      unit.nodes.forEach((node) => {
-        node.x = Math.round(node.x + dx);
-        node.y = Math.round(node.y + dy);
+      moves.push({ unit: unit, dx: dx, dy: dy });
+    });
+    if (!moves.length) {
+      toast('已经排好了，这张画布不需要再整理');
+      return;
+    }
+    pushHistory();
+    moves.forEach((move) => {
+      move.unit.nodes.forEach((node) => {
+        node.x = Math.round(node.x + move.dx);
+        node.y = Math.round(node.y + move.dy);
       });
     });
     // 画面跟着挪一点：整理完还看得见刚才那一块，不会被甩到别处
