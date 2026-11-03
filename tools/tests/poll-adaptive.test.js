@@ -15,12 +15,15 @@
 //   3. 源码层面确实换成自调度了 —— 老的固定 setInterval 不许留着，
 //      页面切回来要有唤醒路径（否则「藏起来停排」会变成「切回来永远不动」）。
 //
+// 清单 38 第 2 步把这一块的四个判据函数与八个常量抽进了 web/assets/task-poll.js，
+// 所以前面两组现在直接 require 那个模块（比源码切片可靠得多），
+// 后面一组仍然是源码级约束 —— 要守的恰恰是「canvas.js 真的用上了它、并且留了兜底」。
+//
 // 运行：runtime/node.exe tools/tests/poll-adaptive.test.js
 
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const vm = require('node:vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
@@ -68,54 +71,28 @@ function pickFunction(name) {
   throw new Error('函数 ' + name + ' 的花括号没配对');
 }
 
-// 常量直接从源码取值，避免测试里再抄一份、改了常量测试却还绿
-function pickConst(name) {
-  const re = new RegExp('const\\s+' + name + '\\s*=\\s*([^;]+);');
-  const m = canvasSrc.match(re);
-  if (!m) throw new Error('源码里找不到常量 ' + name);
-  return m[1].trim();
-}
-
-const CONSTS = [
-  'POLL_ADOPT_BUSY_MS',
-  'POLL_ADOPT_QUEUED_MS',
-  'POLL_ADOPT_IDLE_MS',
-  'POLL_TASK_MS',
-  'POLL_TASK_QUEUED_MS',
-  'POLL_SCHEDULE_LIVE_MS',
-  'POLL_SCHEDULE_IDLE_MS',
-  'POLL_SCHEDULE_EMPTY_MS',
-];
-
-const sandbox = {
-  console: console,
-  String: String,
-  Number: Number,
-  Math: Math,
-};
-vm.createContext(sandbox);
-vm.runInContext([]
-  .concat(CONSTS.map((name) => 'var ' + name + ' = ' + pickConst(name) + ';'))
-  .concat([
-    pickFunction('isQueuedStage'),
-    pickFunction('nextAdoptDelay'),
-    pickFunction('nextTaskPollDelay'),
-    pickFunction('nextSchedulePollDelay'),
-  ])
-  .join('\n'), sandbox);
+// 判据函数与常量现在住在 task-poll.js 里，直接 require 进来跑（模块是 UMD，
+// 服务端与浏览器共用同一份源码）。
+const taskPoll = require(path.join(ROOT, 'web', 'assets', 'task-poll.js'));
 
 const {
   isQueuedStage,
   nextAdoptDelay,
   nextTaskPollDelay,
   nextSchedulePollDelay,
-} = sandbox;
+} = taskPoll;
 
-// 从源码里读出各档的实际数值，后面断言用它，避免测试里硬编码
-const N = {};
-CONSTS.forEach((name) => {
-  N[name] = vm.runInContext(name, sandbox);
-});
+// 各档的实际数值也从模块读，后面断言用它，避免测试里硬编码
+const N = {
+  POLL_ADOPT_BUSY_MS: taskPoll.POLL_ADOPT_BUSY_MS,
+  POLL_ADOPT_QUEUED_MS: taskPoll.POLL_ADOPT_QUEUED_MS,
+  POLL_ADOPT_IDLE_MS: taskPoll.POLL_ADOPT_IDLE_MS,
+  POLL_TASK_MS: taskPoll.POLL_TASK_MS,
+  POLL_TASK_QUEUED_MS: taskPoll.POLL_TASK_QUEUED_MS,
+  POLL_SCHEDULE_LIVE_MS: taskPoll.POLL_SCHEDULE_LIVE_MS,
+  POLL_SCHEDULE_IDLE_MS: taskPoll.POLL_SCHEDULE_IDLE_MS,
+  POLL_SCHEDULE_EMPTY_MS: taskPoll.POLL_SCHEDULE_EMPTY_MS,
+};
 
 console.log('E2 · isQueuedStage：认出后端实际的排队文案');
 check('「排队中」算排队', () => eq(isQueuedStage('排队中'), true));
@@ -231,6 +208,45 @@ check('断线时不掉进待机档（否则会错过刚提交的任务）', () =
   assert(catchAt > 0, 'adoptActiveTasks 里找不到 catch');
   const tail = adopt.slice(catchAt, catchAt + 200);
   assert(tail.indexOf('busy: true') >= 0, '接口失败时没有保持忙碌档');
+});
+
+console.log('\nE2 · 清单 38 第 2 步：抽到 task-poll.js 之后仍要能用');
+check('画布页加载了 task-poll.js', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'web', 'canvas.html'), 'utf8');
+  assert(html.indexOf('/assets/task-poll.js') >= 0, 'canvas.html 没引 task-poll.js');
+});
+check('task-poll.js 排在 canvas.js 之前（否则取不到）', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'web', 'canvas.html'), 'utf8');
+  const pollAt = html.indexOf('/assets/task-poll.js');
+  const canvasAt = html.indexOf('/assets/canvas.js');
+  assert(pollAt >= 0 && canvasAt >= 0, '脚本标签没找齐');
+  assert(pollAt < canvasAt, '加载顺序反了，canvas.js 会拿不到 window.CanvasTaskPoll');
+});
+check('canvas.js 优先用模块（不是把实现又抄了一遍）', () => {
+  assert(canvasSrc.indexOf('window.CanvasTaskPoll') >= 0, 'canvas.js 没有取模块');
+  assert(canvasSrc.indexOf('if (taskPoll) return taskPoll.nextAdoptDelay(state)') >= 0, '转发没接上模块');
+  assert(canvasSrc.indexOf('if (taskPoll) return taskPoll.isQueuedStage(stage)') >= 0, '转发没接上模块');
+  assert(canvasSrc.indexOf('if (taskPoll) return taskPoll.nextTaskPollDelay(state)') >= 0, '转发没接上模块');
+});
+check('每个转发点都留了等价兜底（老页面缓存里可能还没这个脚本）', () => {
+  // 兜底就是「模块不在时仍能算出同样的值」，所以看的是各自函数体里有没有 fallback 分支
+  ['isQueuedStage', 'nextAdoptDelay', 'nextTaskPollDelay', 'nextSchedulePollDelay'].forEach((name) => {
+    const body = pickFunction(name);
+    assert(body.indexOf('taskPoll') >= 0, name + ' 没走模块');
+    assert(body.indexOf('return') >= 0 && body.split('return').length >= 3, name + ' 没有兜底分支');
+  });
+});
+check('常量来源唯一：canvas.js 里的分档只从模块取，不再各写一份', () => {
+  const lines = canvasSrc.split('\n').filter((line) => /const POLL_\w+_MS =/.test(line));
+  assert(lines.length === 8, '常量取回处数量不对：' + lines.length);
+  lines.forEach((line) => {
+    assert(line.indexOf('taskPoll ?') >= 0, '有一行没走模块取值：' + line.trim());
+  });
+});
+check('canvas.js 里不再保留第二套判据实现（抽干净了）', () => {
+  // 兜底分支里会复述一遍关键词，但真正的实现不该再有第二处
+  const hits = canvasSrc.split('text.indexOf(\'队列\')').length - 1;
+  assert(hits === 1, '判据被抄成了两份：' + hits);
 });
 
 console.log('\n' + '─'.repeat(52));

@@ -7443,16 +7443,27 @@
     return { groups: list.length, live: liveIds.size > 0 };
   }
 
+  // ---------- 轮询节奏（清单 38 第 2 步：抽到 task-poll.js） ----------
+  // 这一块是整块纯判断：不碰 DOM、不读 nodes、只看几个布尔量，所以单独成文件。
+  // 直接收益是可测性 —— 原来只能靠「源码切片 + vm 沙箱」测，现在能直接 require。
+  // 兜底留一份等价实现：老页面缓存里可能还没有 task-poll.js，缺了也不能让画布打不开。
+  const taskPoll = window.CanvasTaskPoll || null;
+  const POLL_ADOPT_BUSY_MS = taskPoll ? taskPoll.POLL_ADOPT_BUSY_MS : 5000;
+  const POLL_ADOPT_QUEUED_MS = taskPoll ? taskPoll.POLL_ADOPT_QUEUED_MS : 10000;
+  const POLL_ADOPT_IDLE_MS = taskPoll ? taskPoll.POLL_ADOPT_IDLE_MS : 30000;
+  const POLL_TASK_MS = taskPoll ? taskPoll.POLL_TASK_MS : 2000;
+  const POLL_TASK_QUEUED_MS = taskPoll ? taskPoll.POLL_TASK_QUEUED_MS : 10000;
+  const POLL_SCHEDULE_LIVE_MS = taskPoll ? taskPoll.POLL_SCHEDULE_LIVE_MS : 1500;
+  const POLL_SCHEDULE_IDLE_MS = taskPoll ? taskPoll.POLL_SCHEDULE_IDLE_MS : 5000;
+  const POLL_SCHEDULE_EMPTY_MS = taskPoll ? taskPoll.POLL_SCHEDULE_EMPTY_MS : 15000;
+
   // 定时组的状态查询同样按需降频：
   //   有成员正在跑 → 1.5 秒（要盯住每张的进展）
   //   有定时组但都空闲 → 5 秒（到点触发是服务端的事，前端慢一点没关系）
   //   本画布没有定时组 → 15 秒心跳（留着是为了发现新建的定时组，别一直问）
   //   页面藏起来 → 不排，切回来统一唤醒
-  const POLL_SCHEDULE_LIVE_MS = 1500;
-  const POLL_SCHEDULE_IDLE_MS = 5000;
-  const POLL_SCHEDULE_EMPTY_MS = 15000;
-
   function nextSchedulePollDelay(state) {
+    if (taskPoll) return taskPoll.nextSchedulePollDelay(state);
     const s = state || {};
     if (s.hidden) return 0;
     if (s.live) return POLL_SCHEDULE_LIVE_MS;
@@ -8150,13 +8161,8 @@
   // 甚至本画布根本没有任务在跑，也照样按点问一遍。挂着页面开会一天，
   // 光这些问不出新东西的请求就成千上万次。
   // 改成「每轮跑完自己决定下次隔多久」，按当前状态分档。
-  // 下面这几个常量与两个 nextXxxDelay 都是纯函数，不碰 DOM，方便直接单测；
-  // 返回 0 表示「这一轮先不排下一轮」，等页面切回来时统一唤醒。
-  const POLL_ADOPT_BUSY_MS = 5000; // 本画布有任务在跑：跟原来一样
-  const POLL_ADOPT_QUEUED_MS = 10000; // 任务都还在平台排队：拉长一倍
-  const POLL_ADOPT_IDLE_MS = 30000; // 本画布没有任务在跑：降到 30 秒心跳
-  const POLL_TASK_MS = 2000; // 单张卡片：正常跟进
-  const POLL_TASK_QUEUED_MS = 10000; // 单张卡片：还在排队，问那么勤也没用
+  // 常量与四个判据函数现在住在 task-poll.js（清单 38 第 2 步），上面已经取回来了。
+  // 这里只留转发，每个都带等价兜底：老页面缓存里可能还没有 task-poll.js。
 
   // 「还在平台排队」的判据。后端的 stage 文案实际有这几种：
   //   「排队中」（server/tasks.js 建任务时）
@@ -8165,6 +8171,7 @@
   // 注意第三种是「排在队列里」，中间并没有连着的「排队」两字，所以关键词取
   // 「排队」「队列」「正在等结果」三个，单靠「排队」会漏掉第三种。
   function isQueuedStage(stage) {
+    if (taskPoll) return taskPoll.isQueuedStage(stage);
     const text = String(stage || '');
     return (
       text.indexOf('排队') >= 0 || text.indexOf('队列') >= 0 || text.indexOf('正在等结果') >= 0
@@ -8174,6 +8181,7 @@
   // 下一轮「接管别处提交的任务」该隔多久。
   // hidden：页面藏起来了，先不排，切回来时 immediately 补一次。
   function nextAdoptDelay(state) {
+    if (taskPoll) return taskPoll.nextAdoptDelay(state);
     const s = state || {};
     if (s.hidden) return 0;
     if (s.busy) return s.queuedOnly ? POLL_ADOPT_QUEUED_MS : POLL_ADOPT_BUSY_MS;
@@ -8182,6 +8190,7 @@
 
   // 单张卡片下一轮该隔多久。hidden 同样先不排，等切回页面统一唤醒。
   function nextTaskPollDelay(state) {
+    if (taskPoll) return taskPoll.nextTaskPollDelay(state);
     const s = state || {};
     if (s.hidden) return 0;
     if (s.queued) return POLL_TASK_QUEUED_MS;
