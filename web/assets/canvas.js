@@ -4522,6 +4522,120 @@
     return head;
   }
 
+  // 提示词里的 @ 引用语法收在 window.CanvasRefs 里（清单 38 第 4 步）。
+  // 兜底留一份等价实现：老页面缓存里可能还没有 refs.js，缺了也不能让画布打不开。
+  // 句柄叫 mentions 而不是 refs —— 这个文件里 `refs` 一直是「参考素材数组」的意思
+  // （refs.length / refs.map），再拿它当模块名会读出一堆假冲突。
+  const REFS_FALLBACK = {
+    rawPattern: () => /@\[([^\]\n]+)\]/g,
+    toShown: (text) => String(text == null ? '' : text).replace(/@\[([^\]\n]+)\]/g, (all, tag) => '@' + tag),
+    retagShown: (text, renamed) => {
+      const map = renamed instanceof Map ? renamed : new Map(Object.entries(renamed || {}));
+      const source = String(text == null ? '' : text);
+      if (!map.size || source.indexOf('@') < 0) return source;
+      return source.replace(/@(快速视频|视频|音频|图)(\d+)/g, (all, kind, num) => {
+        const to = map.get(kind + num);
+        return to ? '@' + to : all;
+      });
+    },
+    dropAll: (text, filler) => {
+      const source = String(text == null ? '' : text);
+      if (source.indexOf('@[') < 0) return source;
+      return source.replace(/@\[[^\]\n]*\]/g, typeof filler === 'string' ? filler : '');
+    },
+    toRaw: (text, known) => {
+      const live = known instanceof Set ? known : new Set(Array.isArray(known) ? known : []);
+      return String(text == null ? '' : text).replace(/@(快速视频|视频|音频|图)(\d+)/g, (all, kind, num) => {
+        const tag = kind + num;
+        return live.has(tag) ? '@[' + tag + ']' : all;
+      });
+    },
+    eachRaw: (text, visit) => {
+      const source = String(text == null ? '' : text);
+      if (source.indexOf('@[') < 0) return false;
+      let hit = false;
+      const re = /@\[([^\]\n]+)\]/g;
+      let match;
+      while ((match = re.exec(source)) !== null) {
+        hit = true;
+        visit(match[1], match[0]);
+      }
+      return hit;
+    },
+    tagsOf: (text) => {
+      const out = [];
+      REFS_FALLBACK.eachRaw(text, (tag) => {
+        if (out.indexOf(tag) < 0) out.push(tag);
+      });
+      return out;
+    },
+    retag: (text, renamed) => {
+      const map = renamed instanceof Map ? renamed : new Map(Object.entries(renamed || {}));
+      const source = String(text == null ? '' : text);
+      if (!map.size || source.indexOf('@[') < 0) return source;
+      return source.replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
+        const to = map.get(tag);
+        return to ? '@[' + to + ']' : all;
+      });
+    },
+    strip: (text, gone, style) => {
+      const dead = gone instanceof Set ? gone : new Set(Array.isArray(gone) ? gone : []);
+      if (!dead.size) return null;
+      const source = String(text == null ? '' : text);
+      let hit = false;
+      const re = style === 'shown' ? /@(快速视频|视频|音频|图)(\d+)/g : /@\[([^\]\n]+)\]/g;
+      const next = source.replace(re, (all, one, two) => {
+        const tag = style === 'shown' ? one + two : one;
+        if (!dead.has(tag)) return all;
+        hit = true;
+        return '';
+      });
+      return hit ? REFS_FALLBACK.tidy(next) : null;
+    },
+    tidy: (text) =>
+      String(text == null ? '' : text)
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim(),
+    broken: (text, known) => {
+      const live = known instanceof Set ? known : new Set(Array.isArray(known) ? known : []);
+      const out = [];
+      REFS_FALLBACK.eachRaw(text, (tag) => {
+        if (!live.has(tag) && out.indexOf(tag) < 0) out.push(tag);
+      });
+      return out;
+    },
+    startsWithTag: (tag, token) => (!token ? true : String(tag || '').indexOf(String(token)) === 0),
+    forApi: (text) =>
+      String(text == null ? '' : text)
+        .replace(/@\[([^\]\n]+)\]/g, (all, tag) => String(tag).replace(/^@+/, '').trim())
+        .replace(/@(?=[图视音])/g, ''),
+    parse: (text, known) => {
+      const raw = REFS_FALLBACK.tagsOf(text);
+      if (raw.length) return raw;
+      const source = String(text == null ? '' : text);
+      if (source.indexOf('@') < 0) return [];
+      const live = known instanceof Set ? known : new Set(Array.isArray(known) ? known : []);
+      const out = [];
+      const re = /@(快速视频|视频|音频|图)(\d+)/g;
+      let match;
+      while ((match = re.exec(source)) !== null) {
+        const tag = match[1] + match[2];
+        if (live.size && !live.has(tag)) continue;
+        if (out.indexOf(tag) < 0) out.push(tag);
+      }
+      return out;
+    },
+    mapRaw: (text, mapper) => {
+      const source = String(text == null ? '' : text);
+      if (source.indexOf('@[') < 0) return source;
+      return source.replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
+        const next = mapper(tag);
+        return typeof next === 'string' ? next : all;
+      });
+    },
+  };
+  const mentions = window.CanvasRefs || REFS_FALLBACK;
+
   // 素材编号用的种类简称：图1 / 视频1 / 音频1 / 快速视频1
   const KIND_LABEL = { image: '图', video: '视频', audio: '音频', quick: '快速视频' };
 
@@ -4686,10 +4800,7 @@
       const data = nodeData(node);
       const text = String(data.text || '');
       if (text.indexOf('@[') < 0) return;
-      const next = text.replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-        const to = renamed.get(tag);
-        return to ? '@[' + to + ']' : all;
-      });
+      const next = mentions.retag(text, renamed);
       if (next === text) return;
       data.text = next;
       retagged.add(node.id);
@@ -4705,10 +4816,7 @@
         if (!snap) return;
         const shown = String(snap.prompt || '');
         if (shown.indexOf('@') >= 0) {
-          const nextShown = shown.replace(/@(快速视频|视频|音频|图)(\d+)/g, (all, kind, num) => {
-            const to = renamed.get(kind + num);
-            return to ? '@' + to : all;
-          });
+          const nextShown = mentions.retagShown(shown, renamed);
           if (nextShown !== shown) {
             snap.prompt = nextShown;
             rescheduled.add(node.id);
@@ -4716,10 +4824,7 @@
         }
         const rawText = String(snap.promptRaw || '');
         if (rawText.indexOf('@[') >= 0) {
-          const nextRaw = rawText.replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-            const to = renamed.get(tag);
-            return to ? '@[' + to + ']' : all;
-          });
+          const nextRaw = mentions.retag(rawText, renamed);
           if (nextRaw !== rawText) {
             snap.promptRaw = nextRaw;
             rescheduled.add(node.id);
@@ -4737,28 +4842,11 @@
     const gone = tags instanceof Set ? tags : new Set(tags || []);
     const changed = new Set();
     if (!gone.size) return changed;
-    // 把 @ 摘掉以后，两边会剩下多余空格：收成一个，首尾也去掉
-    const tidy = (text) => text.replace(/[ \t]{2,}/g, ' ').trim();
-    // 内部写法 @[图1]
-    const cleanRaw = (text) => {
-      let hit = false;
-      const next = String(text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-        if (!gone.has(tag)) return all;
-        hit = true;
-        return '';
-      });
-      return hit ? tidy(next) : null;
-    };
+    // 把 @ 摘掉以后，两边会剩下多余空格：收成一个、首尾也去掉 —— 这两步收在
+    // refs.strip 里（「只收两个及以上空格」这条规矩也一并收着）
+    const cleanRaw = (text) => mentions.strip(text, gone, 'raw');
     // 给人看的写法 @图1（定时组快照里存的是这种）
-    const cleanShown = (text) => {
-      let hit = false;
-      const next = String(text || '').replace(/@(快速视频|视频|音频|图)(\d+)/g, (all, kind, num) => {
-        if (!gone.has(kind + num)) return all;
-        hit = true;
-        return '';
-      });
-      return hit ? tidy(next) : null;
-    };
+    const cleanShown = (text) => mentions.strip(text, gone, 'shown');
     nodes.forEach((node) => {
       const data = nodeData(node);
       const next = cleanRaw(data.text);
@@ -5072,17 +5160,14 @@
 
   // 给人看的时候：@[图1] 写成 @图1
   function displayText(text) {
-    return String(text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => '@' + tag);
+    return mentions.toShown(text);
   }
 
   // 手打的「@图1 / @视频1 / @音频1」也认：只认这张卡片上真实存在的编号，
   // 转成内部写法 @[图1]，这样素材条、生成请求都能带上它
   function normalizeMentions(node, text) {
     const live = new Set(refItemsOf(node).map((item) => item.tag));
-    return String(text || '').replace(/@(快速视频|图|视频|音频)(\d+)/g, (all, kind, num) => {
-      const tag = kind + num;
-      return live.has(tag) ? '@[' + tag + ']' : all;
-    });
+    return mentions.toRaw(text, live);
   }
 
   // 这张卡片身上还连着的素材，编号就是素材条上的编号
@@ -5136,11 +5221,7 @@
   // 快速视频当前实际引用的素材：按提示词里出现的 @ 编号取，顺序跟提示词一致
   function quickPickedOf(node) {
     const data = nodeData(node);
-    const used = [];
-    String(data.text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-      if (used.indexOf(tag) < 0) used.push(tag);
-      return all;
-    });
+    const used = mentions.tagsOf(data.text);
     if (!used.length) return [];
     const pool = quickPoolOf(node);
     const out = [];
@@ -5155,11 +5236,7 @@
   function syncQuickRefs(node) {
     if (node.type !== 'quick') return;
     const data = nodeData(node);
-    const used = [];
-    String(data.text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-      if (used.indexOf(tag) < 0) used.push(tag);
-      return all;
-    });
+    const used = mentions.tagsOf(data.text);
     const pool = quickPoolOf(node);
     // 编号重排后钥匙会变，这里只清掉「指向已删卡片」的旧记录，其余按当前编号重新绑
     const map = {};
@@ -5216,11 +5293,13 @@
     return frag;
   }
 
-  // 把存盘文本里的 @[图1] 还原成胶囊
+  // 把存盘文本里的 @[图1] 还原成胶囊。
+  // 不靠 eachRaw 回调拿下标：`@[图1] @[图1]` 这种同一标签出现两次时，
+  // indexOf 会两次找到第一处，第二段文字就被吞掉了。这里自己走一遍匹配。
   function renderPrompt(box, node, text) {
     box.innerHTML = '';
     const source = String(text || '');
-    const re = /@\[([^\]\n]+)\]/g;
+    const re = mentions.rawPattern();
     let last = 0;
     let match;
     while ((match = re.exec(source)) !== null) {
@@ -5311,9 +5390,9 @@
     return items.filter((item) => {
       if (kind && (item.numberKind || item.kind) !== kind) return false;
       // 只敲了「@快」这种半截类型：按编号前缀先筛一轮
-      if (!kind && token.kind) return item.tag.indexOf(token.kind) === 0;
+      if (!kind && token.kind) return mentions.startsWithTag(item.tag, token.kind);
       if (!token.num) return true;
-      return item.tag.indexOf((token.kind || '') + token.num) === 0;
+      return mentions.startsWithTag(item.tag, (token.kind || '') + token.num);
     });
   }
 
@@ -5539,24 +5618,18 @@
       const saved = data.quickRefs && typeof data.quickRefs === 'object' ? data.quickRefs : {};
       const live = new Set(pool.map((item) => item.tag));
       const found = [];
-      String(data.text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-        if (live.has(tag)) return all;
+      mentions.eachRaw(data.text, (tag) => {
+        if (live.has(tag)) return;
         if (quickRefSourceOf(node, tag, pool, saved)) {
           live.add(tag);
-          return all;
+          return;
         }
         if (found.indexOf(tag) < 0) found.push(tag);
-        return all;
       });
       return found;
     }
     const live = new Set(refItemsOf(node).map((item) => item.tag));
-    const found = [];
-    String(nodeData(node).text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-      if (!live.has(tag) && found.indexOf(tag) < 0) found.push(tag);
-      return all;
-    });
-    return found;
+    return mentions.broken(nodeData(node).text, live);
   }
 
   // ===== 组合：一张卡代表一组素材，拉一条线就把整组接过去 =====
@@ -7624,7 +7697,7 @@
     name.className = 'group-name';
     name.type = 'text';
     name.placeholder = presetOf('group').placeholder;
-    name.value = String(data.text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => '@' + tag);
+    name.value = mentions.toShown(data.text);
     name.addEventListener('pointerdown', (event) => event.stopPropagation());
     name.addEventListener('change', () => {
       const next = name.value.trim();
@@ -8302,11 +8375,7 @@
   // 快速视频：只看提示词里 @ 了谁，把对应卡片的结果交给接口；没 @ 就不带素材
   function quickRefsForApi(node) {
     const data = nodeData(node);
-    const used = [];
-    String(data.text || '').replace(/@\[([^\]\n]+)\]/g, (all, tag) => {
-      if (used.indexOf(tag) < 0) used.push(tag);
-      return all;
-    });
+    const used = mentions.tagsOf(data.text);
     if (!used.length) return [];
     const pool = quickPoolOf(node);
     const saved = data.quickRefs && typeof data.quickRefs === 'object' ? data.quickRefs : {};
@@ -14776,8 +14845,8 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     if (tag) parts.push(tag);
     const title = String(data.title || "").replace(/\s+/g, " ").trim();
     if (title) parts.push(title);
-    const prompt = String(data.text || "")
-      .replace(/@\[[^\]\n]*\]/g, " ")
+    // 文件名里不该出现 @[图1]：先整段抹掉（留个空格免得前后词粘一起）再压空白
+    const prompt = String(mentions.dropAll(data.text, " "))
       .replace(/\s+/g, " ")
       .trim();
     if (prompt) parts.push(prompt.slice(0, 40));

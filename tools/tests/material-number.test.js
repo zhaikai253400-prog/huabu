@@ -88,6 +88,9 @@ const sandbox = {
   Set: Set,
   Map: Map,
   Infinity: Infinity,
+  // @ 引用语法现在收在 web/assets/refs.js 里（清单 38 第 4 步），
+  // 直接把真模块注进沙箱，不再从 canvas.js 里切一份等价实现出来
+  __refs: require(path.join(ROOT, 'web', 'assets', 'refs.js')),
   log: { badges: [] },
   PRESETS: {
     image: { w: 360, h: 203, label: '图片' },
@@ -108,6 +111,8 @@ vm.runInContext(
     'function paintIndexBadge(node) { log.badges.push(node.id); }',
     // ---- 被验证的源码 ----
     "var KIND_LABEL = { image: '图', video: '视频', audio: '音频', quick: '快速视频' };",
+    // canvas.js 里那句 `const mentions = window.CanvasRefs || REFS_FALLBACK;`
+    'var mentions = __refs;',
   ].join('\n'),
   sandbox
 );

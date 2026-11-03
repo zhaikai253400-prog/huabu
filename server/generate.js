@@ -13,6 +13,9 @@ const modelSpecs = require('./model-specs');
 const errorKinds = require('./error-kinds');
 // 参数装配规则与前端共用同一份源码（web 目录下的 UMD 模块，浏览器 <script> 直接加载）
 const payloadRules = require('../web/assets/payload-rules.js');
+// @ 引用语法（@[图1] / @图1）也只留一份实现：前端连显示、换号、摘引用都走它，
+// 服务端这里只需要最后那一步「收拾成平台看得懂的写法」。第 12 份拷贝删掉。
+const refs = require('../web/assets/refs.js');
 
 const KIND_FOLDER = { image: '图片', video: '视频', audio: '音频' };
 
@@ -55,9 +58,7 @@ function snippet(text, limit) {
 
 // 送接口前把提示词里的 @[图1] 收拾成平台看得懂的写法
 function promptForApi(text) {
-  return String(text || '')
-    .replace(/@\[([^\]\n]+)\]/g, (all, tag) => String(tag).replace(/^@+/, '').trim())
-    .replace(/@(?=[图视音])/g, '');
+  return refs.forApi(text);
 }
 
 // ---------- 尾部提示词 ----------
