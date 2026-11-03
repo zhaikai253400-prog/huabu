@@ -2601,6 +2601,45 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
 }
 
 .ch-badge.warn { background: var(--tint-warn-bg); color: var(--tint-warn-text); }
+.ch-badge.bad { background: var(--field-3); color: var(--danger); }
+
+/* 通道体检清单（清单 40）：导入 / 保存后把缺的必填项摆在这儿 */
+.ch-io-report {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.ch-io-report.hidden { display: none; }
+
+.ch-io-report-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ch-io-report-sum { color: var(--muted); font-size: 0.85em; }
+.ch-io-report-close { padding: 3px 9px; font-size: 0.84em; }
+
+.ch-io-report-ok { color: var(--ok); font-size: 0.86em; }
+
+.ch-io-report-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--field);
+}
+
+.ch-io-report-row.bad { background: var(--field-3); }
+.ch-io-report-mark { flex: 0 0 auto; font-weight: 700; color: var(--ok); }
+.ch-io-report-row.bad .ch-io-report-mark { color: var(--danger); }
+.ch-io-report-name { flex: 0 0 auto; }
+.ch-io-report-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ch-io-report-line { font-size: 0.84em; color: var(--muted); word-break: break-word; }
+.ch-io-report-line.bad { color: var(--danger); }
+.ch-io-foot { font-size: 0.82em; color: var(--muted); }
+
 
 .ch-head-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 

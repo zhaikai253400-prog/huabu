@@ -102,6 +102,7 @@
   const ioPanel = document.getElementById('ch-io-panel');
   const importText = document.getElementById('ch-import-text');
   const includeKeysEl = document.getElementById('ch-include-keys');
+  const ioReportEl = document.getElementById('ch-io-report');
 
   let channels = [];
   let channelTemplate = null;
@@ -110,6 +111,8 @@
   let saveTimer = null;
   let search = '';
   const notices = new Map();
+  // 通道体检结果（清单 40）：id → { problems, notices, ok }，卡片头部角标靠它
+  const inspectMap = new Map();
   const tests = new Map();
   const balances = new Map();
   const autoQueried = new Set();
@@ -356,6 +359,20 @@
     });
     if (!channel.baseUrl) badges.appendChild(badge('没填地址', 'warn'));
     else if (!channel.apiKey) badges.appendChild(badge('没填密钥', 'warn'));
+    // 体检出的必填项缺失（清单 40）：数量摆在这儿，展开卡片能看到具体缺什么
+    const missing = issueCountOf(channel);
+    if (missing) {
+      const flag = badge('缺 ' + missing + ' 项必填', 'bad');
+      flag.title = '导入 / 保存时做的兼容检查发现的必填项缺失；展开卡片、点上面的保存，清单里会列出具体是哪几项';
+      badges.appendChild(flag);
+    } else {
+      const soft = noticeCountOf(channel);
+      if (soft) {
+        const flag = badge(soft + ' 条提示', '');
+        flag.title = '能跑，但有几处值得看一眼；点「导入 / 导出」里的体检清单能看到具体内容';
+        badges.appendChild(flag);
+      }
+    }
     head.appendChild(badges);
 
     const enabledBox = makeCheckbox('启用', channel.enabled !== false, (checked) => {
@@ -1480,20 +1497,110 @@
     }, immediate ? 0 : 900);
   }
 
-  async function saveNow() {
+  async function saveNow(fromImport) {
     if (!dirty) return;
     dirty = false;
     saveStateEl.textContent = '正在保存…';
     try {
-      await window.api.saveChannels(channels);
+      const saved = await window.api.saveChannels(channels);
       saveStateEl.textContent = '已保存';
       saveStateEl.className = 'hint ok';
+      // 服务端顺手做了一遍兼容体检（清单 40）：新导入的通道缺了哪些必填项，
+      // 在这里就把清单摆出来，别等用户真点生成才撞上。
+      rememberInspect(saved && saved.check);
+      paintInspectReport(saved, Boolean(fromImport));
       if (hooks.onSaved) hooks.onSaved();
     } catch (error) {
       dirty = true;
       saveStateEl.textContent = '保存失败：' + error.message;
       saveStateEl.className = 'hint bad';
     }
+  }
+
+  // 把服务端回的体检结果按通道 id 记下来，卡片头部的角标要用
+  function rememberInspect(check) {
+    if (!check || !Array.isArray(check.items)) return;
+    check.items.forEach((one) => {
+      if (one && one.id) inspectMap.set(one.id, one);
+    });
+  }
+
+  function issueCountOf(channel) {
+    const one = channel && inspectMap.get(channel.id);
+    return one ? (one.problems || []).length : 0;
+  }
+
+  function noticeCountOf(channel) {
+    const one = channel && inspectMap.get(channel.id);
+    return one ? (one.notices || []).length : 0;
+  }
+
+  // 导入 / 保存后的体检清单（清单 40）。
+  // 展开时机只认两种：刚导入完（用户正等着看结果），或者清单本来就开着（用户在盯着它补字段）。
+  // 平时自动保存不主动弹——不然每新建一个空通道都弹一次，很吵。
+  function paintInspectReport(payload, fromImport) {
+    if (!ioReportEl) return;
+    const fresh = (payload && payload.freshProblems) || [];
+    const check = payload && payload.check;
+    const wasOpen = !ioReportEl.classList.contains('hidden');
+    if (!check && !fresh.length) {
+      ioReportEl.classList.add('hidden');
+      ioReportEl.textContent = '';
+      return;
+    }
+    if (!fromImport && !wasOpen) return;
+
+    const items = (check && check.items) || [];
+    const problemCount = check ? check.problemCount : fresh.length;
+    const noticeCount = check ? check.noticeCount : 0;
+    ioReportEl.textContent = '';
+    ioReportEl.classList.remove('hidden');
+
+    const head = el('div', 'ch-io-report-head');
+    head.appendChild(el('b', null, '通道体检'));
+    head.appendChild(
+      el(
+        'span',
+        'ch-io-report-sum',
+        problemCount
+          ? '有 ' + problemCount + ' 个通道缺必填项，补齐前生成会失败'
+          : '所有通道的必填项都齐了' + (noticeCount ? '，另有 ' + noticeCount + ' 个可以再看一眼' : '')
+      )
+    );
+    const grow = el('span', 'grow');
+    head.appendChild(grow);
+    const close = el('button', 'ch-io-report-close', '收起');
+    close.title = '收起这份体检清单（通道配置本身没有动）';
+    close.addEventListener('click', () => {
+      ioReportEl.classList.add('hidden');
+      ioReportEl.textContent = '';
+    });
+    head.appendChild(close);
+    ioReportEl.appendChild(head);
+
+    // 只把有问题的 / 有提示的列出来；全绿的通道不占行，避免一眼看不到重点
+    const shown = items.filter((one) => one && (!one.ok || (one.notices && one.notices.length)));
+    if (!shown.length) {
+      ioReportEl.appendChild(el('div', 'ch-io-report-ok', '这次没有发现缺必填项的通道。'));
+    }
+    shown.forEach((one) => {
+      const row = el('div', 'ch-io-report-row' + (one.ok ? '' : ' bad'));
+      row.appendChild(el('span', 'ch-io-report-mark', one.ok ? '✔' : '✖'));
+      row.appendChild(el('b', 'ch-io-report-name', one.name || '（未命名通道）'));
+      const lines = el('div', 'ch-io-report-lines');
+      (one.problems || []).forEach((it) => {
+        lines.appendChild(el('div', 'ch-io-report-line bad', '缺「' + it.label + '」：' + it.detail));
+      });
+      (one.notices || []).forEach((it) => {
+        lines.appendChild(el('div', 'ch-io-report-line', '注意「' + it.label + '」：' + it.detail));
+      });
+      row.appendChild(lines);
+      ioReportEl.appendChild(row);
+    });
+    const foot = el('div', 'ch-io-foot');
+    foot.textContent =
+      '导入不会被拦住，缺的项先存着，回头补齐就行。补完再点一次上面的「保存」，这份清单会跟着刷新。';
+    ioReportEl.appendChild(foot);
   }
 
   async function flushSave() {
@@ -1680,10 +1787,110 @@
     return shaped;
   }
 
+  // 导入前的体检（清单 40）。
+  //
+  // 关键点：必须在 fillDefaults 之前、拿「原始 JSON」判。填平缺项会把模板里的
+  // 默认值补上去（kinds 补成 ['image']、路径补成 /images/generations），
+  // 补完再看就永远是齐的——那等于什么都没查。
+  //
+  // 规则跟服务端 server/channels.js 的 inspectChannel 对齐，只是这里跑在原始数据上。
+  function inspectImported(raw, id) {
+    const c = raw && typeof raw === 'object' ? raw : {};
+    const problems = [];
+    const notices = [];
+    const kinds = Array.isArray(c.kinds) ? c.kinds.filter((kind) => KIND_ORDER.indexOf(kind) >= 0) : [];
+    const models = c.models && typeof c.models === 'object' ? c.models : {};
+    const countOf = (kind) => (Array.isArray(models[kind]) ? models[kind].length : 0);
+
+    if (!String(c.baseUrl || '').trim()) {
+      problems.push({ field: 'baseUrl', label: 'Base URL', detail: '接口地址没填，这个通道发不出任何请求' });
+    }
+    const auth = c.auth && typeof c.auth === 'object' ? c.auth : {};
+    const authStyle = String(auth.style || 'bearer');
+    if (authStyle !== 'none' && !String(c.apiKey || '').trim()) {
+      problems.push({ field: 'apiKey', label: '密钥', detail: '这个通道要密钥才能调，现在是空的' });
+    }
+    if (!kinds.length) {
+      problems.push({ field: 'kinds', label: '支持的用途', detail: '一个都没勾，这个通道不会被任何生成用到' });
+    }
+    if (kinds.length && !kinds.some((kind) => countOf(kind) > 0)) {
+      problems.push({ field: 'models', label: '模型清单', detail: '勾选的用途下都没有模型，生成时挑不中模型' });
+    }
+    // 只有「这个用途的对象在原始 JSON 里、路径却是空的」才算真缺；
+    // 整个 image / video 对象没写，会按模板补上默认路径，那属于提示。
+    kinds.forEach((kind) => {
+      const spec = c[kind];
+      if (!spec || typeof spec !== 'object') return;
+      if (!String(spec.path || '').trim()) {
+        problems.push({
+          field: kind + '.path',
+          label: KIND_TEXT[kind] + '生成路径',
+          detail: '这个通道要用来生成' + KIND_TEXT[kind] + '，但请求路径是空的',
+        });
+      }
+    });
+
+    kinds.forEach((kind) => {
+      const spec = c[kind];
+      if (!spec || typeof spec !== 'object') {
+        notices.push({
+          field: kind + '.path',
+          label: KIND_TEXT[kind] + '请求参数',
+          detail: '原始 JSON 里没写' + KIND_TEXT[kind] + '这一节，已按默认模板补上，生成前最好核对一遍',
+        });
+      }
+      if (kind !== 'image' && spec && spec.poll && spec.poll.enabled === false) {
+        notices.push({
+          field: kind + '.poll',
+          label: KIND_TEXT[kind] + '轮询',
+          detail: '轮询是关着的：如果这个平台的' + KIND_TEXT[kind] + '是异步出片，会一直拿不到结果',
+        });
+      }
+      const ids = Array.isArray(models[kind]) ? models[kind] : [];
+      if (!ids.length) return;
+      const want = String((c.defaults || {})[kind] || '').trim();
+      if (!want) {
+        notices.push({
+          field: 'defaults.' + kind,
+          label: KIND_TEXT[kind] + '默认模型',
+          detail: '没选默认模型，生成时会用清单里的第一个',
+        });
+      } else if (ids.map((one) => modelId(one)).indexOf(want) < 0) {
+        notices.push({
+          field: 'defaults.' + kind,
+          label: KIND_TEXT[kind] + '默认模型',
+          detail: '设的默认模型（' + want + '）不在模型清单里，已忽略',
+        });
+      }
+    });
+
+    return {
+      id: String(id || c.id || ''),
+      name: String(c.name || '').trim() || '（未命名通道）',
+      problems: problems,
+      notices: notices,
+      ok: problems.length === 0,
+    };
+  }
+
+  // 把一批原始通道体检成服务端 check 的同一种形状，前端直接照着渲染
+  function inspectBatch(list) {
+    const items = (Array.isArray(list) ? list : []).map((one) => inspectImported(one, one && one.id));
+    return {
+      items: items,
+      total: items.length,
+      okCount: items.filter((one) => one.ok).length,
+      problemCount: items.filter((one) => !one.ok).length,
+      noticeCount: items.filter((one) => one.notices.length > 0).length,
+    };
+  }
+
   async function doImport(mode) {
+    let raw;
     let incoming;
     try {
-      incoming = parseImport(importText.value.trim()).map((item) => normalizeImported(item));
+      raw = parseImport(importText.value.trim());
+      incoming = raw.map((item) => normalizeImported(item));
     } catch (error) {
       window.alert('导入失败：' + error.message);
       return;
@@ -1692,6 +1899,8 @@
       window.alert('这段 JSON 里没有通道。');
       return;
     }
+    // 先按原始 JSON 体检一遍（填平默认值之前），导入完直接给用户看结果
+    const check = inspectBatch(raw);
     if (mode === 'replace') {
       if (!window.confirm('确定用这 ' + incoming.length + ' 个通道替换掉现有的 ' + channels.length + ' 个吗？')) return;
       channels = incoming;
@@ -1705,13 +1914,29 @@
         channels.push(copy);
       });
     }
+    // 补上 id：原始 JSON 里没写 id 的，上面已经生成过了，体检结果要跟着对齐
+    check.items.forEach((one, index) => {
+      const shaped = incoming[index];
+      if (shaped && shaped.id) one.id = shaped.id;
+    });
     importText.value = '';
-    if (ioPanel) ioPanel.classList.add('hidden');
     render();
     dirty = true;
+    // 先落库（这一步服务端也会体检一遍，见 server/index.js），
+    // 之后再用「按原始 JSON 算的」这份覆盖渲染：它抓的是导入文件本身缺什么，
+    // 而服务端看到的是已经填平默认值之后的数据，报告会轻一些。
     await flushSave();
-    saveStateEl.textContent = '已导入 ' + incoming.length + ' 个通道并保存';
-    saveStateEl.className = 'hint ok';
+    check.items.forEach((one) => {
+      if (one.id) inspectMap.set(one.id, one);
+    });
+    // 体检清单在导入面板外面，收起面板不影响它
+    if (ioPanel) ioPanel.classList.add('hidden');
+    paintInspectReport({ check: check, freshProblems: check.items.filter((one) => !one.ok) }, true);
+    render();
+    saveStateEl.textContent =
+      '已导入 ' + incoming.length + ' 个通道并保存' +
+      (check.problemCount ? '，其中 ' + check.problemCount + ' 个还缺必填项' : '');
+    saveStateEl.className = 'hint ' + (check.problemCount ? 'bad' : 'ok');
   }
 
   function bindToolbar() {

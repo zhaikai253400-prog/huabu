@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const errorKinds = require('./error-kinds');
 
 const KINDS = ['image', 'video', 'audio'];
+// 通道体检时的中文用途名，报错文案里用得上
+const KIND_LABEL_CN = { image: '图片', video: '视频', audio: '音频' };
 
 // 每次请求都记一笔（地址、耗时、返回码），密钥一律打码
 let logger = null;
@@ -496,6 +498,129 @@ function normalizeSizeMap(input, base) {
   return Object.keys(out).length ? out : base;
 }
 
+// ===== 通道配置兼容检查（清单 40）=====
+// 导入的通道 JSON 常常是「别人给的」「从旧版本导出的」「手写了一半的」：
+// 少个 Base URL、密钥空着、模型清单和 kinds 对不上、路径还是模板里的占位符……
+// 以前这些东西会一路存进去，直到用户真的点生成才报错，而且报的是平台的错
+// （「请求失败了」「模型不存在」），完全看不出是本地配置的问题。
+//
+// 这里在导入时就把问题挑出来，明确告诉用户缺什么——但不阻断导入，
+// 让用户先导进来、有空再补，比直接拒绝友好。
+//
+// 分两档：
+//   problems   —— 真缺了就跑不起来（Base URL / 密钥 / 能干活的模型 / 生成路径）
+//   notices    —— 能跑但值得看一眼（自动补上的默认值、有模型但没选默认、超时等）
+function inspectChannel(channel) {
+  const c = channel && typeof channel === 'object' ? channel : {};
+  const name = str(c.name).trim() || '（未命名通道）';
+  const problems = [];
+  const notices = [];
+  const kinds = Array.isArray(c.kinds) ? c.kinds.filter((kind) => KINDS.indexOf(kind) >= 0) : [];
+  const models = c.models && typeof c.models === 'object' ? c.models : {};
+
+  // ---- 真缺了就跑不起来 ----
+  if (!str(c.baseUrl).trim()) {
+    problems.push({ field: 'baseUrl', label: 'Base URL', detail: '接口地址没填，这个通道发不出任何请求' });
+  }
+  // 密钥：没配 auth 或走 query 的也可能合法，所以只在「明确需要密钥却又空着」时报
+  const auth = c.auth && typeof c.auth === 'object' ? c.auth : {};
+  const authStyle = str(auth.style, 'bearer');
+  if (authStyle !== 'none' && !str(c.apiKey).trim()) {
+    problems.push({ field: 'apiKey', label: '密钥', detail: '这个通道要密钥才能调，现在是空的' });
+  }
+  if (!kinds.length) {
+    problems.push({ field: 'kinds', label: '支持的用途', detail: '一个都没勾，这个通道不会被任何生成用到' });
+  }
+  // 勾了用途却没有任何模型：连「用哪个模型」都选不出来
+  const usableKinds = kinds.filter((kind) => modelIds(models[kind]).length > 0);
+  if (kinds.length && !usableKinds.length) {
+    problems.push({
+      field: 'models',
+      label: '模型清单',
+      detail: '勾选的用途下都没有模型，生成时挑不中模型',
+    });
+  }
+  // 生成路径：勾了某个用途却把该用途的请求路径清空了
+  kinds.forEach((kind) => {
+    const spec = c[kind];
+    const path = spec && typeof spec === 'object' ? str(spec.path).trim() : '';
+    if (!path) {
+      problems.push({
+        field: kind + '.path',
+        label: KIND_LABEL_CN[kind] + '生成路径',
+        detail: '这个通道要用来生成' + KIND_LABEL_CN[kind] + '，但请求路径是空的',
+      });
+    }
+  });
+
+  // ---- 能跑，但值得看一眼 ----
+  // 勾了用途、模型清单里也有，却没选默认模型：能跑，但每次都得手选
+  kinds.forEach((kind) => {
+    const ids = modelIds(models[kind]);
+    if (!ids.length) return;
+    const want = str((c.defaults || {})[kind]).trim();
+    if (!want) {
+      notices.push({
+        field: 'defaults.' + kind,
+        label: KIND_LABEL_CN[kind] + '默认模型',
+        detail: '没选默认模型，生成时会用清单里的第一个（' + ids[0] + '）',
+      });
+    } else if (ids.indexOf(want) < 0) {
+      // 默认模型不在清单里：normalizeChannel 会把它清掉，用户看到的会是「没选」
+      notices.push({
+        field: 'defaults.' + kind,
+        label: KIND_LABEL_CN[kind] + '默认模型',
+        detail: '设的默认模型（' + want + '）不在模型清单里，已忽略',
+      });
+    }
+  });
+  // 轮询：勾了视频 / 音频这类要等结果的用途，却把轮询关了
+  kinds.forEach((kind) => {
+    const spec = c[kind];
+    const poll = spec && typeof spec === 'object' ? spec.poll : null;
+    if (kind !== 'image' && poll && poll.enabled === false) {
+      notices.push({
+        field: kind + '.poll',
+        label: KIND_LABEL_CN[kind] + '轮询',
+        detail: '轮询是关着的：如果这个平台的' + KIND_LABEL_CN[kind] + '是异步出片，会一直拿不到结果',
+      });
+    }
+    const timeout = spec && typeof spec === 'object' ? Number(spec.timeoutSec) : 0;
+    if (!timeout || timeout <= 0) {
+      notices.push({
+        field: kind + '.timeoutSec',
+        label: KIND_LABEL_CN[kind] + '超时',
+        detail: '超时没设或设成了 0，已自动补上默认值',
+      });
+    }
+  });
+  // 列表接口开着却没写路径
+  const lists = c.lists && typeof c.lists === 'object' ? c.lists : {};
+  if (lists.enabled !== false && !str(lists.path).trim()) {
+    notices.push({ field: 'lists.path', label: '模型列表路径', detail: '列表接口开着但路径是空的，「拉取模型」会失败' });
+  }
+
+  return {
+    id: str(c.id),
+    name: name,
+    problems: problems,
+    notices: notices,
+    ok: problems.length === 0,
+  };
+}
+
+// 一批通道的体检结果，附带汇总，前端直接照着渲染
+function inspectChannels(list) {
+  const items = (Array.isArray(list) ? list : []).map((channel) => inspectChannel(channel));
+  return {
+    items: items,
+    total: items.length,
+    okCount: items.filter((one) => one.ok).length,
+    problemCount: items.filter((one) => !one.ok).length,
+    noticeCount: items.filter((one) => one.notices.length > 0).length,
+  };
+}
+
 function normalizeChannel(input) {
   const base = defaultChannel();
   const source = input && typeof input === 'object' ? input : {};
@@ -764,7 +889,7 @@ function encodeBody(contentType, bodyText) {
 async function callApi(channel, options) {
   const opts = options || {};
   const url = buildUrl(channel, opts.path);
-  if (!url) throw new Error('这个通道还没填 Base URL');
+  if (!url) throw errorKinds.configError('这个通道还没填 Base URL');
   const headers = buildHeaders(channel);
   if (opts.extraHeaders && typeof opts.extraHeaders === 'object') {
     Object.keys(opts.extraHeaders).forEach((key) => {
@@ -871,7 +996,7 @@ async function queryBalance(channel) {
   const conf = normalizeBalance(channel && channel.balance);
   if (!conf.enabled) throw new Error('这个通道还没打开「余额查询」');
   const path = str(conf.path).trim();
-  if (!path) throw new Error('余额查询的路径还没填');
+  if (!path) throw errorKinds.configError('余额查询的路径还没填');
   const method = (str(conf.method) || 'GET').toUpperCase();
   const data = await callApi(channel, {
     path: path,
@@ -922,7 +1047,7 @@ async function queryRide(channel) {
   const conf = normalizeRide(channel && channel.ride);
   if (!conf.enabled) throw new Error('这个通道还没打开「班次查询」');
   const path = str(conf.path).trim();
-  if (!path) throw new Error('班次查询的路径还没填');
+  if (!path) throw errorKinds.configError('班次查询的路径还没填');
   const method = (str(conf.method) || 'GET').toUpperCase();
   const data = await callApi(channel, {
     path: path,
@@ -964,7 +1089,7 @@ async function queryRide(channel) {
 // 上传一个参考素材：form = multipart（默认），base64 = data URL 塞进 JSON，binary = 原始字节
 async function callUpload(channel, spec, item) {
   const url = buildUrl(channel, spec.path);
-  if (!url) throw new Error('这个通道还没填 Base URL');
+  if (!url) throw errorKinds.configError('这个通道还没填 Base URL');
   const headers = buildHeaders(channel);
   Object.keys(spec.headers || {}).forEach(function (key) {
     if (key) headers[key] = str(spec.headers[key]);
@@ -1213,6 +1338,9 @@ module.exports = {
   modelIds,
   normalizeChannel,
   normalizeChannels,
+  inspectChannel,
+  inspectChannels,
+  KIND_LABEL_CN,
   activeChannels,
   findChannel,
   buildUrl,

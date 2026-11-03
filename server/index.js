@@ -555,10 +555,20 @@ async function handleApi(req, res, pathname, query) {
     }
     if (method === 'POST') {
       const body = await readBody(req);
+      const before = new Set((config.channels || []).map((one) => one && one.id));
       config.channels = channels.normalizeChannels(body.channels);
       configStore.save(config);
+      // 顺手做一遍兼容体检：新出现的通道（通常是刚导入的）缺了什么，
+      // 在这里就告诉前端，别等用户真点生成才报平台的错（清单 40）。
+      const check = channels.inspectChannels(config.channels);
+      const fresh = check.items.filter((one) => one && !before.has(one.id));
       log('接口通道已保存，共 ' + config.channels.length + ' 个');
-      return sendJson(res, 200, { channels: config.channels });
+      return sendJson(res, 200, {
+        channels: config.channels,
+        check: check,
+        // 本次新加进来的通道里，有问题的那些——前端导入完直接照着提示
+        freshProblems: fresh.filter((one) => !one.ok),
+      });
     }
     return sendJson(res, 405, { error: '不支持的操作' });
   }

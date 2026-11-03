@@ -540,7 +540,7 @@ async function prepareRefs(config, list, channel, progress, options) {
 async function uploadRefs(channel, refs, ctx, progress) {
   const spec = channel && channel.upload;
   if (!spec || !spec.enabled || !refs.length) return refs;
-  if (!String(spec.path || '').trim()) throw new Error('通道「' + channel.name + '」开了「先上传素材」，但没填上传路径');
+  if (!String(spec.path || '').trim()) throw errorKinds.configError('通道「' + channel.name + '」开了「先上传素材」，但没填上传路径');
   for (let index = 0; index < refs.length; index += 1) {
     const item = refs[index];
     if (ctx && ctx.signal && ctx.signal.aborted) throw new Error('已取消');
@@ -552,9 +552,9 @@ async function uploadRefs(channel, refs, ctx, progress) {
     const url = spec.resultUrl ? channels.pickByPath(data.json, spec.resultUrl) : '';
     const id = spec.resultId ? channels.pickByPath(data.json, spec.resultId) : '';
     if (!url && !id) {
-      throw new Error(
-        '上传「' + item.name + '」之后没拿到素材地址或编号，检查通道的「上传结果取值路径」。返回片段：' +
-          snippet(data.text, 200)
+      throw errorKinds.configError(
+        '上传「' + item.name + '」之后没拿到素材地址或编号',
+        '检查通道的「上传结果取值路径」。返回片段：' + snippet(data.text, 200)
       );
     }
     item.remoteUrl = url ? String(url) : '';
@@ -1133,8 +1133,8 @@ async function runKind(config, kind, payload, ctx) {
     model: input.model,
   });
   const label = kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频';
-  if (!channel) throw new Error('还没有能生成' + label + '的通道，先到门户页的「接口通道」里加一个');
-  if (!channel.baseUrl) throw new Error('通道「' + channel.name + '」还没填 Base URL');
+  if (!channel) throw errorKinds.configError('还没有能生成' + label + '的通道，先到门户页的「接口通道」里加一个');
+  if (!channel.baseUrl) throw errorKinds.configError('通道「' + channel.name + '」还没填 Base URL');
   const spec = channel[kind];
   const model = resolveModel(channel, kind, input.model);
   const composed = composePrompt(config, input);
@@ -1179,7 +1179,7 @@ async function runKind(config, kind, payload, ctx) {
     try {
       JSON.parse(bodyText);
     } catch (error) {
-      throw new Error('通道「' + channel.name + '」的请求体模板不是合法 JSON：' + error.message);
+      throw errorKinds.configError('通道「' + channel.name + '」的请求体模板不是合法 JSON：' + error.message);
     }
   }
   progress({ stage: '正在请求 ' + (channel.name || '接口') });
@@ -1207,9 +1207,9 @@ async function runKind(config, kind, payload, ctx) {
   if (!found && spec.poll && spec.poll.enabled) {
     const remoteId = channels.pickByPath(data.json, spec.poll.taskIdPath);
     if (!remoteId) {
-      throw new Error(
-        '这个通道设成了「异步接口」，但接口返回里没找到任务号，检查通道的「任务号取值路径」。返回片段：' +
-          snippet(data.text, 200)
+      throw errorKinds.configError(
+        '这个通道设成了「异步接口」，但接口返回里没找到任务号',
+        '检查通道的「任务号取值路径」。返回片段：' + snippet(data.text, 200)
       );
     }
     const record = buildWaitRecord(channel, kind, spec, input, model, size, prompt, remoteId, refs);
@@ -1219,7 +1219,7 @@ async function runKind(config, kind, payload, ctx) {
     found = await pollRemote(config, channel, kind, record, ctx, progress);
   }
   if (!found) {
-    throw new Error('接口返回里没找到素材地址，检查通道的「结果取值路径」。返回片段：' + snippet(data.text, 220));
+    throw errorKinds.configError('接口返回里没找到素材地址', '检查通道的「结果取值路径」。返回片段：' + snippet(data.text, 220));
   }
   progress({ stage: '正在保存到 素材\\' + (KIND_FOLDER[kind] || '图片') });
   const saved = await saveResult(config, found, channel, prompt, kind, subFolderOf(config, input));
@@ -1277,8 +1277,8 @@ async function preflight(config, payload) {
       kind: kind,
       model: payload && payload.model,
     });
-    if (!channel) throw new Error('没有能生成' + label + '的可用通道，先检查接口通道设置');
-    if (!channel.baseUrl) throw new Error('通道「' + channel.name + '」还没填 Base URL');
+    if (!channel) throw errorKinds.configError('没有能生成' + label + '的可用通道，先检查接口通道设置');
+    if (!channel.baseUrl) throw errorKinds.configError('通道「' + channel.name + '」还没填 Base URL');
     const model = resolveModel(channel, kind, payload && payload.model);
     out.model = model || '';
     out.channel = channel.name || '';
@@ -1368,7 +1368,7 @@ async function testImage(config, payload) {
     kind: 'image',
     model: model,
   });
-  if (!channel) throw new Error('这个通道没有图片模型，先在上面把模型填进去');
+  if (!channel) throw errorKinds.configError('这个通道没有图片模型，先在上面把模型填进去');
   const prompt = String(payload.prompt || '一只橘色小猫坐在木桌上，柔和光线').trim();
   const result = await generateImage(
     config,

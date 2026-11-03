@@ -63,6 +63,15 @@ const KINDS = {
     // 平台偶尔会返回半截内容，连着 5 次都解析不出来才判死
     strikes: 5,
   },
+  // 本地配置缺东西，请求根本没发出去。跟 AUTH / NO_MODEL 这类「平台说不行」
+  // 不是一回事：改平台没用，得回来把通道补齐。重试多少次都是一个结果。
+  CHANNEL_CONFIG: {
+    title: '通道配置不完整',
+    advice: '到「接口通道」里把这个通道缺的字段补齐（Base URL、密钥、模型清单、请求路径这些），改完再生成',
+    retryable: false,
+    failFast: true,
+    strikes: 1,
+  },
   RATE_LIMIT: {
     title: '平台在限流',
     advice: '稍等一会儿再试，不用改配置',
@@ -303,10 +312,33 @@ function makeError(kind, detail) {
   return out;
 }
 
+// 本地配置缺东西（清单 40）。
+//
+// 跟 makeError 的区别：makeError 的 message 是「通道配置不完整」这种类标题，
+// 用户看完还是不知道缺哪个字段。这里 message 直接用具体那句描述
+// （「通道「XX」还没填 Base URL」），类标题退到 detail 后面当上下文，
+// advice 仍然是「回通道设置里去补」——卡片上既说清缺什么，也点明去哪儿改。
+function configError(message, detail) {
+  const info = meta('CHANNEL_CONFIG');
+  const text = String(message || '').trim() || info.title;
+  const out = new Error(text);
+  out.kind = 'CHANNEL_CONFIG';
+  out.advice = info.advice;
+  out.retryable = info.retryable;
+  // detail 是卡片正文。默认那句特意说清楚「这不是平台的错」——
+  // 否则用户会拿着「没填 Base URL」去问平台客服。
+  out.detail = String(detail || '').trim() ||
+    '这条是本机通道设置没配全，不是平台返回的错误；补齐后重新生成就行。';
+  out.__info = info;
+  out.configIssue = true;
+  return out;
+}
+
 module.exports = {
   KINDS,
   classify,
   meta,
   explain,
   makeError,
+  configError,
 };
