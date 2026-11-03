@@ -136,6 +136,19 @@
     <div class="canvas-main">
       <div class="viewport" id="viewport">
         <div class="grid-layer" id="grid-layer"></div>
+        <!-- 一块卡都没有时的引导：画布上什么提示都没有，新用户不知道从哪儿开始。
+             单独一层，不跟着画布平移缩放跑，居中显示，鼠标事件穿透给下面的画布。 -->
+        <div class="board-empty" id="board-empty" hidden>
+          <div class="board-empty-card">
+            <div class="board-empty-title">这块画布还是空的</div>
+            <ul class="board-empty-list">
+              <li><b>双击空白处</b>新建一张卡片</li>
+              <li><b>右键空白处</b>打开新建菜单</li>
+              <li>也可以把图片、视频<b>直接拖进来</b></li>
+            </ul>
+            <div class="board-empty-foot">卡片之间拉线连素材，敲 <b>@</b> 就能引用画布上的图</div>
+          </div>
+        </div>
         <div class="world" id="world"></div>
         <div class="canvas-title" id="canvas-title">
           <button class="canvas-title-btn" id="canvas-title-btn" type="button" title="点一下改画布名字">

@@ -1565,9 +1565,21 @@
     });
     placePanel();
     refreshHiddenBadge();
+    refreshBoardEmpty();
     paintFilter();
     keepViewportAnchored();
     invalidateViewportBox();
+  }
+
+  // 一块卡都没有：把「从哪儿开始」直接画在画布中央。
+  // 只认「画布上真的一张都没有」——被隐藏或被区域折叠的不算，
+  // 那种情况有专门的恢复入口（隐藏徽章 / 展开区域），再叠一层空状态只会误导。
+  // 节点是同步数组，这里不用额外缓存，跟着 renderNodes 走就行。
+  let boardEmptyEl = null;
+  function refreshBoardEmpty() {
+    if (!boardEmptyEl) boardEmptyEl = document.getElementById('board-empty');
+    if (!boardEmptyEl) return;
+    boardEmptyEl.hidden = nodes.length > 0;
   }
 
   // 编辑面板固定宽度（屏幕像素），不跟着卡片大小伸缩：所有卡片弹出来一样大
@@ -2298,7 +2310,9 @@
     }
     if (media.classList.contains('zoomable')) media.appendChild(buildZoomHint());
     media.appendChild(buildStatus(data, node));
-    media.appendChild(buildHoverBar(data, preset));
+    // 这里原来漏传了 node：hoverTextOf 里「组合看组名」「快速视频看素材数」
+    // 两个分支都靠 node 判断，漏了就永远走不到，只显示模型名和提示词。
+    media.appendChild(buildHoverBar(data, preset, node));
     return media;
   }
 
@@ -2508,21 +2522,27 @@
     return bar;
   }
 
+  // 鼠标移上去才浮出的窄条：补上卡片上「没别处显示」的信息。
+  //
+  // 序号牌和标题牌本来就常驻在卡片上（左上角那块、以及卡片外的棕色号），
+  // 悬浮条再抄一遍纯属重复 —— 而且悬浮条一出来会把卡片下沿盖住，
+  // 重复的信息反而把真正有用的「模型 / 提示词开头」挤没了。
+  // 所以这里只留：快速视频的素材数、模型名、提示词开头。
   function hoverTextOf(data, preset, node) {
-    // 组合看的是组名和组里有几样素材
+    // 组合卡片身上已经写着组名了，这里只补「组里有几样」
     if (node && node.type === 'group') {
       const count = groupMembersOf(node).length;
       const name = String(data.text || '').trim();
-      return (name ? name + '　·　' : '') + (count ? count + ' 个素材' : '空组合');
+      const extra = count ? count + ' 个素材' : '空组合';
+      return name ? name + '　·　' + extra : extra;
     }
     const parts = [];
-    if (node && tagOf(node)) parts.push(tagOf(node));
     if (node && node.type === 'quick') {
       const picked = quickPickedOf(node);
+      // 「快速视频」四个字只有在卡片没序号牌时才补（没序号牌时卡片上认不出类型）
       if (!tagOf(node)) parts.push('快速视频');
       if (picked.length) parts.push('@' + picked.length + ' 个素材');
     }
-    if (String(data.title || '').trim()) parts.push(String(data.title).trim());
     if (data.model) parts.push(data.model);
     const text = displayText(data.text).trim().replace(/\s+/g, ' ');
     if (text) parts.push(text.slice(0, 42));
@@ -8548,7 +8568,13 @@
     let adviceText = '';
     if (kind === 'running') {
       titleText = '正在生成中…';
-      messageText = data.progress || '已提交，正在等结果';
+      // 长时间任务（视频常常几分钟）光看一句「正在生成」分不清是在跑还是卡死了，
+      // 把已等时长并进去。清单 30。定时组成员走的是另一条路
+      // （paintScheduleMemberLive 自己拼），两处口径一致，都用 waitedText。
+      const waited = waitedText(data.startedAt);
+      messageText = waited
+        ? (data.progress || '已提交，正在等结果') + ' · ' + waited
+        : data.progress || '已提交，正在等结果';
     } else if (kind === 'preparing') {
       titleText = '正在准备提交…';
       messageText = data.preparing || '正在检查参考素材…';
@@ -8785,6 +8811,9 @@
     data.preparing = '';
     data.error = '';
     data.progress = '正在提交';
+    // 记下这一轮什么时候开始的：视频动辄要等好几分钟，卡片上得能看见「等了多久」，
+    // 否则用户分不清是还在跑还是已经卡死。清单 30。
+    data.startedAt = Date.now();
     // 新一轮开始了，之前排的队已经兑现（runQueuedRerun 在开跑前就清掉了），
     // 这里再兜一次底，避免标记残留导致下一轮结束又自动开一次。
     data.rerunQueued = false;
@@ -8869,6 +8898,7 @@
     data.running = false;
     data.progress = '';
     data.error = '';
+    data.startedAt = 0;
     data.taskId = task.id || data.taskId;
     if (result.url) {
       const nextResult = {
@@ -8922,6 +8952,7 @@
     data.running = false;
     data.progress = '';
     data.error = message || '生成失败';
+    data.startedAt = 0;
     // 服务端认得出错误类别时带一份结构化信息（分类 / 建议 / 平台原文），
     // 卡片上就能显示成「通道密钥不对」+ 该怎么做，而不是一长串英文。
     data.errorInfo = errorInfo || null;
@@ -9003,6 +9034,7 @@
           data.running = false;
           data.progress = '';
           data.error = '';
+          data.startedAt = 0;
           // 取消只影响状态：旧封面留在卡片上，用户还能看见上次生成的结果
           refreshNode(node, ['status']);
           scheduleSave();
@@ -9039,6 +9071,7 @@
     data.running = false;
     data.progress = '';
     data.error = '';
+    data.startedAt = 0;
     // 取消只影响状态区：卡片上的封面、正在别的卡片上播的视频都不用动
     refreshNode(node, ['status']);
     scheduleSave();
@@ -9079,6 +9112,7 @@
         return;
       }
       data.running = false;
+      data.startedAt = 0;
       data.preparing = '';
       data.progress = '';
       refreshNode(node, ['status']);
@@ -9189,6 +9223,7 @@
         data.running = false;
         data.progress = '';
         data.error = '';
+        data.startedAt = 0;
         refreshNode(node, ['status']);
         scheduleSave();
       } else if (task.status === 'failed' || task.status === 'interrupted') {

@@ -24,7 +24,7 @@
   --field-3: #eef2f8;
   --grid-line: rgba(120, 132, 154, 0.20);
   --axis: #ccd6e4;
-  --placeholder: #a8b0be;
+  --placeholder: #676f7e;
   --edge: #8b93a3;
   --dot-border: #9aa3b2;
   --track: #e9eef8;
@@ -96,7 +96,7 @@
   --field-3: #262c35;
   --grid-line: rgba(255, 255, 255, 0.06);
   --axis: #3a414d;
-  --placeholder: #6f7885;
+  --placeholder: #8b93a3;
   --edge: #6f7885;
   --dot-border: #6f7885;
   --track: #2c333d;
@@ -776,6 +776,56 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
 .viewport.asset-drop::after { content: '松手放到这里，素材会在落点生成一张卡片'; }
 
 .world { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+
+/* 空画布引导层：画布上什么卡片都没有时才出现。
+   它属于界面、不跟着画布平移缩放，所以放在 #world 外层、用绝对定位居中；
+   整层不接收指针事件，双击 / 右键照旧落到底下的画布上。 */
+.board-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  padding: 24px;
+}
+
+.board-empty-card {
+  max-width: 380px;
+  padding: 22px 26px;
+  border-radius: 14px;
+  border: 1px dashed var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  text-align: left;
+}
+
+.board-empty-title {
+  font-size: 1.02em;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.board-empty-list {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  font-size: 0.92em;
+  line-height: 1.9;
+  color: var(--muted);
+}
+
+.board-empty-list b { color: var(--text); font-weight: 600; }
+
+.board-empty-foot {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 0.86em;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.board-empty-foot b { color: var(--accent); font-weight: 700; }
 
 /* 拖动 / 缩放 / 平移进行中：关掉流光动画、过渡和毛玻璃，把每一帧留给位移本身 */
 .viewport.is-interacting .world { will-change: transform; }
