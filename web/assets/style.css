@@ -254,7 +254,6 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   color: var(--text);
   line-height: 1.7;
 }
-.alert-bar.hidden { display: none; }
 .alert-bar .alert-head { font-weight: 600; color: var(--danger); margin-bottom: 6px; }
 .alert-bar .alert-body { color: var(--muted); font-size: 0.92em; }
 .alert-bar .alert-path {
@@ -1929,8 +1928,6 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   transform: translateX(-50%);
 }
 
-.align-bar.hidden { display: none; }
-
 .align-bar .align-label {
   color: var(--muted);
   font-size: 0.78em;
@@ -2145,8 +2142,7 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   box-shadow: 0 0 0 3px var(--accent-soft);
   outline: none;
 }
-.canvas-title-input[hidden] { display: none; }
-.canvas-title-btn[hidden] { display: none; }
+
 .search-panel {
   position: absolute;
   left: 50%;
@@ -2163,8 +2159,6 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   border-radius: 12px;
   box-shadow: var(--shadow);
 }
-
-.search-panel.hidden { display: none; }
 
 .search-head { display: flex; align-items: center; gap: 8px; }
 .search-head input { flex: 1 1 auto; min-width: 0; }
@@ -2234,8 +2228,6 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   touch-action: none;
 }
 
-.minimap.hidden { display: none; }
-
 .loading {
   position: fixed;
   inset: 0;
@@ -2246,8 +2238,6 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   color: var(--muted);
   z-index: 50;
 }
-
-.loading.hidden { display: none; }
 
 .menu {
   position: absolute;
@@ -2586,8 +2576,6 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   background: var(--field);
 }
 
-.ch-io-panel.hidden { display: none; }
-
 .ch-io-panel textarea {
   width: 100%;
   font-family: ui-monospace, Consolas, monospace;
@@ -2630,8 +2618,6 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   border-radius: 10px;
   background: var(--surface);
 }
-
-.ch-io-report.hidden { display: none; }
 
 .ch-io-report-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .ch-io-report-sum { color: var(--muted); font-size: 0.85em; }
@@ -2713,6 +2699,21 @@ body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 
   flex-wrap: wrap;
 }
 .grow { flex: 1 1 auto; }
+
+/* ---------- 两个「隐藏」开关，别混用 ----------
+   .hidden 类   —— 项目里推荐的开关。!important，压得住任何自定义 display。
+   [hidden] 属性 —— HTML 原生写法，浏览器 UA 样式会给它 display: none。
+
+   【坑】UA 样式的优先级是**最低**的，任何作者级样式都能盖过它。所以元素只要
+   自己写了 display（flex / grid / inline-flex…），`el.hidden = true` 就会
+   「属性挂上了、JS 也执行了，但界面上纹丝不动」—— 排查时最费劲的一类问题。
+
+   这里把它抬成 !important，让 hidden 属性在任何情况下都真的能藏住元素。
+   历史上这个坑被踩过 6 次（.canvas-title-btn、.version-strip、.batch-btn、
+   .board-empty 等都中过，每次都在出事的地方单点补一条 xxx[hidden]），
+   补到最后仍是漏一个爆一个 —— 与其在 6 个地方各贴一张膏药，不如在这里一次说清。 */
+[hidden] { display: none !important; }
+
 .hidden { display: none !important; }
 
 /* ---------- 弹层 ---------- */
@@ -3501,7 +3502,6 @@ input::placeholder { color: var(--placeholder); }
   transition: transform 0.16s ease, filter 0.16s ease;
 }
 .hidden-badge:hover { transform: translateY(-1px); filter: brightness(1.04); }
-.hidden-badge.hidden { display: none; }
 
 /* 导演台：颜色选择 / 顶栏按钮组 */
 .dir-color {
@@ -4468,9 +4468,6 @@ input::placeholder { color: var(--placeholder); }
   letter-spacing: 0.2px;
 }
 
-.align-bar button.batch-btn[hidden] { display: none; }
-.align-bar .align-sep[hidden] { display: none; }
-
 .align-bar button.batch-btn[data-batch="generate"] {
   background: var(--accent-soft);
   color: var(--accent);
@@ -4631,8 +4628,6 @@ input::placeholder { color: var(--placeholder); }
   padding-top: 7px;
   border-top: 1px dashed var(--line);
 }
-
-.version-strip[hidden] { display: none; }
 
 .version-head {
   display: flex;
