@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { DB_FILE, RECYCLE_DIR, DATA_DIR, ensureDir } = require('./paths');
+const migrate = require('./migrate');
 
 let db = null;
 
@@ -425,6 +426,11 @@ function saveState(canvasId, payload, expectedRev) {
         })
       )
     : edges;
+  // 写库前过一道版本迁移（清单 39）：这是所有节点数据进库的唯一漏斗，
+  // 老卡片（废弃类型、老 prompt 字段）在这里就地升级并盖上当前版本号。
+  // 迁移是幂等的，新数据走的是「读到版本号相等就返回」，一次比较而已。
+  const stampResult = migrate.migrateCanvasData(fixedNodes);
+  const migratedNodes = stampResult.nodes;
   database.exec('BEGIN');
   try {
     database.prepare('DELETE FROM nodes WHERE canvas_id = ?').run(canvasId);
@@ -433,7 +439,7 @@ function saveState(canvasId, payload, expectedRev) {
       `INSERT INTO nodes (id, canvas_id, type, x, y, w, h, z, data, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
-    fixedNodes.forEach((node, index) => {
+    migratedNodes.forEach((node, index) => {
       insertNode.run(
         String(node.id || newId('n')),
         canvasId,
@@ -473,7 +479,42 @@ function saveState(canvasId, payload, expectedRev) {
     throw error;
   }
   const nextRev = Number((database.prepare('SELECT rev FROM canvases WHERE id = ?').get(canvasId) || {}).rev || 0);
-  return { savedAt: stamp, nodeCount: nodes.length, edgeCount: edges.length, rev: nextRev, canvasId: canvasId };
+  return {
+    savedAt: stamp,
+    nodeCount: migratedNodes.length,
+    edgeCount: fixedEdges.length,
+    rev: nextRev,
+    canvasId: canvasId,
+    // 只有真的升级了老数据才带上这一项，平时是 undefined —— 调用方一句
+    // result.migrated && ... 就能判断，不用去理解迁移内部的细节
+    migrated: migratedNodes.length && stampResult.changed
+      ? { count: stampResult.changes.stamp, changes: stampResult.changes, summary: summarizeMigration(stampResult.changes) }
+      : undefined,
+  };
+}
+
+// 把迁移统计说成一句话，给日志用。数不清就不用硬凑。
+//
+// 两种形状都能收：saveState 给的是 {type, field, stamp}（按改动种类计数），
+// scanCanvasMigration 给的是 {count, nodes}（按卡片列举）。日志只需要一句话，
+// 犯不上为它统一成一种结构。
+function summarizeMigration(input) {
+  const info = input && typeof input === 'object' ? input : {};
+  if (info.changes) return summarizeMigration(info.changes);
+  if (Array.isArray(info.nodes)) {
+    const total = Number(info.count) || info.nodes.length;
+    const typeSwaps = info.nodes.filter((one) => one.target).length;
+    const parts = [];
+    if (typeSwaps) parts.push(typeSwaps + ' 张老类型卡片归一到现在的类型');
+    const rest = total - typeSwaps;
+    if (rest > 0) parts.push(rest + ' 张卡片补齐了版本号');
+    return parts.length ? parts.join('，') : total + ' 张卡片需要升级';
+  }
+  const parts = [];
+  if (info.type) parts.push(info.type + ' 张老类型卡片归一到现在的类型');
+  if (info.field) parts.push(info.field + ' 张卡片的字段整理过（老提示词字段搬进正文）');
+  if (info.stamp && !parts.length) parts.push(info.stamp + ' 张卡片补上了版本号');
+  return parts.length ? parts.join('，') : '节点数据补齐了版本号';
 }
 
 // 导出单块画布：一个 JSON 文件，换电脑也能单独搬
@@ -598,6 +639,41 @@ function importCanvas(payload) {
   const viewport = cleanViewport(data.viewport);
   saveState(created.canvas.id, { nodes: nodes, edges: edges, viewport: viewport });
   return { canvas: getCanvas(created.canvas.id), nodeCount: nodes.length, edgeCount: edges.length };
+}
+
+// 这块画布上还有多少节点是老版本的 —— 给「迁移前先留档」用。
+//
+// 关键：看的是**库里现在存的**，不是调用方即将写进去的。
+// 一开始我按传入的 payload 判断，结果发现判断不出来 —— 前端在打开画布时就已经
+// 在内存里把老数据升级好了，等它来保存时，payload 里全是新版数据，
+// 而库里还是旧版。真正需要留档的正是「即将被覆盖掉的这一版」，所以必须以库为准。
+//
+// 只读，不改库。
+function scanCanvasMigration(canvasId) {
+  const rows = handle()
+    .prepare('SELECT id, type, data FROM nodes WHERE canvas_id = ?')
+    .all(String(canvasId || ''));
+  const stale = [];
+  rows.forEach((row) => {
+    let data = {};
+    try {
+      data = row.data ? JSON.parse(row.data) : {};
+    } catch {
+      data = {};
+    }
+    const ver = migrate.versionOf({ id: row.id, type: row.type, data: data });
+    if (ver >= migrate.CURRENT_VER) return;
+    stale.push({
+      id: String(row.id),
+      type: String(row.type),
+      ver: ver,
+      // 老类型有明确新家的记下来，日志里能说清「几张什么卡被换成了什么」
+      target: migrate.LEGACY_TYPES[String(row.type)] || '',
+    });
+  });
+  const found = { count: stale.length, nodes: stale };
+  found.summary = summarizeMigration(found);
+  return found;
 }
 
 // 读一张卡片的 data：写版本历史前要先拿到旧结果，不能只靠浅合并。
@@ -880,6 +956,7 @@ module.exports = {
   deleteCanvas,
   getState,
   saveState,
+  scanCanvasMigration,
   patchNodeData,
   getNodeData,
   exportCanvas,

@@ -427,6 +427,10 @@
     if (data.sized !== true) data.sized = false;
     if (data.locked !== true) data.locked = false;
     if (data.hidden !== true) data.hidden = false;
+    // 老数据没有版本号：在这里补上，下次保存就跟着写进库，不用额外一趟迁移。
+    // 注意跟 migrateNode() 的区别 —— migrateNode 管的是「换类型、搬字段」这类
+    // 会改内容的事，这里只管「盖个号」。两处都幂等，先跑哪个都一样。
+    if (Number(data.v) !== DATA_VER) data.v = DATA_VER;
     normalizeParams(node);
     if (!data.model) data.model = pickDefaultModel(node.type);
     return data;
@@ -5874,6 +5878,7 @@
       sized: true,
       container: true,
       compact: false,
+      v: DATA_VER,
       members: picked.map((card) => card.id),
       order: picked.map((card) => card.id),
       schedule: {
@@ -5885,6 +5890,9 @@
         snapshots: {},
         backups: [],
         backupSnapshots: [],
+        // 定时组内部这几张「成员引用」表的形状版本号。将来那张表从
+        // 「编号 → 时间」改成别的排布时，靠它认得出手里这份是老形状。
+        refsVer: REFS_VER,
       },
     };
     picked.forEach((card, index) => {
@@ -7120,6 +7128,7 @@
         sized: true,
         collapsed: false,
         color: '',
+        v: DATA_VER,
       },
       createdAt: Date.now(),
     };
@@ -7705,6 +7714,7 @@
         model: '',
         params: {},
         sized: true,
+        v: DATA_VER,
         members: cards.map((card) => card.id),
       },
       createdAt: Date.now(),
@@ -10084,6 +10094,8 @@
         model: pickDefaultModel(type),
         params: { ...(PARAM_DEFAULTS[type] || {}) },
         sized: false,
+        // 新卡片天生就是当前版本，不用等迁移再补
+        v: DATA_VER,
       },
       createdAt: Date.now(),
     };
@@ -15371,6 +15383,26 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     audio: [[320, 300], [260, 180]],
   };
 
+  // 节点数据的版本号（清单 39）。
+  //
+  // 权威定义在 server/migrate.js 的 CURRENT_VER —— 那里负责写库前的迁移，
+  // 这里负责「打开老画布时先按新样子显示，并把它标记成已升级」。
+  // 两边必须是同一个数：tools/tests/data-version.test.js 会断言这一点。
+  const DATA_VER = 1;
+
+  // 卡片内部「装着别的卡片编号」的那几张表的形状版本号：组合的 members、
+  // 快速视频的 quickRefs、定时组的 order/perCard/snapshots。
+  // 它们不像卡片本身那样有明确的类型字段可以判断年代，形状一变就只能靠这个号。
+  // 与 server/migrate.js 的 SUB_VERS 对应。
+  const REFS_VER = 1;
+
+  // 老节点的样子 → 现在的样子。返回一张新卡片，不改传进来的那个。
+  //
+  // 有两条路会走到这里：打开画布读到的老数据、以及保存冲突后「用服务端最新版」。
+  // 两条路必须得到完全一样的结果，否则同一张卡片会因为「从哪进来的」而长得不同。
+  //
+  // 服务端那边有一份等价实现在 server/migrate.js。两边各写一份是因为前端跑在浏览器里，
+  // 引不到服务端的模块；保持一致靠测试里的对拍，不靠自觉。
   function migrateNode(node) {
     const type = String(node.type || '');
     const raw = node.data && typeof node.data === 'object' ? node.data : {};
@@ -15383,11 +15415,27 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     } else if (!PRESETS[type]) {
       next = { ...node, type: 'image' };
     }
+    // 老字段 prompt 搬进 text 之后要把它删掉。留着会怎样：它会一路跟着画布存进库里，
+    // 永远清不掉 —— 真实库里有 4 处就是这样躺了不知道多久，谁都不敢删，因为
+    // 看不出还有没有地方在读它。
+    let data = next.data && typeof next.data === 'object' ? { ...next.data } : {};
+    if (Object.prototype.hasOwnProperty.call(data, 'prompt')) {
+      if (typeof data.text !== 'string' || data.text === '') {
+        data.text = data.prompt == null ? '' : String(data.prompt);
+      }
+      delete data.prompt;
+      next = { ...next, data: data };
+    }
     // 旧版卡片是竖着的一条，卡片改版后换成贴着媒体的横条尺寸
     const legacy = LEGACY_SIZES[next.type] || [];
     if (legacy.some((pair) => pair[0] === next.w && pair[1] === next.h)) {
       const size = defaultSize(next.type, (next.data && next.data.params) || null);
       next = { ...next, w: size.w, h: size.h };
+    }
+    // 盖上版本号：下次打开就是一次比较，不再走这一整段判断。
+    // 已经是当前版本的卡片原样返回，连对象的引用都不换（避免多余的存盘）。
+    if (Number(data.v) !== DATA_VER) {
+      next = { ...next, data: { ...(next.data || {}), v: DATA_VER } };
     }
     return next;
   }
@@ -15428,9 +15476,26 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
   }
 
   // 把服务端返回的画布数据装进内存（bootstrap 首次加载、以及保存冲突后
-  // 「用服务端最新版本」都走这里），保证两条路径的解析规则完全一致
+  // 「用服务端最新版本」都走这里），保证两条路径的解析规则完全一致。
+  //
+  // 返回 { migrated }：这次读进来的数据里有多少张是需要升级的老卡片。
+  // 调用方据此决定要不要立刻存一次（把版本号真正写进库）。
+  // 为什么要这个返回值：migrateNode / nodeData 只是在内存里把老卡片收拾干净，
+  // 库里那份还是老的。不存回去的话，每次打开都得重算一遍，而且
+  // 「这批数据是哪个年代的」这件事永远没法在库里看出来。
   function applyServerState(state) {
+    let migrated = 0;
     nodes = (state.nodes || []).map((raw) => {
+      const rawData = raw && raw.data && typeof raw.data === 'object' ? raw.data : {};
+      const rawType = String((raw && raw.type) || '');
+      // 记下「进来时就是老的」的那些：换过类型、挂过老字段、或者没有版本号
+      if (
+        Number(rawData.v) !== DATA_VER ||
+        Object.prototype.hasOwnProperty.call(rawData, 'prompt') ||
+        (rawType && !PRESETS[rawType])
+      ) {
+        migrated += 1;
+      }
       const node = migrateNode(raw);
       const preset = presetOf(node.type);
       return {
@@ -15455,6 +15520,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       : { x: 0, y: 0, zoom: 1 };
     // 版本号跟着服务端走，之后保存都基于这一版
     canvasRev = state.canvas && Number.isInteger(state.canvas.rev) ? state.canvas.rev : 0;
+    return { migrated: migrated };
   }
 
   async function bootstrap() {
@@ -15467,13 +15533,20 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     await loadModels();
     try {
       const state = await window.api.getCanvas(canvasId);
-      applyServerState(state);
+      const applied = applyServerState(state);
       setCanvasName(state.canvas.name);
       // 老画布统一按建卡顺序排成连续号；号已经连续时这里什么都不改
       const numbered = renumberAll();
       if (numbered.tagged.size || numbered.retagged.size) scheduleSave();
       // 老的定时组是「组卡 + 散落在旁边的成员」：打开时自动收进组框里
       if (migrateScheduleContainers()) scheduleSave();
+      // 这次读进来的有老卡片（换过类型 / 挂过老字段 / 没有版本号）：存一次，
+      // 把升级结果真正写进库。不存的话每次打开都要重算，库里那份也永远停在老样子。
+      // 服务端在这条路上会先留一份「数据升级前」的档，所以这一步是可回退的；
+      // 它也会往服务端日志里写一条，说清这次动了什么。
+      //
+      // 这里不 toast：升级是「本来就该是这样」的事，弹个提示只会让用户以为出了问题。
+      if (applied && applied.migrated) scheduleSave();
       // 顺手清掉已经删掉的卡片留下的高度记录
       prunePromptHeights();
       renderAll();

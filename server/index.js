@@ -9,6 +9,7 @@ const { spawn } = require('node:child_process');
 const paths = require('./paths');
 const configStore = require('./config');
 const store = require('./store');
+const migrate = require('./migrate');
 const assets = require('./assets');
 const assetIndex = require('./asset-index');
 const channels = require('./channels');
@@ -1045,6 +1046,14 @@ async function handleApi(req, res, pathname, query) {
     }
     if (method === 'PUT') {
       const body = await readBody(req);
+      // 先看这次保存会不会升级老数据。要升级的话，必须在写库之前把「旧样子」
+      // 强制留一份 —— 留档这件事只有写库前做才有意义，写完了再留就是新数据了。
+      // 清单 39 的「迁移必须可回退」就落在这一句上。
+      const willMigrate = store.scanCanvasMigration(id);
+      if (willMigrate.count) {
+        const before = store.getState(id);
+        if (before) backup.forceSnapshot(id, before, '数据升级前');
+      }
       const result = store.saveState(id, body, body.rev);
       if (!result) return sendJson(res, 404, { error: '画布不存在' });
       // 冲突：这块画布在别的地方（多半是另一个标签页）已经被改过。
@@ -1061,6 +1070,12 @@ async function handleApi(req, res, pathname, query) {
           nodeCount: result.nodeCount,
           state: latest,
         });
+      }
+      // 升级是「用户看不见、但确实动了他数据」的操作，留下一条可查的记录。
+      // 库里那 28 块老画布就有 7 张废弃类型的卡片和 4 处老 prompt 字段，
+      // 第一遍升级要能从日志里看出动了什么。
+      if (result.migrated && result.migrated.count) {
+        log('画布数据升级到第 ' + migrate.CURRENT_VER + ' 版：' + result.migrated.summary + '（升级前已留档）');
       }
       backup.maybeBackup(id);
       return sendJson(res, 200, result);
