@@ -4069,6 +4069,47 @@ input::placeholder { color: var(--placeholder); }
 .rename-preview-new { flex: 1 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .rename-preview-row.changed .rename-preview-new { color: var(--accent); font-weight: 600; }
 
+/* ---------- 批量参数（清单 16）---------- */
+.params-mask { z-index: 340; }
+.modal-params { width: min(680px, 94vw); }
+.params-note { margin-left: 10px; }
+.params-body { display: flex; flex-direction: column; gap: 12px; max-height: min(64vh, 580px); overflow-y: auto; }
+.params-fields { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.params-field { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.params-field-label { font-size: 0.9em; color: var(--muted); white-space: nowrap; }
+.params-field select { min-width: 132px; }
+.params-field-hint { font-size: 0.82em; white-space: nowrap; }
+.params-empty { font-size: 0.9em; }
+.params-preview { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.params-preview-head {
+  padding: 7px 11px;
+  font-size: 0.86em;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+.params-preview-list { max-height: min(34vh, 300px); overflow-y: auto; }
+.params-preview-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 11px;
+  font-size: 0.9em;
+  border-bottom: 1px solid var(--line);
+}
+.params-preview-row:last-child { border-bottom: 0; }
+.params-preview-name {
+  flex: 0 0 auto;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.params-preview-detail { flex: 1 1 auto; min-width: 0; color: var(--muted); }
+.params-preview-row.changed { background: var(--accent-soft); }
+.params-preview-row.changed .params-preview-detail { color: var(--accent); }
+
 /* 带操作按钮的提示条：按钮要能点，所以整个提示条要接住鼠标 */
 .toast.has-actions { pointer-events: auto; display: flex; align-items: center; gap: 12px; }
 .toast-text { min-width: 0; }

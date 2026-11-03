@@ -12500,9 +12500,11 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     const genCount = batchCandidates('generate').length;
     const retryCount = batchCandidates('retry').length;
     const renameCount = batchRenameCandidates().length;
+    const paramsCount = batchParamCandidates().length;
     const gen = alignBarEl.querySelector('[data-batch="generate"]');
     const retry = alignBarEl.querySelector('[data-batch="retry"]');
     const rename = alignBarEl.querySelector('[data-batch="rename"]');
+    const params = alignBarEl.querySelector('[data-batch="params"]');
     const sep = alignBarEl.querySelector('.batch-sep');
     let changed = false;
     const paint = (button, count, label, hint) => {
@@ -12529,8 +12531,12 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       hidden: '选中的卡片里没有可以改标题的（锁定的要先解锁）',
       shown: '批量重命名：统一改名、加前缀序号，或者查找替换',
     });
+    paint(params, paramsCount, '批量参数', {
+      hidden: '选中的卡片里没有可以设参数的（锁定的要先解锁）',
+      shown: '批量参数：把这几张卡片的模型 / 尺寸 / 比例 / 时长一次改成一样的',
+    });
     if (sep) {
-      const hideSep = genCount <= 0 && retryCount <= 0 && renameCount <= 0;
+      const hideSep = genCount <= 0 && retryCount <= 0 && renameCount <= 0 && paramsCount <= 0;
       if (sep.hidden !== hideSep) sep.hidden = hideSep;
     }
     if (changed) alignBarSize = null;
@@ -12538,6 +12544,394 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
 
   function mbTextOf(bytes) {
     return (Number(bytes || 0) / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  // ---------- 批量统一参数（清单 16）----------
+  // 一次把选中的多张卡片改成同一套模型 / 参数，省得一张张点。
+  //
+  // 这里最要紧的一条是「共同参数键」：不同卡片类型（生图 / 生视频 / 快速视频）
+  // 的参数根本不是同一套。只挑「选中的卡片全都认识」的键才敢统一设 ——
+  // 否则会出现「给生图卡片设了时长」这种面板上压根不显示的脏参数。
+  //
+  // 第二条是「可用选项取交集」：同一个「尺寸」键，A 卡片的模型只开 1K、
+  // B 卡片开 1K/2K/4K，统一设的时候只该给 1K —— 给 2K 那张只开 1K 的卡片
+  // 会写进一个它自己都不认的值，参数芯片显示成裸值，看着像坏了。
+  function batchParamCandidates() {
+    return nodes.filter((node) => {
+      if (!node || !selection.has(node.id)) return false;
+      // 有参数面板的才会出现在这里：导演台 / 组合 / 定时组 / 素材卡都没有可统一设的参数
+      if (['image', 'video', 'quick'].indexOf(node.type) < 0) return false;
+      if (isLocked(node) || isHidden(node)) return false;
+      return paramDefsOf(node, nodeData(node)).length > 0;
+    });
+  }
+
+  // 选中的卡片全都认识的参数键（顺序按第一次出现的那张卡片的面板顺序）
+  function sharedParamKeys(list) {
+    if (!list.length) return [];
+    let keys = paramDefsOf(list[0], nodeData(list[0])).map((def) => def.key);
+    for (let i = 1; i < list.length; i += 1) {
+      const mine = paramDefsOf(list[i], nodeData(list[i])).map((def) => def.key);
+      keys = keys.filter((key) => mine.indexOf(key) >= 0);
+    }
+    return keys;
+  }
+
+  // 某个参数键在每张卡片上都能选的值（交集，保持第一张的选项顺序）
+  function sharedParamOptions(list, key) {
+    let options = null;
+    list.forEach((node) => {
+      const def = paramDefsOf(node, nodeData(node)).find((item) => item.key === key);
+      if (!def) return;
+      const mine = def.options.map(String);
+      options = options === null ? mine : options.filter((value) => mine.indexOf(value) >= 0);
+    });
+    return options || [];
+  }
+
+  // 现在这些卡片在这个键上是不是同一个值（统一设的时候用来标出「本来就一致」）
+  function paramsAgreeOn(list, key) {
+    if (!list.length) return true;
+    const first = String(nodeData(list[0]).params[key]);
+    return list.every((node) => String(nodeData(node).params[key]) === first);
+  }
+
+  // 同一批卡片里可能混着不同模型：能不能统一换模型、能换成哪些，
+  // 取决于这些卡片共同的模型清单（取交集）。
+  function sharedModels(list) {
+    let shared = null;
+    list.forEach((node) => {
+      const mine = modelsFor(node.type).map((item) => item.key);
+      shared = shared === null ? mine : shared.filter((key) => mine.indexOf(key) >= 0);
+    });
+    return shared || [];
+  }
+
+  // 「统一设成什么」的候选值：参数取交集，模型取交集
+  function batchParamPlan(list) {
+    const keys = sharedParamKeys(list);
+    const defs = paramDefsOf(list[0], nodeData(list[0]));
+    const out = keys.map((key) => {
+      const own = defs.find((item) => item.key === key) || { key: key, label: key, options: [], texts: null };
+      const options = sharedParamOptions(list, key);
+      return {
+        key: key,
+        label: own.label,
+        options: options,
+        // 选项被削过的（有的卡片不支持某些值）就别拿原来的文案了，下标对不上
+        texts: options.length === own.options.length ? own.texts : null,
+        agree: paramsAgreeOn(list, key),
+        narrow: options.length < own.options.length,
+      };
+    });
+    return { defs: out, models: sharedModels(list) };
+  }
+
+  // 把「这一次要改哪些卡片、各自改成什么」算成一行行预览。
+  // picks: { params: { sizeKey: '2K', ... }, modelKey: 'ch::id' }
+  // 返回 [{ node, id, title, changes:[{label, before, after}], modelChange }]
+  function batchParamRows(list, picks) {
+    const chosen = (picks && picks.params) || {};
+    const modelKey = (picks && picks.model) || '';
+    return list.map((node) => {
+      const data = nodeData(node);
+      const changes = [];
+      Object.keys(chosen).forEach((key) => {
+        const def = paramDefsOf(node, data).find((item) => item.key === key);
+        if (!def) return;
+        const before = String(data.params[key] == null ? '' : data.params[key]);
+        const after = String(chosen[key]);
+        if (before === after) return;
+        changes.push({
+          key: key,
+          label: def.label,
+          before: paramText(def, before),
+          after: paramText(def, after),
+          value: after,
+        });
+      });
+      let modelChange = null;
+      if (modelKey) {
+        const hit = modelsFor(node.type).find((item) => item.key === modelKey);
+        // 「是不是同一个模型」的判定要跟卡片上下拉框保持一致：
+        // 卡片没记通道（老卡片）时，任何通道的同名模型都算它现在选着的。
+        // 否则用户明明看到下拉里已经选中了「模型一」，面板却说「会改成 模型一」。
+        const sameModel = hit && hit.id === data.model && (!data.channelId || (hit.channelId || '') === data.channelId);
+        // 这张卡片没有这个模型（跨类型选了别的类型的模型）就跳过它，不硬写
+        if (hit && !sameModel) {
+          modelChange = { id: hit.id, channelId: hit.channelId || '', label: hit.label };
+        }
+      }
+      return {
+        node: node,
+        id: node.id,
+        title: String(data.title || '').trim() || presetOf(node.type).label,
+        changes: changes,
+        modelChange: modelChange,
+        changed: changes.length > 0 || Boolean(modelChange),
+      };
+    });
+  }
+
+  function applyBatchParams(rows) {
+    const changed = rows.filter((row) => row.changed);
+    if (!changed.length) {
+      toast('这些卡片的参数本来就是一样的，没什么要改');
+      return 0;
+    }
+    pushHistory();
+    changed.forEach((row) => {
+      const data = nodeData(row.node);
+      // 换模型要排在改参数前面：不同模型能选的值不一样，
+      // 先把模型定下来再落参数，normalizeParams 才不会把刚设的值又收回默认
+      if (row.modelChange) {
+        data.model = row.modelChange.id;
+        data.channelId = row.modelChange.channelId;
+        rememberModel(row.node.type, data.model);
+        normalizeParams(row.node);
+      }
+      row.changes.forEach((one) => {
+        data.params[one.key] = one.value;
+      });
+      normalizeParams(row.node);
+      // 比例变了、卡片又没被手动拉过大小的话，跟着变形成对应比例
+      if (row.changes.some((one) => one.key === 'ratio')) {
+        const cardData = nodeData(row.node);
+        if (!cardData.sized) {
+          const size = defaultSize(row.node.type, cardData.params);
+          row.node.w = size.w;
+          row.node.h = size.h;
+          const cardEl = elements.get(row.node.id);
+          if (cardEl) {
+            cardEl.style.width = size.w + 'px';
+            cardEl.style.height = size.h + 'px';
+          }
+          updateEdgePaths([row.node]);
+        }
+      }
+    });
+    // 只重画改过的那几张：别的卡片不跟着闪
+    changed.forEach((row) => refreshNode(row.node));
+    scheduleSave();
+    return changed.length;
+  }
+
+  function openBatchParams() {
+    const targets = batchParamCandidates();
+    if (!targets.length) {
+      toast('选中的卡片里没有可以统一设参数的（锁定的要先解锁）');
+      return;
+    }
+    const plan = batchParamPlan(targets);
+    if (!plan.defs.length && !plan.models.length) {
+      toast('这些卡片之间没有共同的参数可以统一设');
+      return;
+    }
+    const state = { params: {}, model: '' };
+    let rows = batchParamRows(targets, state);
+
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask params-mask';
+    const dialog = document.createElement('div');
+    dialog.className = 'modal modal-params';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', '批量参数');
+
+    const head = document.createElement('div');
+    head.className = 'modal-head';
+    const title = document.createElement('b');
+    title.textContent = '批量参数';
+    const note = document.createElement('span');
+    note.className = 'muted-line params-note';
+    note.textContent = '会改 ' + targets.length + ' 张卡片';
+    const grow = document.createElement('span');
+    grow.className = 'grow';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'ghost';
+    closeBtn.type = 'button';
+    closeBtn.textContent = '关闭';
+    head.append(title, note, grow, closeBtn);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body params-body';
+
+    const fields = document.createElement('div');
+    fields.className = 'params-fields';
+
+    const preview = document.createElement('div');
+    preview.className = 'params-preview';
+
+    const repaint = () => {
+      rows = batchParamRows(targets, state);
+      paintFields();
+      paintPreview();
+      paintFoot();
+    };
+
+    const makePicker = (labelText, options, texts, current, onPick, hint) => {
+      const wrap = document.createElement('label');
+      wrap.className = 'params-field';
+      const span = document.createElement('span');
+      span.className = 'params-field-label';
+      span.textContent = labelText;
+      const select = document.createElement('select');
+      const blank = document.createElement('option');
+      blank.value = '';
+      blank.textContent = '不改这一项';
+      select.appendChild(blank);
+      options.forEach((value, index) => {
+        const opt = document.createElement('option');
+        opt.value = String(value);
+        opt.textContent = (texts && texts[index]) || String(value);
+        select.appendChild(opt);
+      });
+      select.value = current == null ? '' : String(current);
+      select.addEventListener('change', () => {
+        onPick(select.value);
+        repaint();
+      });
+      wrap.appendChild(span);
+      wrap.appendChild(select);
+      if (hint) {
+        const tip = document.createElement('span');
+        tip.className = 'params-field-hint muted-line';
+        tip.textContent = hint;
+        wrap.appendChild(tip);
+      }
+      return wrap;
+    };
+
+    const paintFields = () => {
+      fields.textContent = '';
+      plan.defs.forEach((def) => {
+        const hint = def.narrow
+          ? '只列出这些卡片都能用的值'
+          : def.agree
+            ? '这些卡片现在就是同一个值'
+            : '';
+        fields.appendChild(
+          makePicker(
+            def.label,
+            def.options,
+            def.texts,
+            state.params[def.key],
+            (value) => {
+              if (value === '') delete state.params[def.key];
+              else state.params[def.key] = value;
+            },
+            def.options.length ? hint : '这些卡片没有共同可选的值'
+          )
+        );
+      });
+      if (plan.models.length > 1 || (plan.models.length === 1 && plan.defs.length === 0)) {
+        const optionKeys = plan.models;
+        const texts = optionKeys.map((key) => {
+          const first = targets.find((node) => modelsFor(node.type).some((item) => item.key === key));
+          const hit = first ? modelsFor(first.type).find((item) => item.key === key) : null;
+          return hit ? hit.label : key;
+        });
+        fields.appendChild(
+          makePicker('模型', optionKeys, texts, state.model, (value) => {
+            state.model = value;
+          }, '只列出这些卡片都能用的模型')
+        );
+      }
+      if (!fields.childElementCount) {
+        const empty = document.createElement('div');
+        empty.className = 'params-empty muted-line';
+        empty.textContent = '这些卡片之间没有共同的参数可以统一设';
+        fields.appendChild(empty);
+      }
+    };
+
+    const paintPreview = () => {
+      preview.textContent = '';
+      const head2 = document.createElement('div');
+      head2.className = 'params-preview-head';
+      const changedCount = rows.filter((row) => row.changed).length;
+      head2.textContent = changedCount
+        ? '预览（' + changedCount + ' 张会变，其余保持不变）'
+        : '预览（上面还什么都没选，或者选了也跟现在一样）';
+      preview.appendChild(head2);
+      const list = document.createElement('div');
+      list.className = 'params-preview-list';
+      rows.forEach((row) => {
+        const line = document.createElement('div');
+        line.className = 'params-preview-row' + (row.changed ? ' changed' : '');
+        const name = document.createElement('span');
+        name.className = 'params-preview-name';
+        name.textContent = row.title;
+        name.title = row.title;
+        const detail = document.createElement('span');
+        detail.className = 'params-preview-detail';
+        const bits = [];
+        if (row.modelChange) bits.push('模型 → ' + row.modelChange.label);
+        row.changes.forEach((one) => {
+          bits.push(one.label + ' ' + (one.before || '（空）') + ' → ' + (one.after || '（空）'));
+        });
+        detail.textContent = bits.length ? bits.join('；') : '不变';
+        line.append(name, detail);
+        list.appendChild(line);
+      });
+      preview.appendChild(list);
+    };
+
+    const foot = document.createElement('div');
+    foot.className = 'modal-foot';
+    const tip = document.createElement('span');
+    tip.className = 'muted-line';
+    const grow2 = document.createElement('span');
+    grow2.className = 'grow';
+    const cancel = document.createElement('button');
+    cancel.className = 'ghost';
+    cancel.type = 'button';
+    cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.className = 'primary';
+    ok.type = 'button';
+    foot.append(tip, grow2, cancel, ok);
+
+    const paintFoot = () => {
+      const changedCount = rows.filter((row) => row.changed).length;
+      tip.textContent = '只改上面选了的项，没选的保持原样';
+      ok.textContent = changedCount ? '改这 ' + changedCount + ' 张' : '没有什么要改';
+      ok.disabled = changedCount === 0;
+    };
+
+    body.appendChild(fields);
+    body.appendChild(preview);
+    paintFields();
+    paintPreview();
+    paintFoot();
+
+    dialog.append(head, body, foot);
+    mask.appendChild(dialog);
+    document.body.appendChild(mask);
+
+    const close = () => mask.remove();
+    closeBtn.addEventListener('click', close);
+    cancel.addEventListener('click', close);
+    ok.addEventListener('click', () => {
+      const count = applyBatchParams(rows);
+      close();
+      if (count) toast('已改 ' + count + ' 张卡片的参数', 4000, [{ label: '撤销', run: () => undo() }]);
+      else toast('这些卡片的参数本来就是一样的，没什么要改');
+    });
+    mask.addEventListener('click', (event) => {
+      if (event.target === mask) close();
+    });
+    document.addEventListener('keydown', function onKey(event) {
+      if (!document.body.contains(mask)) {
+        document.removeEventListener('keydown', onKey);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        close();
+        document.removeEventListener('keydown', onKey);
+      }
+    });
   }
 
   // ---------- 批量重命名 ----------
@@ -13884,6 +14278,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
         if (batch === 'generate') runBatchGenerate('generate');
         else if (batch === 'retry') runBatchGenerate('retry');
         else if (batch === 'rename') openBatchRename();
+        else if (batch === 'params') openBatchParams();
         if (batch) return;
         const action = button.dataset.align || '';
         if (action === 'dist-x') distributeSelection('x');
