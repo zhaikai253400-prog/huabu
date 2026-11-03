@@ -394,12 +394,28 @@ async function handleApi(req, res, pathname, query) {
     }
   }
 
-  // 日志：不填 day 就列出所有日期 + 内存里最近几行；填了就读那一天的
+  // 日志：不填 day 就列出所有日期 + 内存里最近几行；填了就读那一天的。
+  // 顺带带上缩略图生成失败清单：卡片会静默回退到原图，不写出来用户完全不知道为什么卡。
   if (pathname === '/api/log' && method === 'GET') {
     const day = String(query.get('day') || '').trim();
     const days = logfile.listDays();
-    if (!day) return sendJson(res, 200, { days: days, day: days[0] || '', lines: logRing.slice(-200), live: true });
-    return sendJson(res, 200, { days: days, day: day, lines: logfile.readDay(day, Number(query.get('tail')) || 800), live: false });
+    const thumbFailures = thumbs.listFailures();
+    if (!day) {
+      return sendJson(res, 200, {
+        days: days,
+        day: days[0] || '',
+        lines: logRing.slice(-200),
+        live: true,
+        thumbFailures: thumbFailures,
+      });
+    }
+    return sendJson(res, 200, {
+      days: days,
+      day: day,
+      lines: logfile.readDay(day, Number(query.get('tail')) || 800),
+      live: false,
+      thumbFailures: thumbFailures,
+    });
   }
 
   // 把某一天的日志当场下下来

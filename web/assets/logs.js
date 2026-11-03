@@ -23,10 +23,48 @@
     box.textContent = lines.join('\n');
   }
 
+  // 缩略图生成失败：卡片会静默回退到原图，不单独列出来用户只会觉得「怎么这么卡」。
+  // 这里单独一块，把「哪张素材、为什么、失败了几次」摆清楚。
+  function renderThumbFailures(box, list) {
+    const items = list || [];
+    box.textContent = '';
+    if (!items.length) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+    const head = document.createElement('div');
+    head.className = 'thumb-fail-head';
+    head.textContent =
+      '缩略图生成失败 ' + items.length + ' 条（这些卡片会直接加载原图，所以打开时会偏卡）';
+    box.appendChild(head);
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'thumb-fail-row';
+      const file = document.createElement('span');
+      file.className = 'thumb-fail-file';
+      file.textContent = item.relPath || '(未知素材)';
+      file.title = item.relPath || '';
+      const reason = document.createElement('span');
+      reason.className = 'thumb-fail-reason';
+      reason.textContent = item.reason || '';
+      reason.title = item.reason || '';
+      const meta = document.createElement('span');
+      meta.className = 'thumb-fail-meta';
+      const when = item.at ? new Date(item.at).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+      meta.textContent = (item.count > 1 ? '×' + item.count + ' · ' : '') + when;
+      row.appendChild(file);
+      row.appendChild(reason);
+      row.appendChild(meta);
+      box.appendChild(row);
+    });
+  }
+
   async function reload() {
     if (!mask) return;
     const select = mask.querySelector('#log-day');
     const box = mask.querySelector('#log-body');
+    const failBox = mask.querySelector('#log-thumb-fails');
     const day = select.value;
     currentDay = day;
     try {
@@ -38,9 +76,13 @@
           .join('');
         select.value = keep && data.days.indexOf(keep) >= 0 ? keep : data.days[0];
       }
+      renderThumbFailures(failBox, data.thumbFailures);
       renderLines(box, data);
+      const failCount = (data.thumbFailures || []).length;
       mask.querySelector('#log-note').textContent =
-        '共 ' + (data.lines || []).length + ' 行' + (data.live ? '（运行时那几行）' : '');
+        '共 ' + (data.lines || []).length + ' 行' +
+        (failCount ? '，缩略图失败 ' + failCount + ' 条' : '') +
+        (data.live ? '（运行时那几行）' : '');
     } catch (error) {
       box.textContent = '读日志失败：' + error.message;
     }
@@ -65,6 +107,7 @@
       '    <span class="set-hint">日志文件在 data\\logs 里，按天分文件</span>' +
       '  </div>' +
       '  <pre class="log-body" id="log-body"></pre>' +
+      '  <div class="thumb-fail-panel hidden" id="log-thumb-fails"></div>' +
       '</div>';
     document.body.appendChild(mask);
 

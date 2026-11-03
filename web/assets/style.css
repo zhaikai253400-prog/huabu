@@ -2953,6 +2953,40 @@ body.lib-dragging, body.lib-dragging * { cursor: grabbing !important; }
 }
 .log-empty { color: var(--muted); }
 
+/* 缩略图生成失败清单：卡片静默回退原图时，这里是唯一能看出原因的地方 */
+.thumb-fail-panel {
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--line);
+  max-height: 26vh;
+  overflow: auto;
+}
+.thumb-fail-head { color: var(--warn, var(--text)); font-size: 0.86em; margin-bottom: 6px; }
+.thumb-fail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 0.82rem;
+  border-top: 1px dashed var(--line);
+}
+.thumb-fail-file {
+  flex: 0 1 32%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.thumb-fail-reason {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.thumb-fail-meta { flex: 0 0 auto; color: var(--muted); font-size: 0.9em; }
+
 /* ---------- 生成任务面板 ---------- */
 .modal-task { width: min(940px, 96vw); }
 .task-filters { display: flex; gap: 6px; flex-wrap: wrap; }
