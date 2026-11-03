@@ -1,4 +1,7 @@
 (function () {
+  // 小工具从共用模块取（清单 38）。兜底一份等价实现：老页面缓存里可能还没有 utils.js
+  const util = window.CanvasUtils || { pad2: (value) => String(value).padStart(2, '0') };
+  const pad2 = util.pad2;
   // 画布左侧「通道状态」面板：只读汇总，问平台要余额和班次，不扣次数
   let mask = null;
   let loading = false;
@@ -15,7 +18,7 @@
   function clockText(stamp) {
     const d = new Date(stamp || Date.now());
     if (isNaN(d.getTime())) return '';
-    const pad = (n) => (n < 10 ? '0' + n : String(n));
+    const pad = pad2;
     return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
@@ -26,7 +29,7 @@
     if (state !== 'running' && state !== 'done') return '';
     const d = new Date(ride.departAt);
     if (isNaN(d.getTime())) return '';
-    const pad = (n) => (n < 10 ? '0' + n : String(n));
+    const pad = pad2;
     const now = new Date();
     const sameDay =
       d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();

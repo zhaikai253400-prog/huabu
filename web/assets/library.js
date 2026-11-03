@@ -1,4 +1,7 @@
 (function () {
+  // 小工具从共用模块取（清单 38）。兜底一份等价实现：老页面缓存里可能还没有 utils.js
+  const util = window.CanvasUtils || { pad2: (value) => String(value).padStart(2, '0') };
+  const pad2 = util.pad2;
   const KINDS = [
     { value: 'all', label: '全部' },
     { value: 'image', label: '图片' },
@@ -46,7 +49,7 @@
     if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
     if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
     const date = new Date(time);
-    const pad = (value) => String(value).padStart(2, '0');
+    const pad = pad2;
     return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
   }
 

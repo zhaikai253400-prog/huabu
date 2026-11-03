@@ -57,7 +57,11 @@ function h(tag, cls, text) {
 function uid(prefix) {
   return prefix + '_' + Date.now().toString(36) + Math.random().toString(16).slice(2, 7);
 }
+// 小工具从共用模块取（清单 38）。兜底留一份等价实现：
+// director.js 是 ESM，加载时机可能早于 utils.js，缺了导演台也不能整块打不开。
+const util = (typeof window !== 'undefined' && window.CanvasUtils) || null;
 function clamp(value, min, max) {
+  if (util) return util.clamp(value, min, max);
   return Math.min(max, Math.max(min, value));
 }
 function lerp(a, b, t) {
@@ -77,7 +81,7 @@ function lerp3(a, b, t) {
 }
 function stamp() {
   const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
+  const p = util ? util.pad2 : (n) => String(n).padStart(2, '0');
   return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
 }
 function round2(value) {

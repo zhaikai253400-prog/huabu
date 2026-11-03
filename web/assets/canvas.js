@@ -777,8 +777,16 @@
     return svg;
   }
 
+  // 小工具统一从 window.CanvasUtils 取（清单 38 拆分的第一步）。
+  // 兜底留一份等价实现：老页面缓存里可能还没有 utils.js，缺了也不能让画布打不开。
+  const util = window.CanvasUtils || {
+    pad2: (value) => String(value).padStart(2, '0'),
+    clamp: (value, min, max) => Math.min(max, Math.max(min, value)),
+  };
+  const pad2 = util.pad2;
+
   function clamp(value, min, max) {
-    return Math.min(max, Math.max(min, value));
+    return util.clamp(value, min, max);
   }
 
   function uid(prefix) {
@@ -1077,7 +1085,7 @@
 
   function clockText(ts) {
     const d = new Date(ts);
-    const pad = (n) => String(n).padStart(2, '0');
+    const pad = pad2;
     return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
@@ -3273,7 +3281,7 @@
     if (!value) return '';
     const date = new Date(value);
     if (!Number.isFinite(date.getTime())) return '';
-    const pad = (n) => String(n).padStart(2, '0');
+    const pad = pad2;
     return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
   }
 
@@ -5694,7 +5702,7 @@
 
   function stampToLocalInput(ms) {
     const d = new Date(Number(ms) || Date.now());
-    const pad = (value) => String(value).padStart(2, '0');
+    const pad = pad2;
     return (
       d.getFullYear() +
       '-' + pad(d.getMonth() + 1) +
@@ -5713,7 +5721,7 @@
     const value = Number(ms) || 0;
     if (!value) return '--:--';
     const d = new Date(value);
-    const pad = (item) => String(item).padStart(2, '0');
+    const pad = pad2;
     return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
@@ -14236,7 +14244,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     const ms = Number(at) || 0;
     if (!ms) return '时间不详';
     const d = new Date(ms);
-    const pad = (n) => String(n).padStart(2, '0');
+    const pad = pad2;
     return (
       d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
       pad(d.getHours()) + ':' + pad(d.getMinutes())

@@ -1,4 +1,7 @@
 (function () {
+  // 小工具从共用模块取（清单 38）。兜底一份等价实现：老页面缓存里可能还没有 utils.js
+  const util = window.CanvasUtils || { pad2: (value) => String(value).padStart(2, '0') };
+  const pad2 = util.pad2;
   const KIND_TEXT = { image: '图片', video: '视频', audio: '音频' };
   const KIND_ORDER = ['image', 'video', 'audio'];
   const AUTH_STYLES = [
@@ -678,7 +681,7 @@
   function balanceTimeText(stamp) {
     const d = new Date(stamp);
     if (isNaN(d.getTime())) return '';
-    const pad = (n) => (n < 10 ? '0' + n : String(n));
+    const pad = pad2;
     return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
@@ -824,7 +827,7 @@
     if (state !== 'running' && state !== 'done') return '';
     const d = new Date(ride.departAt);
     if (isNaN(d.getTime())) return '';
-    const pad = (n) => (n < 10 ? '0' + n : String(n));
+    const pad = pad2;
     const now = new Date();
     const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
     const stamp = pad(d.getHours()) + ':' + pad(d.getMinutes());
