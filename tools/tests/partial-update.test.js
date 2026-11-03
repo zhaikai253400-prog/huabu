@@ -219,9 +219,11 @@ vm.runInContext(
     'function elements_set(id, v) { globalThis.__elements.set(id, v); }',
     'function paintFilter() {}',
     'function refreshSelection() {}',
-    'function syncPromptEditorRefs() {}',
-    'function syncPromptEditorParams() {}',
-    'function syncPromptEditorTail() {}',
+    // 这里原本还摆着 syncPromptEditorRefs / syncPromptEditorParams / syncPromptEditorTail
+    // 三个空替身，因为 refreshNodeParts / refreshNode 里有三处调用它们。
+    // 后来查出那三个函数是一簇「同生共死的闭链」（promptEditorTailEl 永远是 null，
+    // 调用等价于空转），已从生产代码整簇删除 —— 调用点没了，替身自然也不该留。
+    // 留着反而危险：哪天有人把调用加回来，这里有个现成替身接着，测试照样全绿。
     'function closeMention() {}',
     'function openMention() {}',
     'function buildNode(node) {',

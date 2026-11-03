@@ -547,9 +547,6 @@
 
     paintFilter();
     refreshSelection();
-    syncPromptEditorRefs(node);
-    syncPromptEditorParams(node);
-    syncPromptEditorTail(node);
   }
 
   function refreshNode(node, parts) {
@@ -590,9 +587,6 @@
     }
     paintFilter();
     refreshSelection();
-    syncPromptEditorRefs(node);
-    syncPromptEditorParams(node);
-    syncPromptEditorTail(node);
   }
 
   // 只是卡片背后的连线信息变了（比如删掉了另一张卡片）：只换掉编辑面板，
@@ -607,9 +601,6 @@
     const next = buildPanel(node, nodeData(node), presetOf(node.type), el);
     old.replaceWith(next);
     placePanel();
-    syncPromptEditorRefs(node);
-    syncPromptEditorParams(node);
-    syncPromptEditorTail(node);
   }
 
   // 定时组里的成员变了：只更新卡片上的橙色序号和组内样式，不重建卡片
@@ -1908,8 +1899,7 @@
         target.closest('.node-params') ||
         target.closest('.node-actions') ||
         target.closest('.tail-card') ||
-        target.closest('.version-strip') ||
-        target.closest('.prompt-tail-slot')
+        target.closest('.version-strip')
     );
   }
 
@@ -2900,18 +2890,6 @@
 
   // ---------- 尾部提示词：卡片上的开关和预设选择 ----------
   // 卡片只记「用哪一套」，正文仍在设置里；这样改一套预设，所有引用它的卡片一起生效。
-  function tailSignature(node) {
-    const cfg = tailConfig();
-    const choice = cardTailChoice(node);
-    return JSON.stringify({
-      on: cfg.enabled,
-      def: cfg.defaultId,
-      presets: cfg.presets.map((one) => [one && one.id, one && one.name, one && String(one.text || '').length]),
-      choice: choice,
-      locked: isLocked(node),
-    });
-  }
-
   function tailHintText(node, choice) {
     const cfg = tailConfig();
     if (!cfg.enabled) return '尾部提示词总开关已关闭：所有卡片暂时都不追加，打开总开关后这张卡片的设置会自动恢复。';
@@ -3562,28 +3540,6 @@
     return wrap;
   }
 
-  // 卡片里的尾部块与提示词浮窗共用同一套控件；浮窗开着时局部同步，不打断正在写的内容。
-  function paintPromptEditorTail(node) {
-    const host = promptEditorTailEl;
-    if (!host || !node) return;
-    const data = nodeData(node);
-    host.innerHTML = '';
-    if (!supportsTail(node)) {
-      host.hidden = true;
-      return;
-    }
-    host.hidden = false;
-    host.dataset.sig = tailSignature(node);
-    host.appendChild(buildTailCardBlock(node, data));
-  }
-
-  function syncPromptEditorTail(node) {
-    const host = promptEditorTailEl;
-    if (!host || !node || !promptEditorNode || promptEditorNode.id !== node.id) return;
-    if (host.dataset.sig === tailSignature(node)) return;
-    paintPromptEditorTail(node);
-  }
-
   // 展开态：从卡片底部浮出的编辑面板，卡片本身的位置和大小不变
   function buildPanel(node, data, preset, el) {
     const panel = document.createElement('div');
@@ -4047,94 +4003,6 @@
     return block;
   }
 
-  // ---------- 提示词大编辑窗口：长提示词摊开写、摊开看 ----------
-  let promptEditorEl = null;
-  let promptEditorBox = null;
-  // 浮窗里正在编辑哪张卡片：素材缩略图要跟着这张卡片走
-  let promptEditorNode = null;
-  let promptEditorRefsEl = null;
-  let promptEditorParamsEl = null;
-  let promptEditorTailEl = null;
-  // 浮窗拖到哪儿，下次打开还在那儿；双击标题栏回到正中间
-  const PROMPT_POS_KEY = 'canvas.promptEditorPos';
-
-  function readPromptEditorPos() {
-    try {
-      const raw = window.localStorage.getItem(PROMPT_POS_KEY);
-      const parsed = raw ? JSON.parse(raw) : null;
-      if (parsed && Number.isFinite(parsed.left) && Number.isFinite(parsed.top)) return parsed;
-    } catch {
-      /* 读不到就按默认居中 */
-    }
-    return null;
-  }
-
-  function placePromptEditor(modal, pos) {
-    if (!pos) {
-      modal.style.left = '';
-      modal.style.top = '';
-      modal.style.transform = '';
-      return;
-    }
-    const width = modal.offsetWidth || 780;
-    const height = modal.offsetHeight || 560;
-    modal.style.transform = 'none';
-    modal.style.left = clamp(pos.left, 8, Math.max(8, window.innerWidth - width - 8)) + 'px';
-    modal.style.top = clamp(pos.top, 8, Math.max(8, window.innerHeight - height - 8)) + 'px';
-  }
-
-  function setupPromptEditorDrag(mask) {
-    const modal = mask.querySelector('.prompt-modal');
-    const head = mask.querySelector('.modal-head');
-    if (!modal || !head) return;
-    placePromptEditor(modal, readPromptEditorPos());
-    let drag = null;
-    head.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
-      if (event.target.closest && event.target.closest('button, select')) return;
-      const rect = modal.getBoundingClientRect();
-      drag = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
-      modal.style.transform = 'none';
-      modal.style.left = rect.left + 'px';
-      modal.style.top = rect.top + 'px';
-      modal.classList.add('dragging');
-      if (head.setPointerCapture) head.setPointerCapture(event.pointerId);
-      event.preventDefault();
-    });
-    head.addEventListener('pointermove', (event) => {
-      if (!drag) return;
-      const rect = modal.getBoundingClientRect();
-      const left = clamp(event.clientX - drag.dx, 8, Math.max(8, window.innerWidth - rect.width - 8));
-      const top = clamp(event.clientY - drag.dy, 8, Math.max(8, window.innerHeight - rect.height - 8));
-      modal.style.left = left + 'px';
-      modal.style.top = top + 'px';
-    });
-    const endDrag = () => {
-      if (!drag) return;
-      drag = null;
-      modal.classList.remove('dragging');
-      const rect = modal.getBoundingClientRect();
-      try {
-        window.localStorage.setItem(
-          PROMPT_POS_KEY,
-          JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })
-        );
-      } catch {
-        /* 记不住位置也不影响用 */
-      }
-    };
-    head.addEventListener('pointerup', endDrag);
-    head.addEventListener('pointercancel', endDrag);
-    head.addEventListener('dblclick', (event) => {
-      if (event.target.closest && event.target.closest('button, select')) return;
-      placePromptEditor(modal, null);
-      try {
-        window.localStorage.removeItem(PROMPT_POS_KEY);
-      } catch {
-        /* 无所谓 */
-      }
-    });
-  }
 
   // 模型下拉：卡片面板和展开窗口共用一套清单和切换逻辑
   function buildModelSelect(node, data, className) {
@@ -4190,333 +4058,6 @@
     return model;
   }
 
-  // 浮窗里的素材缩略图：跟卡片内面板共用 buildRefs，编号 / 首尾帧 / 快速视频的 @ 都对得上
-  function paintPromptEditorRefs(node) {
-    const host = promptEditorRefsEl;
-    if (!host || !node) return;
-    host.innerHTML = '';
-    const refs = buildRefs(node);
-    // 导演台这类没有参考素材的卡片，这一块不占地方
-    if (!refs) {
-      host.hidden = true;
-      return;
-    }
-    host.hidden = false;
-    const count = refs.querySelectorAll('.ref-tile').length;
-    // 一个素材都没有的时候，只留 buildRefs 自带的提示文字，不加标题
-    if (count > 0) {
-      const head = document.createElement('div');
-      head.className = 'prompt-refs-head';
-      head.textContent = node.type === 'quick' ? '提示词里 @ 到的素材（' + count + '）' : '连进来的素材（' + count + '）';
-      host.appendChild(head);
-    }
-    host.appendChild(refs);
-  }
-
-  // 参数行：时长 / 分辨率 / 比例 / 模式，跟卡片里那排小标签共用同一份定义
-  function paramSignature(node, data) {
-    const defs = paramDefsOf(node, data);
-    return (
-      defs
-        .map((def) => def.key + ':' + def.options.join(',') + '/' + (def.texts ? def.texts.join(',') : '') + '=' + data.params[def.key])
-        .join('|') + (isLocked(node) ? '|locked' : '')
-    );
-  }
-
-  function paintPromptEditorParams(node) {
-    const host = promptEditorParamsEl;
-    if (!host || !node) return;
-    const data = nodeData(node);
-    const defs = paramDefsOf(node, data);
-    host.innerHTML = '';
-    host.dataset.sig = paramSignature(node, data);
-    if (!defs.length) {
-      host.hidden = true;
-      return;
-    }
-    host.hidden = false;
-    defs.forEach((def) => {
-      const item = document.createElement('label');
-      item.className = 'prompt-param';
-      const label = document.createElement('span');
-      label.className = 'prompt-param-label';
-      label.textContent = def.label;
-      const select = document.createElement('select');
-      select.className = 'prompt-param-select';
-      select.dataset.key = def.key;
-      select.title = '在这里改' + def.label;
-      def.options.forEach((value, index) => {
-        const opt = document.createElement('option');
-        opt.value = value;
-        opt.textContent = (def.texts && def.texts[index]) || value;
-        if (String(value) === String(data.params[def.key])) opt.selected = true;
-        select.appendChild(opt);
-      });
-      if (String(data.params[def.key]) === '' && def.options.length) select.value = def.options[0];
-      if (isLocked(node)) {
-        select.disabled = true;
-        select.title = '卡片已锁定，先解锁才能改参数';
-      }
-      select.addEventListener('pointerdown', (event) => event.stopPropagation());
-      select.addEventListener('change', () => {
-        pushHistory();
-        const value = select.value;
-        data.params[def.key] = value;
-        // 换比例时卡片跟着变形，手动拉过大小就不动
-        if (def.key === 'ratio' && !data.sized) {
-          const size = defaultSize(node.type, data.params);
-          node.w = size.w;
-          node.h = size.h;
-          const cardEl = elements.get(node.id);
-          if (cardEl) {
-            cardEl.style.width = size.w + 'px';
-            cardEl.style.height = size.h + 'px';
-          }
-          updateEdgePaths([node]);
-        }
-        scheduleSave();
-        // 浮动窗口自己记一下现在的状态，免得下次刷新时无谓重画、把焦点弄丢
-        if (promptEditorParamsEl) promptEditorParamsEl.dataset.sig = paramSignature(node, data);
-        // 卡片里那排参数标签跟着改字
-        const cardEl = elements.get(node.id);
-        if (cardEl) {
-          const chip = cardEl.querySelector('.param-chip[data-key="' + def.key + '"]');
-          if (chip) chip.textContent = def.label + ' · ' + paramText(def, value);
-        }
-        // 模式影响素材用途（首帧 / 尾帧），重画一遍卡片和素材条
-        if (def.key === 'mode') refreshNode(node);
-      });
-      item.appendChild(label);
-      item.appendChild(select);
-      host.appendChild(item);
-    });
-  }
-
-  // 卡片状态变了：只有参数清单或取值真的变了才重画，避免打断正在操作的下拉
-  function syncPromptEditorParams(node) {
-    const host = promptEditorParamsEl;
-    if (!host || !node || !promptEditorNode || promptEditorNode.id !== node.id) return;
-    const data = nodeData(node);
-    if (host.dataset.sig === paramSignature(node, data)) return;
-    paintPromptEditorParams(node);
-  }
-
-  // 卡片状态变了（连线、@ 增删、出结果）：浮窗开着就顺手重画素材条
-  function syncPromptEditorRefs(node) {
-    if (!promptEditorNode || !node || promptEditorNode.id !== node.id) return;
-    paintPromptEditorRefs(node);
-  }
-
-  function closePromptEditor() {
-    if (!promptEditorEl) return;
-    const dying = promptEditorEl;
-    promptEditorEl = null;
-    promptEditorBox = null;
-    promptEditorNode = null;
-    promptEditorRefsEl = null;
-    promptEditorParamsEl = null;
-    promptEditorTailEl = null;
-    dying.remove();
-  }
-
-  function openPromptEditor(node) {
-    closePromptEditor();
-    const data = nodeData(node);
-    const preset = presetOf(node.type);
-    const mask = document.createElement('div');
-    mask.className = 'modal-mask prompt-mask';
-    mask.innerHTML =
-      '<div class="modal prompt-modal">' +
-      '  <div class="modal-head"><b>写提示词</b>' +
-      '    <span class="prompt-head-sub"></span>' +
-      '    <span class="grow"></span>' +
-      '    <span class="prompt-model-slot"></span>' +
-      '    <button class="ghost" data-close>关闭</button></div>' +
-      '  <div class="modal-body prompt-body">' +
-      '    <div class="prompt-refs" data-refs></div>' +
-      '    <div class="prompt-params" data-params></div>' +
-      '    <div class="prompt-tail-slot" data-tail></div>' +
-      '    <div class="prompt-editor" contenteditable="true" spellcheck="false"></div>' +
-      '  </div>' +
-      '  <div class="modal-foot">' +
-      '    <span class="prompt-count">0 字</span>' +
-      '    <span class="grow"></span>' +
-      '    <span class="set-hint">回车换行，Ctrl+回车保存；Esc 关闭</span>' +
-      '    <button class="ghost" data-save>保存</button>' +
-      '    <button class="primary btn-run" data-generate>生成</button>' +
-      '</div>' +
-      '</div>';
-    document.body.appendChild(mask);
-    promptEditorEl = mask;
-    promptEditorNode = node;
-    promptEditorRefsEl = mask.querySelector('[data-refs]');
-    promptEditorParamsEl = mask.querySelector('[data-params]');
-    promptEditorTailEl = mask.querySelector('[data-tail]');
-    setupPromptEditorDrag(mask);
-    const box = mask.querySelector('.prompt-editor');
-    promptEditorBox = box;
-    const sub = mask.querySelector('.prompt-head-sub');
-    const title = String(data.title || '').trim();
-    // 模型名交给标题栏里的下拉框显示，这里只说是什么卡片
-    sub.textContent = (title ? title + '　·　' : '') + preset.label;
-    // 展开窗口里也能直接换模型：跟卡片里那个下拉是同一套清单、同一套逻辑
-    const modelSlot = mask.querySelector('.prompt-model-slot');
-    if (modelSlot && node.type !== 'director' && node.type !== 'schedule' && node.type !== 'group') {
-      modelSlot.appendChild(buildModelSelect(node, data, 'prompt-model'));
-    }
-    box.dataset.placeholder = preset.placeholder;
-    renderPrompt(box, node, data.text);
-    paintPromptEditorRefs(node);
-    paintPromptEditorParams(node);
-    paintPromptEditorTail(node);
-    const count = mask.querySelector('.prompt-count');
-    const paintCount = () => {
-      count.textContent = Array.from(promptTextOf(box)).length + ' 字';
-    };
-    paintCount();
-    // 已经在跑的卡片：按钮直接变成「取消生成」
-    const genBtn = mask.querySelector('[data-generate]');
-    const paintGenBtn = () => {
-      if (!genBtn) return;
-      const running = Boolean(nodeData(node).running);
-      genBtn.textContent = running ? '取消生成' : '生成';
-      genBtn.classList.toggle('cancel', running);
-      genBtn.title = running ? '取消这次生成' : '保存提示词并立即生成（Ctrl+Shift+回车）';
-    };
-    paintGenBtn();
-    box.addEventListener('input', paintCount);
-    box.addEventListener('input', () => {
-      if (atMentionTrigger(box)) {
-        if (mentionBox === box && mentionEl) refreshMention(node, box);
-        else openMention(node, box);
-        return;
-      }
-      // 选完素材以后继续正常打字，列表照样留着（点画布 / 点别的卡片 / 闲置 10 秒才收）；
-      // 只有正在挑素材时把那个 @ 删掉了，才顺手收起来
-      if (mentionBox === box && !mentionStale) closeMention();
-    });
-    box.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && !mentionPicking(box)) {
-        event.preventDefault();
-        event.stopPropagation();
-        closePromptEditor();
-        return;
-      }
-      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !mentionPicking(box)) {
-        event.preventDefault();
-        if (event.shiftKey) runFromPromptEditor(node, box);
-        else savePromptEditor(node, box);
-        return;
-      }
-      if (mentionPicking(box)) {
-        if (event.key === 'ArrowDown') {
-          event.preventDefault();
-          moveMention(1);
-          return;
-        }
-        if (event.key === 'ArrowUp') {
-          event.preventDefault();
-          moveMention(-1);
-          return;
-        }
-        if (event.key === 'Enter' || event.key === 'Tab') {
-          event.preventDefault();
-          chooseMention();
-          return;
-        }
-      }
-      if (mentionBox === box && event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        closeMention();
-        return;
-      }
-    });
-    box.addEventListener('focus', () => {
-      if (mentionBox && mentionBox !== box) closeMention();
-    });
-    box.addEventListener('paste', (event) => {
-      event.preventDefault();
-      const raw = (event.clipboardData || window.clipboardData).getData('text/plain') || '';
-      insertPlainText(box, raw);
-    });
-    mask.addEventListener('click', (event) => {
-      const button = event.target.closest ? event.target.closest('button') : null;
-      if (button && button.dataset.generate !== undefined) {
-        runFromPromptEditor(node, box);
-        return;
-      }
-      if (button && button.dataset.save !== undefined) {
-        savePromptEditor(node, box);
-        return;
-      }
-      if (button && button.dataset.close !== undefined) {
-        closePromptEditor();
-        return;
-      }
-      if (event.target === mask) closePromptEditor();
-    });
-    mask.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        closePromptEditor();
-      }
-    });
-    box.focus({ preventScroll: true });
-    const range = document.createRange();
-    range.selectNodeContents(box);
-    range.collapse(false);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-  }
-
-  // 只把大窗口里的文字写回卡片，不关窗；返回提示词有没有变化
-  function writePromptEditor(node, box) {
-    const data = nodeData(node);
-    // 大窗口里手打的 @图1 同样认
-    const next = normalizeMentions(node, promptTextOf(box));
-    const changed = next !== data.text;
-    if (changed) {
-      pushHistory();
-      data.text = next;
-      scheduleSave();
-    }
-    syncQuickRefs(node);
-    // 卡片面板里的提示词跟着更新
-    const el = elements.get(node.id);
-    if (el) {
-      const inline = el.querySelector('.node-prompt');
-      if (inline) {
-        renderPrompt(inline, node, data.text);
-        paintPromptMetaOf(el);
-      }
-    }
-    // 快速视频：引用变了，素材条也要跟着重画
-    if (node.type === 'quick') refreshNode(node);
-    refreshHoverBar(node);
-    return changed;
-  }
-
-  function savePromptEditor(node, box) {
-    writePromptEditor(node, box);
-    closePromptEditor();
-    toast('提示词已保存');
-  }
-
-  // 审阅完直接生成：先落库，再交给卡片原来的生成流程（含模型 / @ 校验）
-  function runFromPromptEditor(node, box) {
-    const data = nodeData(node);
-    if (data.running) {
-      closePromptEditor();
-      cancelGenerate(node);
-      return;
-    }
-    writePromptEditor(node, box);
-    closePromptEditor();
-    startGenerate(node);
-  }
 
   function buildPanelHead(node, data, preset) {
     const head = document.createElement('div');
@@ -7496,10 +7037,10 @@
       }
     });
 
-    el.querySelectorAll('.schedule-tile').forEach((tile) => {
-      const item = items.find((one) => one.nodeId === tile.dataset.member);
-      tile.dataset.state = item ? item.status : '';
-    });
+    // 这里原本还有一段 el.querySelectorAll('.schedule-tile') 的循环，给 tile 打
+    // data-state 状态色。但 '.schedule-tile' 与它读的 dataset.member 全项目零处产出
+    // （是改名前的旧类名，成员卡片现在是 .schedule-member），选择器必然为空 ——
+    // 整个循环等价于空转。成员的状态色由上面那段 .schedule-order 的类切换负责。
   }
 
   // 后台把结果写进了库，前端把成员卡片拉回来刷新一下，不用整块重开画布
@@ -12668,7 +12209,6 @@
         if (mentionEl && !(mentionBox && mentionBox.contains(target))) closeMention();
         if (!expandedId) return;
         if (menuEl && menuEl.contains(target)) return;
-        if (promptEditorEl && promptEditorEl.contains(target)) return;
         // 从任意卡片的端口开始拉线：不收起当前提示词编辑，等连线结束后再展开回来
         if (target.closest('.port')) {
           keepExpandedAfterConnect = expandedId;
@@ -12715,10 +12255,10 @@
     // 以前这里无条件 preventDefault，导致提示词框里滚动也会把画布缩放掉。
     const WHEEL_SCROLL_OVERFLOW = /^(auto|scroll|overlay)$/;
 
-    // 鼠标是不是落在“文字输入框”里（卡片里的提示词、大窗口里的提示词）
+    // 鼠标是不是落在“文字输入框”里（卡片里的提示词、@ 浮层里的文字框）
     function wheelEditorTarget(target) {
       if (!target || !target.closest) return null;
-      return target.closest('.node-prompt, .prompt-editor, textarea');
+      return target.closest('.node-prompt, textarea');
     }
 
     // 从鼠标位置往上找第一个能上下滚的容器

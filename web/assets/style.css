@@ -1695,56 +1695,6 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
 body.prompt-resizing { cursor: ns-resize; }
 body.prompt-resizing .prompt-grip::before { background: var(--accent); opacity: 1; }
 
-/* 提示词大编辑窗口 */
-/* 提示词浮窗：去掉半透明遮罩，画布上的卡片照样看得见、点得到；
-   窗口本身是纯不透明的一块，靠标题栏拖来拖去 */
-.modal-mask.prompt-mask {
-  z-index: 230;
-  padding: 0;
-  background: transparent;
-  backdrop-filter: none;
-  pointer-events: none;
-}
-.prompt-mask .prompt-modal {
-  pointer-events: auto;
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: min(780px, 94vw);
-  height: min(70vh, 680px);
-  max-height: none;
-  border-color: var(--line-strong);
-  box-shadow: 0 22px 60px rgba(8, 14, 26, 0.42);
-}
-.prompt-mask .prompt-modal.dragging { transition: none; }
-.prompt-mask .modal-head { cursor: move; user-select: none; }
-.prompt-mask .modal-head button { cursor: pointer; }
-.prompt-head-sub { color: var(--muted); font-size: 0.84em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prompt-body { flex: 1 1 auto; display: flex; padding: 14px 16px; min-height: 0; }
-.prompt-editor {
-  flex: 1 1 auto;
-  min-height: 100%;
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 1.02em;
-  line-height: 1.75;
-  outline: none;
-  white-space: pre-wrap;
-  word-break: break-word;
-  user-select: text;
-  cursor: text;
-}
-.prompt-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
-.prompt-editor:empty:before { content: attr(data-placeholder); color: var(--placeholder); }
-.prompt-count { color: var(--muted); font-size: 0.86em; }
-
 /* 提示词里用 @ 引用的素材：一条彩色胶囊，颜色按素材种类分 */
 .mention {
   display: inline-block;
@@ -3553,31 +3503,6 @@ input::placeholder { color: var(--placeholder); }
 .hidden-badge:hover { transform: translateY(-1px); filter: brightness(1.04); }
 .hidden-badge.hidden { display: none; }
 
-/* 提示词大窗口底栏：保存 / 生成 两个按钮 */
-.prompt-mask .modal-foot .set-hint { color: var(--muted); font-size: 0.84em; }
-.prompt-mask .modal-foot button { min-width: 84px; justify-content: center; }
-.prompt-mask .modal-foot .btn-run {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  box-shadow: 0 0 0 1px rgba(120, 180, 255, 0.25), 0 6px 18px rgba(47, 111, 237, 0.32);
-}
-.prompt-mask .modal-foot .btn-run:hover {
-  filter: brightness(1.08);
-  color: #fff;
-  box-shadow: 0 0 0 1px rgba(150, 200, 255, 0.45), 0 8px 22px rgba(47, 111, 237, 0.45);
-}
-.prompt-mask .modal-foot .btn-run.cancel {
-  background: transparent;
-  border-color: var(--danger);
-  color: var(--danger);
-  box-shadow: none;
-}
-.prompt-mask .modal-foot .btn-run.cancel:hover { background: var(--tint-bad-soft); }
-.prompt-mask .modal-foot .btn-run:disabled { opacity: 0.55; cursor: not-allowed; }
-
 /* 导演台：颜色选择 / 顶栏按钮组 */
 .dir-color {
   flex: 1 1 auto;
@@ -3780,53 +3705,6 @@ input::placeholder { color: var(--placeholder); }
 }
 
 .schedule-next { margin-left: auto; color: #ffd36b; }
-
-.schedule-grid {
-  flex: 1 1 auto;
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 6px;
-  min-height: 0;
-  overflow: auto;
-}
-
-.schedule-tile {
-  position: relative;
-  width: 62px;
-  height: 62px;
-  flex: 0 0 auto;
-  border-radius: 8px;
-  border: 1px solid rgba(240, 138, 36, 0.45);
-  background: #2a2621;
-  overflow: hidden;
-  cursor: pointer;
-  transition: border-color 0.14s ease, transform 0.14s ease;
-}
-
-.schedule-tile:hover { border-color: #ffd36b; transform: translateY(-1px); }
-
-.schedule-tile .ref-thumb { position: absolute; inset: 0; }
-
-.schedule-tile[data-state="running"] { border-color: #ffd36b; }
-.schedule-tile[data-state="done"] { border-color: rgba(96, 200, 140, 0.85); }
-.schedule-tile[data-state="failed"],
-.schedule-tile[data-state="canceled"] { border-color: rgba(226, 106, 106, 0.85); }
-
-.schedule-tile-no {
-  position: absolute;
-  left: 3px;
-  top: 3px;
-  z-index: 2;
-  min-width: 15px;
-  padding: 0 3px;
-  border-radius: 4px;
-  font-size: 0.6em;
-  line-height: 1.6;
-  text-align: center;
-  color: #241a0c;
-  background: #ffd36b;
-}
 
 .schedule-empty {
   font-size: 0.78em;
@@ -4548,106 +4426,6 @@ input::placeholder { color: var(--placeholder); }
   animation: none;
 }
 
-/* ---------- 提示词浮窗里的素材缩略图 ---------- */
-/* 浮窗里能看到这张卡片连进来的素材，编号跟卡片里的一致，不用来回切 */
-.prompt-mask .prompt-body {
-  flex-direction: column;
-  gap: 10px;
-}
-.prompt-refs {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 150px;
-  overflow: auto;
-  padding: 0 2px 10px;
-  border-bottom: 1px dashed var(--line);
-}
-.prompt-refs[hidden] { display: none; }
-.prompt-refs-head {
-  font-size: 0.8em;
-  color: var(--muted);
-}
-.prompt-refs .node-refs {
-  max-height: none;
-  overflow: visible;
-  gap: 6px;
-}
-.prompt-refs .ref-row { gap: 8px; }
-.prompt-refs .ref-tile {
-  width: 56px;
-  height: 56px;
-  border-radius: 8px;
-}
-.prompt-refs .ref-tile .ref-tag {
-  font-size: 0.62em;
-  padding: 0 3px;
-  border-radius: 4px;
-}
-.prompt-refs .ref-tile .ref-seat {
-  font-size: 0.62em;
-  padding: 0 3px;
-}
-.prompt-refs .ref-tile .icon-btn {
-  opacity: 1;
-  font-size: 0.7em;
-  padding: 0 3px;
-}
-.prompt-refs .ref-empty,
-.prompt-refs .ref-note { font-size: 0.82em; }
-.prompt-refs .ref-swap { font-size: 0.82em; }
-.prompt-mask .prompt-editor { min-height: 0; }
-
-/* ---------- 提示词浮窗标题栏里的模型下拉 ---------- */
-.prompt-model-slot { display: inline-flex; align-items: center; }
-.prompt-mask .prompt-model {
-  max-width: 260px;
-  min-width: 160px;
-  padding: 4px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 0.86em;
-  cursor: pointer;
-}
-.prompt-mask .prompt-model:focus { border-color: var(--accent); }
-.prompt-mask .prompt-model:disabled { opacity: 0.6; cursor: not-allowed; }
-
-/* ---------- 提示词浮窗里的参数行 ---------- */
-.prompt-params {
-  flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  padding: 0 2px 10px;
-  border-bottom: 1px dashed var(--line);
-}
-.prompt-params[hidden] { display: none; }
-.prompt-param {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  padding: 3px 8px 3px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-}
-.prompt-param-label { color: var(--muted); font-size: 0.8em; white-space: nowrap; }
-.prompt-param-select {
-  border: none;
-  background: transparent;
-  color: var(--text);
-  font-size: 0.86em;
-  padding: 2px 2px;
-  cursor: pointer;
-  outline: none;
-}
-.prompt-param-select:focus { color: var(--accent); }
-.prompt-param-select:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ---------- 素材缩略图：卡片很小时只留干净的画面 ---------- */
 /* 用容器查询按卡片自身宽度判断，不依赖画布缩放比例 */
