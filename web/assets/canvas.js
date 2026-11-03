@@ -100,6 +100,15 @@
       empty: '双击打开导演台，摆好机位再出图',
       placeholder: '',
     },
+    // 区域：一块带标题的框，把一组卡片圈在一起，可以整块折叠起来
+    zone: {
+      w: 640,
+      h: 420,
+      label: '区域',
+      media: 'image',
+      empty: '选中几张卡片，右键「加进新区域」；或者直接把卡片拖进这个框里',
+      placeholder: '给这块区域起个名字（可选），例如：第一幕 · 分镜',
+    },
   };
   // 能新建的四种：图片 / 视频 / 音频 / 快速视频；组合是选中卡片之后合出来的
   const ADDABLE_TYPES = ['image', 'video', 'audio', 'quick'];
@@ -407,6 +416,13 @@
         if (data.order.indexOf(id) < 0) data.order.push(id);
       });
     }
+    // 区域：collapsed=true 时整块收起来（成员卡片跟着一起隐藏）。
+    // 成员是哪些不由区域自己记 —— 唯一真相在成员卡片上的 data.zoneId，
+    // 这样删掉一张卡片不用回头去清理区域，也不会出现两份名单对不上的情况。
+    if (node.type === 'zone') {
+      if (data.collapsed !== true) data.collapsed = false;
+      if (typeof data.color !== 'string') data.color = '';
+    }
     // sized=true 表示用户手动拉过卡片大小，之后就不再自动按图片比例贴合
     if (data.sized !== true) data.sized = false;
     if (data.locked !== true) data.locked = false;
@@ -516,6 +532,7 @@
     if (el.style.height !== size.h + 'px') el.style.height = size.h + 'px';
     el.classList.toggle('is-locked', isLocked(node));
     el.classList.toggle('is-generating', isTaskActive(data));
+    if (isZone(node)) el.classList.toggle('is-collapsed', Boolean(data.collapsed));
 
     if (parts.indexOf('media') >= 0) replaceMediaPart(el, node, data, preset);
     // 媒体区刚重建过的话，状态框已经跟着是新的了，不用再来一遍
@@ -774,16 +791,66 @@
     return Boolean(node && node.data && node.data.locked);
   }
 
-  function isHidden(node) {
+  // 自己主动藏起来的（Ctrl+Shift+H）—— 跟区域折叠区分开：
+  // 区域展开时不该把用户自己藏起来的卡片一起放出来。
+  function isManuallyHidden(node) {
     return Boolean(node && node.data && node.data.hidden);
+  }
+
+  function isZone(node) {
+    return Boolean(node && node.type === 'zone');
+  }
+
+  function zoneMembersOf(zone) {
+    if (!isZone(zone)) return [];
+    return nodes.filter((node) => node.data && node.data.zoneId === zone.id && !isZone(node));
+  }
+
+  // 卡片属于哪个区域（一张卡片最多属于一个区域）
+  function zoneOf(node) {
+    if (!node || !node.data || isZone(node)) return null;
+    const id = String(node.data.zoneId || '');
+    if (!id) return null;
+    const hit = byId(id);
+    return isZone(hit) ? hit : null;
+  }
+
+  // 「只看这个区域」时被挡住的卡片：既要藏起来，又要能一眼还原回去，
+  // 所以记在这里而不是写进卡片自己的 data.hidden（那会把用户的手动隐藏冲掉）。
+  let soloZoneId = '';
+
+  function isZoneFolded(node) {
+    // 卡片被折叠区域收起来了。注意这只影响画，不影响它的任务与数据。
+    const host = zoneOf(node);
+    return Boolean(host && nodeData(host).collapsed);
+  }
+
+  function isHiddenBySolo(node) {
+    if (!soloZoneId) return false;
+    // 「只看这块区域」时，被看的那块框本身要留着 —— 它是这块内容的边界，
+    // 框没了用户就分不清「看到的是哪一块」。
+    if (isZone(node)) return node.id !== soloZoneId;
+    const host = zoneOf(node);
+    return !host || host.id !== soloZoneId;
+  }
+
+  // 画布上不画的统一判据：手动隐藏 / 区域折叠 / 只看某个区域
+  function isHidden(node) {
+    return isManuallyHidden(node) || isZoneFolded(node) || isHiddenBySolo(node);
   }
 
   function visibleNodes() {
     return nodes.filter((node) => !isHidden(node));
   }
 
+  // 只是用户自己按 Ctrl+Shift+H 藏起来的那些（恢复面板只列这些）
   function hiddenNodes() {
-    return nodes.filter((node) => isHidden(node));
+    return nodes.filter((node) => isManuallyHidden(node));
+  }
+
+  // 被区域折叠带走、或「只看某区域」时被挡住的那些
+  function foldedNodes() {
+    return nodes.filter((node) => !isManuallyHidden(node) && isHidden(node));
   }
 
   function presetOf(type) {
@@ -1591,10 +1658,19 @@
     return { w: Math.round(SCHEDULE_CELL_W * k), h: Math.round(SCHEDULE_CELL_H * k) };
   }
 
+  // 折叠区域的显示高度：标题栏 34 + 下面那行「已收起 N 张卡片」约 26
+  const ZONE_COLLAPSED_H = 60;
+
   function sizeOf(node) {
     const hit = memberSchedule.get(node.id);
     if (hit) return scheduleCellSize(Boolean(hit.compact));
-    return rawSizeOf(node);
+    const size = rawSizeOf(node);
+    // 收起来的区域缩成一条标题：框还占着原来的宽度，但不再白占一整块画布。
+    // 这只改「画多大」，node.w / node.h 原样留着，展开就回到原来的框。
+    if (isZone(node) && node.data && node.data.collapsed) {
+      return { w: size.w, h: Math.min(size.h, ZONE_COLLAPSED_H) };
+    }
+    return size;
   }
 
   // 组框永远压在组里的卡片下面，这样卡片才是「摆在框里」的；
@@ -1602,6 +1678,16 @@
   function zIndexOf(node) {
     if (isSchedule(node)) {
       const members = scheduleMembersOf(node);
+      let lowest = Infinity;
+      members.forEach((member) => {
+        lowest = Math.min(lowest, Number(member.z) || 0);
+      });
+      const base = Number.isFinite(lowest) ? 10 + lowest - 1 : 10 + (Number(node.z) || 0);
+      return base + (node.id === expandedId ? 30000 : 0);
+    }
+    // 区域也是「框」：永远垫在它圈住的卡片底下，卡片才像是摆在框里
+    if (isZone(node)) {
+      const members = zoneMembersOf(node);
       let lowest = Infinity;
       members.forEach((member) => {
         lowest = Math.min(lowest, Number(member.z) || 0);
@@ -1684,7 +1770,7 @@
   // 卡片默认按所选比例长成一条，图片 / 视频铺满整张卡片
   function defaultSize(type, params) {
     const preset = presetOf(type);
-    if (type === 'audio' || type === 'group' || type === 'schedule') return { w: preset.w, h: preset.h };
+    if (type === 'audio' || type === 'group' || type === 'schedule' || type === 'zone') return { w: preset.w, h: preset.h };
     const ratio = ratioValueOf(params && params.ratio);
     return { w: preset.w, h: Math.max(MIN_H, Math.round(preset.w / ratio)) };
   }
@@ -1764,6 +1850,8 @@
     el.style.height = size.h + 'px';
     el.style.zIndex = String(zIndexOf(node));
     if (isTaskActive(data)) el.classList.add('is-generating');
+    // 收起来的区域：框缩成一条标题，样式上也要收掉拉伸把手
+    if (isZone(node) && data.collapsed) el.classList.add('is-collapsed');
     const hostHit = memberSchedule.get(node.id);
     if (hostHit) el.classList.add('sched-member');
     if (hostHit && hostHit.compact) el.classList.add('sched-compact');
@@ -1792,8 +1880,8 @@
     }
     el.appendChild(buildPanel(node, data, preset, el));
 
-    // 定时组是「管理器」，不接素材也不送素材，所以没有端口
-    if (!isSchedule(node)) {
+    // 定时组是「管理器」，区域是「框」，都不接素材也不送素材，所以没有端口
+    if (!isSchedule(node) && !isZone(node)) {
       const portIn = document.createElement('div');
       portIn.className = 'port in';
       portIn.title = '把别的卡片连到这里';
@@ -1811,6 +1899,13 @@
         handle.addEventListener('pointerdown', (event) => startResize(event, node, el));
         el.appendChild(handle);
       }
+    } else if (isZone(node)) {
+      // 区域没有端口，但框的大小要能拖 —— 框住的范围由用户自己划
+      const handle = document.createElement('div');
+      handle.className = 'resize-handle';
+      handle.title = '拖动改变这块区域的大小（框大了不一定就认领卡片，卡片归属看中心点落在哪个框里）';
+      handle.addEventListener('pointerdown', (event) => startResize(event, node, el));
+      el.appendChild(handle);
     }
 
     el.addEventListener('pointerdown', (event) => {
@@ -1922,6 +2017,11 @@
   function buildMedia(node, data, preset) {
     const media = document.createElement('div');
     media.className = 'node-media';
+    // 区域：一块框，顶上是标题栏，成员卡片直接摆在框里
+    if (node.type === 'zone') {
+      media.appendChild(buildZoneBody(node));
+      return media;
+    }
     // 定时组：正面显示组名、进度和组里每张视频的缩略图
     if (node.type === 'schedule') {
       media.appendChild(buildScheduleBody(node));
@@ -2657,8 +2757,8 @@
     const tag = document.createElement('div');
     const text = String(data.title || '').trim();
     // 组合卡片身上已经写着组名了，不再重复挂一个标题
-    tag.className = 'node-title-tag' + (node.type === 'group' || node.type === 'schedule' ? ' none' : text ? '' : ' empty');
-    if (node.type === 'group' || node.type === 'schedule') return tag;
+    tag.className = 'node-title-tag' + (node.type === 'group' || node.type === 'schedule' || node.type === 'zone' ? ' none' : text ? '' : ' empty');
+    if (node.type === 'group' || node.type === 'schedule' || node.type === 'zone') return tag;
     tag.textContent = text || '＋ 标题';
     tag.title = text ? '点一下改标题' : '点一下给这张卡片起个名字';
     tag.addEventListener('pointerdown', (event) => event.stopPropagation());
@@ -3417,6 +3517,11 @@
     // 定时组没有提示词和模型，只有时间、成员和开始 / 暂停
     if (node.type === 'schedule') {
       panel.appendChild(buildSchedulePanel(node, data));
+      return panel;
+    }
+    // 区域没有提示词和模型，只有名字、成员和折叠开关
+    if (node.type === 'zone') {
+      panel.appendChild(buildZonePanel(node, data));
       return panel;
     }
     panel.appendChild(buildPanelHead(node, data, preset));
@@ -5493,6 +5598,17 @@
     });
   }
 
+  // 复制 / 粘贴后修正区域归属：区域如果也一起复制了，就把 zoneId 指到新的那块；
+  // 没复制区域的话，副本落到空白处，归属直接清掉（不跟着原卡片继续挂在老区域下）。
+  function remapZoneRefs(copies, map) {
+    copies.forEach((copy) => {
+      if (!copy.data) return;
+      const id = String(copy.data.zoneId || '');
+      if (!id) return;
+      copy.data.zoneId = map.get(id) || '';
+    });
+  }
+
   // ===== 定时生成组：把多张视频卡片排好队，到点由本地后台自动生成 =====
   // 组卡片本身不参与连线，只负责「管」组里的视频卡片；
   // 配置（成员 / 时间 / 快照）存在卡片数据里，跟着画布导出；
@@ -6171,6 +6287,71 @@
     }
   }
 
+  // 区域正面：顶上一条标题栏（名字 / 张数 / 折叠按钮），下面是空的，
+  // 圈住的卡片直接摆在框里。折叠时框缩成一条标题，成员一起收起来。
+  function buildZoneBody(node) {
+    const data = nodeData(node);
+    const wrap = document.createElement('div');
+    wrap.className = 'zone-body';
+
+    const head = document.createElement('div');
+    head.className = 'zone-head';
+
+    const fold = document.createElement('button');
+    fold.type = 'button';
+    fold.className = 'zone-fold';
+    fold.textContent = data.collapsed ? '▸' : '▾';
+    fold.title = data.collapsed ? '展开这块区域（里面的卡片会回到画布上）' : '折叠这块区域（卡片只是收起来，任务照常跑）';
+    fold.addEventListener('pointerdown', (event) => event.stopPropagation());
+    fold.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setZoneCollapsed(node, !data.collapsed);
+    });
+    head.appendChild(fold);
+
+    const title = document.createElement('span');
+    title.className = 'zone-title';
+    title.textContent = String(data.text || '').trim() || '未命名区域';
+    title.title = '点一下打开区域设置；按住拖动可以移动整个区域';
+    let titleDown = null;
+    title.addEventListener('pointerdown', (event) => {
+      titleDown = { x: event.clientX, y: event.clientY };
+    });
+    title.addEventListener('click', (event) => {
+      event.stopPropagation();
+      // 拖完松手不算点击，免得移动区域之后顺手弹出设置窗口
+      if (titleDown && Math.abs(event.clientX - titleDown.x) + Math.abs(event.clientY - titleDown.y) > 5) {
+        titleDown = null;
+        return;
+      }
+      titleDown = null;
+      selectNode(node.id, false);
+      setExpanded(node.id);
+    });
+    head.appendChild(title);
+
+    const count = document.createElement('span');
+    count.className = 'zone-count';
+    const members = zoneMembersOf(node);
+    count.textContent = members.length ? members.length + ' 张卡片' : '空区域';
+    head.appendChild(count);
+    wrap.appendChild(head);
+
+    // 折叠时把「里面还有多少在跑」写在标题上：折叠不等于停，
+    // 用户得能一眼看出这块收起来的区域里还有活没干完。
+    if (data.collapsed) {
+      const running = members.filter((member) => isTaskActive(nodeData(member))).length;
+      const note = document.createElement('div');
+      note.className = 'zone-folded-note';
+      note.textContent = members.length
+        ? '已收起 ' + members.length + ' 张卡片' + (running ? ' · ' + running + ' 个生成进行中' : '')
+        : '这块区域里还没有卡片';
+      if (running) note.classList.add('hot');
+      wrap.appendChild(note);
+    }
+    return wrap;
+  }
+
   // 组卡片正面：名字、状态、进度、组里每张的缩略图和序号
   // 定时组正面：顶上一条组头（名字 / 状态 / 按钮），下面是空的，组里的卡片直接摆在框里
   function buildScheduleBody(node) {
@@ -6614,6 +6795,403 @@
     hint.textContent = '到点后由本地后台自动生成，浏览器关掉也会继续跑。';
     box.appendChild(hint);
     return box;
+  }
+
+  // 区域设置面板：改名、看成员、折叠 / 展开、解散
+  function buildZonePanel(node, data) {
+    const box = document.createElement('div');
+    box.className = 'zone-panel';
+
+    const head = document.createElement('div');
+    head.className = 'node-panel-head';
+    const dot = document.createElement('div');
+    dot.className = 'dot';
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.textContent = '区域';
+    const close = document.createElement('button');
+    close.className = 'icon-btn';
+    close.type = 'button';
+    close.textContent = '×';
+    close.title = '解散这块区域：里面的卡片会留在画布上';
+    close.addEventListener('pointerdown', (event) => event.stopPropagation());
+    close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      dissolveZone(node);
+    });
+    head.appendChild(dot);
+    head.appendChild(title);
+    head.appendChild(close);
+    box.appendChild(head);
+
+    const name = document.createElement('input');
+    name.className = 'group-name';
+    name.type = 'text';
+    name.placeholder = '给这块区域起个名字（可选）';
+    name.value = String(data.text || '');
+    name.addEventListener('pointerdown', (event) => event.stopPropagation());
+    name.addEventListener('change', () => {
+      const next = name.value.trim();
+      if (next === data.text) return;
+      pushHistory();
+      data.text = next;
+      scheduleSave();
+      refreshNode(node);
+    });
+    box.appendChild(name);
+
+    const members = zoneMembersOf(node);
+    const list = document.createElement('div');
+    list.className = 'zone-member-list';
+    if (!members.length) {
+      const empty = document.createElement('div');
+      empty.className = 'zone-member-empty';
+      empty.textContent = '这块区域里还没有卡片。把卡片拖进框里，或者选中卡片后右键「加进这块区域」。';
+      list.appendChild(empty);
+    } else {
+      members.forEach((member) => {
+        const row = document.createElement('div');
+        row.className = 'zone-member-row';
+        const label = document.createElement('span');
+        label.className = 'zone-member-name';
+        label.textContent = zoneMemberLabel(member);
+        row.appendChild(label);
+        // 卡片上还有活没干完的，在区域面板里也标一下，折叠了也心里有数
+        if (isTaskActive(nodeData(member))) {
+          const hot = document.createElement('span');
+          hot.className = 'zone-member-hot';
+          hot.textContent = '生成中';
+          row.appendChild(hot);
+        }
+        const jump = document.createElement('button');
+        jump.type = 'button';
+        jump.className = 'icon-btn';
+        jump.textContent = '↗';
+        jump.title = '跳到这张卡片';
+        jump.addEventListener('pointerdown', (event) => event.stopPropagation());
+        jump.addEventListener('click', (event) => {
+          event.stopPropagation();
+          goToNode(member.id);
+        });
+        row.appendChild(jump);
+        list.appendChild(row);
+      });
+    }
+    box.appendChild(list);
+
+    const actions = document.createElement('div');
+    actions.className = 'zone-actions';
+    const mk = (label, kind, run, tip) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'schedule-btn' + (kind ? ' ' + kind : '');
+      button.textContent = label;
+      button.title = tip || label;
+      button.addEventListener('pointerdown', (event) => event.stopPropagation());
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        run();
+      });
+      actions.appendChild(button);
+      return button;
+    };
+    mk(
+      data.collapsed ? '展开' : '折叠',
+      'primary',
+      () => setZoneCollapsed(node, !data.collapsed),
+      '折叠只是把卡片收起来，连线、生成结果和后台任务都不受影响'
+    );
+    mk('只看这块区域', '', () => soloZone(node.id), '把别的卡片先挡住，专心看这一块');
+    mk('适应窗口', '', () => fitToNodes(zoneMembersOf(node).concat([node]), { pad: 70 }), '缩放到刚好装下这块区域');
+    mk('重新框住卡片', '', () => relayoutZone(node), '把框拉大，刚好圈住里面的卡片');
+    box.appendChild(actions);
+
+    const hint = document.createElement('div');
+    hint.className = 'zone-hint';
+    hint.textContent = '折叠不会停掉任何东西：连线还在、生成结果还在、定时组照常跑，展开就回来。';
+    box.appendChild(hint);
+    return box;
+  }
+
+  // ===== 区域：把一组卡片圈在一块，可以整块收起来 =====
+  //
+  // 清单 21 的核心要求：折叠是纯显示态。所以这里的每一个操作都只碰
+  // 「画不画」，绝不碰任务、连线、生成结果 —— 折叠前后 tasks 表与
+  // schedule_runs 表必须一字不差。
+  //
+  // 归属关系只存一处：成员卡片自己的 data.zoneId。区域那侧不另存名单，
+  // 免得出现两份对不上（删卡片要两头清、复制要两头重映射）。
+
+  function zoneMemberLabel(member) {
+    const data = nodeData(member);
+    const text = String(data.title || '').trim() || String(data.text || '').trim();
+    const kind = presetOf(member.type).label;
+    const tag = (member.data && member.data.no ? KIND_LABEL[numberKindOf(member)] + member.data.no : '') || kind;
+    return tag + (text ? ' · ' + text.slice(0, 18) : '');
+  }
+
+  // 把一张卡片放进区域（会先从原来的区域里摘出来）
+  function assignZone(node, zone) {
+    if (!node || isZone(node)) return false;
+    const data = nodeData(node);
+    const next = zone ? zone.id : '';
+    if (String(data.zoneId || '') === next) return false;
+    data.zoneId = next;
+    return true;
+  }
+
+  // 按几何包含关系判断一张卡片该归哪个区域：卡片中心落在哪个框里就算哪块。
+  // 拖动落定时用它 —— 显式归属优先，但用户把卡片拖进框里是最自然的手势，
+  // 不能要求他先选中再右键。
+  function zoneAt(box, excludeId) {
+    let best = null;
+    let bestArea = Infinity;
+    nodes.forEach((zone) => {
+      if (!isZone(zone) || zone.id === excludeId || isManuallyHidden(zone)) return;
+      // 折叠中的区域不认领卡片：它现在只是一条标题，用户看不见里面的框，
+      // 卡片被吸进去就等于「拖一下就没了」——那是最让人摸不着头脑的一种丢。
+      if (nodeData(zone).collapsed) return;
+      const size = sizeOf(zone);
+      if (box.x < zone.x || box.y < zone.y) return;
+      if (box.x > zone.x + size.w || box.y > zone.y + size.h) return;
+      const area = size.w * size.h;
+      // 嵌套区域时取最小的那个：小框总是更具体的意图
+      if (area < bestArea) {
+        bestArea = area;
+        best = zone;
+      }
+    });
+    return best;
+  }
+
+  // 一次拖动 / 缩放结束后，按卡片中心重新判定归属
+  function rezoneAfterMove(list) {
+    let changed = false;
+    (Array.isArray(list) ? list : []).forEach((node) => {
+      if (!node || isZone(node) || isLocked(node)) return;
+      const size = sizeOf(node);
+      const center = { x: node.x + size.w / 2, y: node.y + size.h / 2 };
+      const hit = zoneAt(center, node.id);
+      const current = String(nodeData(node).zoneId || '');
+      const next = hit ? hit.id : '';
+      if (current === next) return;
+      // 原来那块区域还认这个成员吗？如果卡片已经挪出框外，就顺带摘掉
+      nodeData(node).zoneId = next;
+      changed = true;
+    });
+    if (changed) renderNodes();
+    return changed;
+  }
+
+  // 折叠 / 展开。这是清单 21 的正中心：只改一个布尔，别的一概不动。
+  function setZoneCollapsed(zone, on) {
+    if (!isZone(zone)) return;
+    const data = nodeData(zone);
+    const next = Boolean(on);
+    if (Boolean(data.collapsed) === next) return;
+    pushHistory();
+    data.collapsed = next;
+    // 折叠时把区域里的卡片从选区里摘掉：选着一堆看不见的卡片，
+    // 之后按 Delete 会莫名其妙删掉的东西，很吓人
+    if (next) {
+      zoneMembersOf(zone).forEach((member) => selection.delete(member.id));
+      if (expandedId && zoneMembersOf(zone).some((member) => member.id === expandedId)) expandedId = null;
+    }
+    renderNodes();
+    renderEdges();
+    refreshSelection();
+    refreshHiddenBadge();
+    // 按钮上的文字要跟着翻面
+    refreshNode(zone, ['media', 'panel']);
+    placePanel();
+    scheduleSave();
+    const count = zoneMembersOf(zone).length;
+    const running = zoneMembersOf(zone).filter((member) => isTaskActive(nodeData(member))).length;
+    if (next) {
+      toast(
+        '已折叠「' + (String(data.text || '').trim() || '未命名区域') + '」：' + count + ' 张卡片收起来了' +
+          (running ? '，其中 ' + running + ' 个还在生成，不会停' : '') + '。展开就回来'
+      );
+    } else {
+      toast('已展开：' + count + ' 张卡片回到画布上');
+    }
+  }
+
+  // 只看某块区域：把别的卡片先挡起来。不写 data.hidden —— 那是用户自己的隐藏，
+  // 混在一起的话「恢复隐藏」会把用户的意图搅乱。
+  function soloZone(id) {
+    soloZoneId = soloZoneId === id ? '' : String(id || '');
+    renderNodes();
+    renderEdges();
+    refreshSelection();
+    refreshHiddenBadge();
+    if (soloZoneId) {
+      const zone = byId(soloZoneId);
+      const list = zone ? zoneMembersOf(zone) : [];
+      fitToNodes(list.concat(zone ? [zone] : []), { pad: 70 });
+      toast('现在只看「' + (zone ? String(nodeData(zone).text || '').trim() || '未命名区域' : '这块区域') + '」，其余卡片先挡住。再点一次「只看这块区域」就恢复');
+    } else {
+      toast('已恢复显示全部卡片');
+    }
+  }
+
+  // 解散区域：里面的卡片留在画布上，只是不再属于任何区域
+  function dissolveZone(zone) {
+    if (!isZone(zone)) return;
+    pushHistory();
+    const members = zoneMembersOf(zone);
+    members.forEach((member) => {
+      memberDataZoneClear(member);
+    });
+    if (soloZoneId === zone.id) soloZoneId = '';
+    nodes = nodes.filter((node) => node.id !== zone.id);
+    if (expandedId === zone.id) expandedId = null;
+    selection.delete(zone.id);
+    renderAll();
+    refreshSelection();
+    scheduleSave();
+    toast('区域已解散，' + members.length + ' 张卡片留在画布上' + (members.length ? '' : '（本来就没有卡片）'));
+  }
+
+  function memberDataZoneClear(member) {
+    const data = nodeData(member);
+    if (data.zoneId) data.zoneId = '';
+  }
+
+  // 把框拉大，刚好圈住里面的卡片
+  function relayoutZone(zone) {
+    if (!isZone(zone)) return;
+    const members = zoneMembersOf(zone);
+    if (!members.length) {
+      toast('这块区域里还没有卡片，先拖几张进来');
+      return;
+    }
+    pushHistory();
+    const bounds = boundsOfNodes(members);
+    const pad = 28;
+    // 顶上要留出标题栏的高度，否则卡片会压住区域名
+    const headH = zoneHeadHeight();
+    zone.x = Math.round(bounds.minX - pad);
+    zone.y = Math.round(bounds.minY - headH - pad * 0.5);
+    zone.w = Math.round(bounds.w + pad * 2);
+    zone.h = Math.round(bounds.h + headH + pad * 1.5);
+    zone.data.sized = true;
+    renderAll();
+    refreshSelection();
+    scheduleSave();
+    toast('已经把框拉到刚好圈住 ' + members.length + ' 张卡片');
+  }
+
+  // 标题栏高度。样式里 .zone-head 是固定高，这里跟着写一个常量，
+  // 免得为了量一次高度去依赖「此刻恰好渲染过」这种脆弱前提。
+  const ZONE_HEAD_FALLBACK = 34;
+  function zoneHeadHeight() {
+    return ZONE_HEAD_FALLBACK;
+  }
+
+  // 用选中的卡片新建一个区域。没给卡片就新建一块空区域，
+  // 位置以 center（右键点 / 视口中心）为准，左上角对上去。
+  function createZone(cards, center) {
+    const picked = (Array.isArray(cards) ? cards : []).filter((card) => card && !isZone(card));
+    const bounds = picked.length ? boundsOfNodes(picked) : null;
+    const size = defaultSize('zone', null);
+    const pad = 28;
+    const headH = ZONE_HEAD_FALLBACK;
+    const spot = center || {
+      x: (viewportEl.clientWidth / 2 - viewport.x) / viewport.zoom,
+      y: (viewportEl.clientHeight / 2 - viewport.y) / viewport.zoom,
+    };
+    // 有卡片就刚好圈住它们；没有就摆在新区域「左上角落在点击处」的位置
+    const x = bounds ? Math.round(bounds.minX - pad) : Math.round(spot.x);
+    const y = bounds ? Math.round(bounds.minY - headH - pad * 0.5) : Math.round(spot.y);
+    const w = bounds ? Math.round(bounds.w + pad * 2) : size.w;
+    const h = bounds ? Math.round(bounds.h + headH + pad * 1.5) : size.h;
+    const zone = {
+      id: uid('n'),
+      type: 'zone',
+      x: x,
+      y: y,
+      w: w,
+      h: h,
+      data: {
+        text: '',
+        model: '',
+        params: {},
+        sized: true,
+        collapsed: false,
+        color: '',
+      },
+      createdAt: Date.now(),
+    };
+    pushHistory();
+    nodes.push(zone);
+    picked.forEach((card) => assignZone(card, zone));
+    // 区域垫在成员下面，插到最前面（z 最小）
+    const index = nodes.indexOf(zone);
+    if (index >= 0) {
+      nodes.splice(index, 1);
+      nodes.unshift(zone);
+    }
+    refreshZOrder();
+    renderAll();
+    selection.clear();
+    selection.add(zone.id);
+    setExpanded(zone.id);
+    refreshSelection();
+    scheduleSave();
+    toast(
+      picked.length
+        ? '已经把这 ' + picked.length + ' 张卡片圈进新区域。在标题上改个名字、或者点「折叠」把整块收起来'
+        : '新建了一块空区域。把卡片拖进框里就自动归到它下面'
+    );
+    return zone;
+  }
+
+  function zoneNameOf(zone) {
+    return String((zone && nodeData(zone).text) || '').trim() || '未命名区域';
+  }
+
+  // 把选中的卡片从所在区域里摘出来（卡片本身留在画布上）
+  function removeFromZone(cards) {
+    const list = (Array.isArray(cards) ? cards : []).filter((card) => String(nodeData(card).zoneId || ''));
+    if (!list.length) {
+      toast('选中的卡片不在任何区域里');
+      return;
+    }
+    pushHistory();
+    list.forEach((card) => memberDataZoneClear(card));
+    renderAll();
+    refreshSelection();
+    scheduleSave();
+    toast('已把 ' + list.length + ' 张卡片移出区域，卡片还在画布上');
+  }
+
+  // 选中卡片后「加进区域…」：列出画布上现有的区域让用户挑。
+  // 菜单位置由调用方给（右键菜单是二级菜单，得开在原来那个点上）。
+  function openZoneAssignMenu(cards, clientX, clientY) {
+    const zones = nodes.filter((node) => isZone(node));
+    if (!zones.length) {
+      createZone(cards);
+      return;
+    }
+    const items = zones.map((zone) => ({
+      label: zoneNameOf(zone) + '（' + zoneMembersOf(zone).length + ' 张）',
+      run: () => {
+        pushHistory();
+        cards.forEach((card) => assignZone(card, zone));
+        if (nodeData(zone).collapsed) {
+          // 往折叠着的区域里放东西，用户看不见结果，顺手展开
+          nodeData(zone).collapsed = false;
+        }
+        renderAll();
+        refreshSelection();
+        scheduleSave();
+        toast('已把 ' + cards.length + ' 张卡片加进「' + zoneNameOf(zone) + '」');
+      },
+    }));
+    items.push({ sep: true });
+    items.push({ label: '圈成新区域', run: () => createZone(cards) });
+    openMenu(Number(clientX) || 0, Number(clientY) || 0, items);
   }
 
   // 定时组里的卡片正在生成时，在卡片中间盖一层轻量提示。
@@ -9575,6 +10153,7 @@
     });
     nodes.push(...copies);
     remapGroupMembers(copies, map);
+    remapZoneRefs(copies, map);
     renumberAll();
     clipboard.edges.forEach((edge) => {
       if (map.has(edge.sourceId) && map.has(edge.targetId)) {
@@ -9911,7 +10490,14 @@
     }
     hiddenBadgeEl.classList.toggle('hidden', count === 0);
     hiddenBadgeEl.textContent = count ? count + ' 张卡片已隐藏 · 点此勾选恢复' : '';
-    hiddenBadgeEl.title = count ? '点一下打开勾选窗口，只恢复你选中的卡片（Ctrl+Shift+H）' : '';
+    // 手动隐藏之外，还可能有一批卡片是被区域折叠（或「只看某块区域」）挡住的。
+    // 那些不列进勾选窗口 —— 它们不是用户主动藏的，恢复方式是展开区域本身，
+    // 但值得在提示里说一句，免得用户以为卡片丢了。
+    const folded = foldedNodes().length;
+    hiddenBadgeEl.title = count
+      ? '点一下打开勾选窗口，只恢复你选中的卡片（Ctrl+Shift+H）' +
+        (folded ? '；另外还有 ' + folded + ' 张被区域折叠收着，展开区域就能看到' : '')
+      : '';
   }
 
   function deleteSelection() {
@@ -9939,6 +10525,21 @@
     // 组合被删掉时，组里的卡片留在画布上，原来的连线还给每一张卡片
     nodes.forEach((node) => {
       if (node.type === 'group' && ids.has(node.id)) relinkGroupEdges(node);
+    });
+    // 区域被删掉时，里面的卡片留在画布上，只是不再属于任何区域。
+    // 归属存在成员自己的 data.zoneId 上，所以这里必须显式清一遍 ——
+    // 不清的话卡片会留着一个指向「已经不存在的区域」的编号。
+    nodes.forEach((node) => {
+      if (!isZone(node) || !ids.has(node.id)) return;
+      if (soloZoneId === node.id) soloZoneId = '';
+    });
+    nodes.forEach((node) => {
+      if (isZone(node)) return;
+      const host = String(nodeData(node).zoneId || '');
+      if (host && ids.has(host)) {
+        nodeData(node).zoneId = '';
+        touched.add(node.id);
+      }
     });
     // 被删掉的卡片也要从它待过的组合里摘出去
     nodes.forEach((node) => {
@@ -10202,6 +10803,20 @@
           });
           items.push({ label: '重新排版', run: () => relayoutSchedule(node) });
           items.push({ label: '解散定时组（卡片留在画布上）', run: () => dissolveSchedule(node) });
+        } else if (node.type === 'zone') {
+          const zdata = nodeData(node);
+          const zcount = zoneMembersOf(node).length;
+          items.push({ label: '区域设置…', run: () => { selectNode(node.id, false); setExpanded(node.id); } });
+          items.push({
+            label: zdata.collapsed ? '展开这块区域（' + zcount + ' 张）' : '折叠这块区域（' + zcount + ' 张）',
+            run: () => setZoneCollapsed(node, !zdata.collapsed),
+          });
+          items.push({
+            label: soloZoneId === node.id ? '恢复显示全部卡片' : '只看这块区域',
+            run: () => soloZone(node.id),
+          });
+          items.push({ label: '重新框住卡片', run: () => relayoutZone(node) });
+          items.push({ label: '解散区域（卡片留在画布上）', run: () => dissolveZone(node) });
         } else {
           const hostOfNode = memberSchedule.get(node.id) ? byId(memberSchedule.get(node.id).scheduleId) : null;
           if (hostOfNode) {
@@ -10232,6 +10847,21 @@
         key: 'Ctrl+G',
         run: groupSelection,
       });
+      // 区域：选中的卡片可以圈成一块新的，也可以并进已有的某块
+      const zoneHost = zoneOf(cards[0]);
+      const zonesHere = nodes.filter((node) => isZone(node));
+      if (zonesHere.length === 1 && zoneHost && zoneHost.id === zonesHere[0].id &&
+          cards.every((card) => String(nodeData(card).zoneId || '') === zonesHere[0].id)) {
+        items.push({ label: '移出「' + zoneNameOf(zonesHere[0]) + '」', run: () => removeFromZone(cards) });
+      } else if (zonesHere.length) {
+        items.push({
+          label: '加进区域…（' + zonesHere.length + ' 块可选）',
+          run: () => openZoneAssignMenu(cards, clientX, clientY),
+        });
+        items.push({ label: '圈成新区域', run: () => createZone(cards) });
+      } else {
+        items.push({ label: '圈成新区域', run: () => createZone(cards) });
+      }
       // 框选里只要有视频卡片，就给一条创建定时组的入口；其他类型创建时自动剔除
       if (cards.some((card) => SCHEDULE_TYPES[card.type])) {
         const ready = scheduleCandidates(cards).length;
@@ -10287,6 +10917,11 @@
     }));
     items.push({ label: '上传', run: () => pickLocalFiles(center) });
     items.push({ label: '导出', key: 'Ctrl+Shift+E', run: () => exportSelectedAssets() });
+    items.push({ sep: true });
+    items.push({ label: '新建区域', run: () => createZone([], center) });
+    if (soloZoneId) {
+      items.push({ label: '恢复显示全部卡片（现在只看一块区域）', run: () => soloZone(soloZoneId) });
+    }
     items.push({ sep: true });
     items.push({ label: '3D 导演台…', run: () => openDirectorStage(null, center) });
     items.push({ sep: true });
@@ -10366,6 +11001,11 @@
       moving.slice().forEach((item) => {
         if (!isSchedule(item)) return;
         scheduleMembersOf(item).forEach(pushMoving);
+      });
+      // 区域同理：挪框就是把这块内容整体搬家，里面的卡片跟着走
+      moving.slice().forEach((item) => {
+        if (!isZone(item)) return;
+        zoneMembersOf(item).forEach(pushMoving);
       });
     }
     const origin = moving.map((item) => ({ node: item, x: item.x, y: item.y }));
@@ -10479,6 +11119,9 @@
         snapMemberBack(node, memberHost);
         return;
       }
+      // 卡片落下后按中心点重判归属：拖进框里就归这块区域，拖出去就摘掉。
+      // 拖区域本身时不重判 —— 框在动，成员跟着框一起走，归属不该变。
+      if (!isZone(node)) rezoneAfterMove(moving.map((item) => item.node));
       scheduleSave();
     };
 
@@ -10491,6 +11134,92 @@
       /* 捕获失败也不影响拖动 */
     }
   }
+
+  // 区域的自由缩放：框的大小由用户划，不吸附到卡片的固定档位。
+  // 拖动过程只改宽高和连线，松手时统一重判一次归属 —— 框变大可能正好把
+  // 旁边的卡片圈进来，框变小则可能松手。
+  function startZoneResize(event, node) {
+    const el = elements.get(node.id);
+    if (!el) return;
+    // 收起来的区域只剩一条标题，这时候拉它没有意义：先展开再调
+    if (nodeData(node).collapsed) {
+      toast('这块区域现在是收起来的，先点「展开」再调框的大小');
+      return;
+    }
+    const pointerId = typeof event.pointerId === 'number' ? event.pointerId : null;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originW = Math.round(node.w || presetOf('zone').w);
+    const originH = Math.round(node.h || presetOf('zone').h);
+    let started = false;
+    let frame = 0;
+    let nextW = originW;
+    let nextH = originH;
+    beginTransaction();
+
+    const paint = () => {
+      frame = 0;
+      el.style.width = nextW + 'px';
+      el.style.height = nextH + 'px';
+      updateEdgePaths([node]);
+      placeAlignBar();
+    };
+
+    const onMove = (moveEvent) => {
+      const dx = (moveEvent.clientX - startX) / viewport.zoom;
+      const dy = (moveEvent.clientY - startY) / viewport.zoom;
+      if (!started && Math.abs(dx) + Math.abs(dy) > 3) {
+        started = true;
+        pushHistory();
+      }
+      if (!started) return;
+      nextW = Math.max(ZONE_MIN_W, Math.round(originW + dx));
+      nextH = Math.max(ZONE_MIN_H, Math.round(originH + dy));
+      node.w = nextW;
+      node.h = nextH;
+      if (!frame) frame = window.requestAnimationFrame(paint);
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      if (frame) {
+        window.cancelAnimationFrame(frame);
+        frame = 0;
+        paint();
+      }
+      if (!started) {
+        dropTransaction();
+        return;
+      }
+      el.style.width = nextW + 'px';
+      el.style.height = nextH + 'px';
+      nodeData(node).sized = true;
+      if (pointerId !== null && el.releasePointerCapture) {
+        try {
+          el.releasePointerCapture(pointerId);
+        } catch {
+          /* 没捕获成功也不用管 */
+        }
+      }
+      renderAll();
+      refreshSelection();
+      scheduleSave();
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    try {
+      el.setPointerCapture(event.pointerId);
+    } catch {
+      /* 捕获失败也不影响拖动 */
+    }
+  }
+
+  const ZONE_MIN_W = 220;
+  const ZONE_MIN_H = 140;
 
   function startResize(event, node, el) {
     if (event.button !== 0) return;
@@ -10507,6 +11236,11 @@
     }
     if (memberSchedule.get(node.id)) {
       toast('定时组里的卡片大小统一，移出组后才能单独调');
+      return;
+    }
+    // 区域是自由框：不走卡片的固定档位，按手直接拉到哪儿算哪儿
+    if (isZone(node)) {
+      startZoneResize(event, node);
       return;
     }
     const handle = event.currentTarget;
@@ -11973,7 +12707,7 @@
   const MM_H = 132;
   const MM_PAD = 9;
   const MM_KEY = 'canvas-minimap';
-const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: '#4a6da8', quick: '#1f7a8c', schedule: '#f08a24' };
+const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: '#4a6da8', quick: '#1f7a8c', schedule: '#f08a24', zone: '#5b6b86' };
 
   let mmEl = null;
   let mmCanvas = null;
@@ -14239,6 +14973,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     { key: 'quick', label: '快速视频' },
     { key: 'audio', label: '音频' },
     { key: 'group', label: '组合' },
+    { key: 'zone', label: '区域' },
   ];
   const FILTER_STATES = [
     { key: 'running', label: '生成中' },

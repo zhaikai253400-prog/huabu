@@ -211,6 +211,9 @@ vm.runInContext(
     'function nodeData(node) { return node.data; }',
     'function isLocked(node) { return Boolean(node.data && node.data.locked); }',
     'function isHidden(node) { return Boolean(node.data && node.data.hidden); }',
+    // refreshNodeParts 里会把「收起来的区域」这个类跟着一起切（F1）。
+    // 这里给个与生产语义一致的替身：type 为 zone 才算区域。
+    'function isZone(node) { return Boolean(node && node.type === "zone"); }',
     'function isTaskActive(data) { return Boolean(data && (data.running || data.preparing)); }',
     'function elements_get(id) { return globalThis.__elements.get(id); }',
     'function elements_set(id, v) { globalThis.__elements.set(id, v); }',

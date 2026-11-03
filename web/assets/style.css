@@ -65,6 +65,13 @@
   --title-tag-bg: rgba(255, 255, 255, 0.95);
   --title-tag-text: #1f2430;
   --title-tag-accent: #2f6fed;
+  /* 区域框：半透明底 + 虚线边，卡片摆在里面还看得清；折叠后缩成一条标题 */
+  --zone-line: #9aa8c0;
+  --zone-bg: rgba(255, 255, 255, 0.46);
+  --zone-head-bg: rgba(255, 255, 255, 0.78);
+  --zone-head-line: #d3dae6;
+  --zone-text: #3d4a61;
+  --zone-hint-bg: rgba(255, 255, 255, 0.72);
 }
 
 /* 深色主题：只换上面那批变量，界面各处自动跟着变 */
@@ -129,6 +136,12 @@
   --title-tag-bg: rgba(246, 248, 252, 0.93);
   --title-tag-text: #171b23;
   --title-tag-accent: #1b57d6;
+  --zone-line: #48546b;
+  --zone-bg: rgba(38, 44, 53, 0.42);
+  --zone-head-bg: rgba(38, 44, 53, 0.82);
+  --zone-head-line: #39414e;
+  --zone-text: #c3cddd;
+  --zone-hint-bg: rgba(38, 44, 53, 0.72);
 }
 
 * { box-sizing: border-box; }
@@ -4051,6 +4064,190 @@ input::placeholder { color: var(--placeholder); }
   0%, 100% { box-shadow: 0 0 0 0 rgba(255, 211, 107, 0.9); }
   50% { box-shadow: 0 0 0 6px rgba(255, 211, 107, 0); }
 }
+
+/* ---------- 区域：把一组卡片圈在一块，整块收起来只是「不画」，任务照常跑 ---------- */
+
+/* 框体：浅淡的底 + 虚线边，压在最下面，卡片摆在上面还看得清 */
+.node[data-type="zone"] {
+  border: 1.5px dashed var(--zone-line);
+  border-radius: 13px;
+  background: var(--zone-bg);
+  box-shadow: none;
+}
+
+/* 区域不参与「蓝框流光」那套高亮：它是底板，不是卡片 */
+.node[data-type="zone"]::after { display: none; }
+.node[data-type="zone"]:hover,
+.node[data-type="zone"].selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.node[data-type="zone"].selected { border-style: solid; }
+
+/* 区域没有端口，也没有锁定态提示 —— 它只是个框 */
+.node[data-type="zone"] .port { display: none; }
+.node[data-type="zone"] .node-title-tag { display: none; }
+
+/* 区域的内层要能透出底下的画布：别用 .node-media 那层不透明底 */
+.node[data-type="zone"] .node-media {
+  background: transparent;
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow: visible;
+}
+
+.zone-body {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* 标题栏：折叠箭头 + 区域名 + 张数，固定高 34（canvas.js 里的 ZONE_HEAD_FALLBACK 要对上） */
+.zone-head {
+  flex: 0 0 auto;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--zone-head-line);
+  background: var(--zone-head-bg);
+  border-radius: 11px 11px 0 0;
+  color: var(--zone-text);
+}
+
+.node[data-type="zone"].selected .zone-head { border-bottom-color: var(--accent); }
+
+.zone-fold {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78em;
+  line-height: 1;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--zone-text);
+  cursor: pointer;
+}
+
+.zone-fold:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.zone-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.86em;
+  font-weight: 600;
+  color: var(--zone-text);
+  cursor: grab;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zone-title:active { cursor: grabbing; }
+
+.zone-count {
+  flex: 0 0 auto;
+  font-size: 0.7em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--zone-head-line);
+  background: var(--zone-hint-bg);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 折叠后：框只剩一条标题 + 一行说明 */
+.zone-folded-note {
+  flex: 0 0 auto;
+  padding: 5px 10px 7px;
+  font-size: 0.72em;
+  line-height: 1.5;
+  color: var(--muted);
+  background: var(--zone-hint-bg);
+  border-radius: 0 0 11px 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 收起来的区域里还有活没干完：这句话要能一眼看到，别让人以为停了 */
+.zone-folded-note.hot {
+  color: var(--tint-warn-text);
+  background: var(--tint-warn-bg);
+  font-weight: 600;
+}
+
+.node[data-type="zone"].is-collapsed .zone-head { border-radius: 11px 11px 0 0; }
+
+/* 收起来的区域不给拉伸手柄：拉一条标题没有意义 */
+.node[data-type="zone"].is-collapsed .resize-handle { display: none; }
+
+/* ---------- 区域设置面板 ---------- */
+.zone-panel { display: flex; flex-direction: column; gap: 8px; }
+
+.zone-member-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.zone-member-empty {
+  font-size: 0.78em;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.zone-member-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 0.78em;
+}
+
+.zone-member-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zone-member-hot {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.9em;
+  line-height: 1.5;
+  color: var(--tint-warn-text);
+  background: var(--tint-warn-bg);
+  border: 1px solid var(--tint-warn-line);
+}
+
+.zone-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.zone-hint { font-size: 0.78em; color: var(--muted); line-height: 1.6; }
 
 /* ---------- 恢复隐藏卡片：勾选窗口 ---------- */
 .hidden-restore-mask { z-index: 340; }
