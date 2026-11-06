@@ -120,7 +120,8 @@
     mask.querySelector('#log-export').addEventListener('click', () => {
       const day = select.value;
       if (!day) return;
-      window.location.href = '/api/log/download?day=' + encodeURIComponent(day);
+      // 直接跳转带不了请求头，钥匙只能拼在查询串上（服务端只对 GET 接受这种形式）
+      window.location.href = window.api.logDownloadUrl(day);
     });
     autoBtn.addEventListener('click', () => {
       if (timer) {

@@ -12,6 +12,9 @@
   const importInput = document.getElementById('import-file');
   const toolsHint = document.getElementById('tools-hint');
   const alertEl = document.getElementById('alert-bar');
+  // 局域网访客打开页面时服务端注入的是空钥匙（见 serveHtmlWithTokens）：
+  // 他们能用共享画布，但不能开关共享 —— 那是主机的权力。
+  const isGuest = !window.__uiToken;
 
   // 统一的转义，凡是把服务端文本塞进 innerHTML 的地方都过一遍
   function escapeHtml(text) {
@@ -249,6 +252,21 @@
     }
   }
 
+  // 共享地址：/api/status 里已经算好了本机网卡地址和实际端口，
+  // 这里只负责拼成一条能直接发给别人的 URL。
+  async function shareUrlOf(id) {
+    try {
+      const status = await window.api.status();
+      const lan = (status && status.lan) || {};
+      if (!lan.enabled) return '';
+      const ip = (lan.addresses || [])[0];
+      if (!ip) return '';
+      return 'http://' + ip + ':' + lan.port + '/canvas?id=' + encodeURIComponent(id);
+    } catch {
+      return '';
+    }
+  }
+
   function openCanvas(id) {
     window.location.href = '/canvas?id=' + encodeURIComponent(id);
   }
@@ -268,15 +286,53 @@
         const thumb = document.createElement('div');
         thumb.className = 'canvas-thumb';
         thumb.textContent = canvas.nodeCount ? '卡片 ' + canvas.nodeCount + ' 个' : '空白画布';
+        if (canvas.shared) {
+          const badge = document.createElement('span');
+          badge.className = 'canvas-share-badge';
+          badge.textContent = '共享中';
+          badge.title = '这块画布正对同一局域网开放，最多 3 人一起编辑';
+          thumb.appendChild(badge);
+        }
 
         const meta = document.createElement('div');
         meta.className = 'canvas-meta';
         const name = document.createElement('div');
         name.className = 'canvas-name';
         name.textContent = canvas.name;
+        if (canvas.shared) {
+          const tag = document.createElement('span');
+          tag.className = 'canvas-share-badge';
+          tag.textContent = '共享中';
+          name.appendChild(tag);
+        }
         const sub = document.createElement('div');
         sub.className = 'canvas-sub';
         sub.textContent = '最后修改：' + whenText(canvas.updatedAt);
+
+        // 画布 ID：另一台电脑直接打开 /canvas?id=xxx 就能进同一块画布，
+        // 不用在列表里翻。点一下复制完整值。
+        const idRow = document.createElement('div');
+        idRow.className = 'canvas-id-row';
+        const idTag = document.createElement('span');
+        idTag.className = 'canvas-id-tag';
+        idTag.textContent = canvas.id;
+        idTag.title = '画布 ID（点一下复制）';
+        const idCopy = document.createElement('button');
+        idCopy.type = 'button';
+        idCopy.className = 'canvas-id-copy';
+        idCopy.textContent = '复制 ID';
+        const copyId = async (event) => {
+          if (event) event.stopPropagation();
+          const ok = await copyText(canvas.id);
+          idCopy.textContent = ok ? '已复制' : '复制失败';
+          setTimeout(() => {
+            idCopy.textContent = '复制 ID';
+          }, 1400);
+        };
+        idTag.addEventListener('click', copyId);
+        idCopy.addEventListener('click', copyId);
+        idRow.appendChild(idTag);
+        idRow.appendChild(idCopy);
 
         const actions = document.createElement('div');
         actions.className = 'canvas-actions';
@@ -316,6 +372,32 @@
             }
           })
         );
+        if (!isGuest) {
+          actions.appendChild(
+            makeButton(canvas.shared ? '关闭共享' : '共享', '', async () => {
+              try {
+                await window.api.shareToggle(canvas.id, !canvas.shared);
+                if (!canvas.shared) {
+                  // 刚开共享：把局域网地址直接摆出来，省得用户自己拼
+                  const address = await shareUrlOf(canvas.id);
+                  if (address) {
+                    const ok = await copyText(address);
+                    window.alert(
+                      '已开启共享（最多 3 人同时编辑）。\n\n把下面这个地址发给同一局域网的人：\n' +
+                        address +
+                        (ok ? '\n\n（已复制到剪贴板）' : '')
+                    );
+                  } else {
+                    window.alert('已开启共享（最多 3 人同时编辑）。\n\n先在「显示与设置」里打开局域网访问，才能把地址给别的电脑。');
+                  }
+                }
+                refresh();
+              } catch (error) {
+                window.alert((canvas.shared ? '关闭共享' : '开启共享') + '失败：' + error.message);
+              }
+            })
+          );
+        }
         actions.appendChild(makeButton('历史版本', '', () => openBackups(canvas)));
         actions.appendChild(
           makeButton('删除', 'danger', async () => {
@@ -327,6 +409,7 @@
 
         meta.appendChild(name);
         meta.appendChild(sub);
+        meta.appendChild(idRow);
         meta.appendChild(actions);
         card.appendChild(thumb);
         card.appendChild(meta);

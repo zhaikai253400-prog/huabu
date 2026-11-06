@@ -42,27 +42,33 @@
 
   const PRESETS = {
     image: {
+      // 新卡片默认盒子：横屏 360×210（其它比例由 defaultBoxSize 自适应）
       w: 360,
-      h: 203,
+      h: 210,
       label: '图片',
       media: 'image',
-      empty: '生成结果会显示在这里',
+      empty: '未生成',
+      emptyHint: '生成结果会显示在这里',
       placeholder: '描述想要的画面，例如：黄昏的海边，一只橙色小猫坐在礁石上…',
     },
     video: {
-      w: 480,
-      h: 270,
+      // 横屏铺满 360×210；选 9:16 时是 210×360
+      w: 360,
+      h: 210,
       label: '视频',
       media: 'video',
-      empty: '生成好的视频会显示在这里',
+      empty: '未生成',
+      emptyHint: '生成好的视频会显示在这里',
       placeholder: '描述镜头和动作，例如：镜头缓慢推近，小猫抬头望向远方…',
     },
     audio: {
-      w: 320,
-      h: 96,
+      // 音频是条矮的：210×100，一排看下来最省地方
+      w: 210,
+      h: 100,
       label: '音频',
       media: 'audio',
-      empty: '生成好的音频会显示在这里',
+      empty: '未生成',
+      emptyHint: '生成好的音频会显示在这里',
       placeholder: '描述想生成的声音，例如：雨打屋檐的声音，远处有雷声…',
     },
     group: {
@@ -70,16 +76,18 @@
       h: 184,
       label: '组合',
       media: 'image',
-      empty: '把卡片加进来：选中几张卡片，右键选「添加组」',
+      empty: '空组合',
+      emptyHint: '把卡片加进来：选中几张卡片，右键选「添加组」',
       placeholder: '给这组素材起个名字（可选），例如：开头三镜',
     },
     // 快速视频：不用连线，提示词里 @ 谁就用谁
     quick: {
-      w: 480,
-      h: 270,
+      w: 360,
+      h: 210,
       label: '快速视频',
       media: 'video',
-      empty: '生成好的视频会显示在这里',
+      empty: '未生成',
+      emptyHint: '生成好的视频会显示在这里',
       placeholder: '写提示词，敲 @ 直接挑画布上的素材，不用先连线',
     },
     // 定时生成组：管着几张视频卡片，到点由本地后台自动生成
@@ -88,7 +96,8 @@
       h: 260,
       label: '定时生成组',
       media: 'image',
-      empty: '选中两张以上视频卡片，右键「创建定时生成组」',
+      empty: '空组',
+      emptyHint: '选中两张以上视频卡片，右键「创建定时生成组」',
       placeholder: '给这个定时组起个名字（可选）',
     },
     // 3D 导演台：一张卡代表一个三维场景，双击进去摆位、记机位、出图
@@ -97,7 +106,8 @@
       h: 300,
       label: '3D 导演台',
       media: 'image',
-      empty: '双击打开导演台，摆好机位再出图',
+      empty: '双击打开',
+      emptyHint: '双击打开导演台，摆好机位再出图',
       placeholder: '',
     },
     // 区域：一块带标题的框，把一组卡片圈在一起，可以整块折叠起来
@@ -106,7 +116,8 @@
       h: 420,
       label: '区域',
       media: 'image',
-      empty: '选中几张卡片，右键「加进新区域」；或者直接把卡片拖进这个框里',
+      empty: '空区域',
+      emptyHint: '选中几张卡片，右键「加进新区域」；或者直接把卡片拖进这个框里',
       placeholder: '给这块区域起个名字（可选），例如：第一幕 · 分镜',
     },
   };
@@ -425,6 +436,8 @@
     }
     // sized=true 表示用户手动拉过卡片大小，之后就不再自动按图片比例贴合
     if (data.sized !== true) data.sized = false;
+    // boxed=true 表示这张卡片按「新建默认盒子」摆着：生成结果不按原图比例把它拉高
+    if (data.boxed !== true) data.boxed = false;
     if (data.locked !== true) data.locked = false;
     if (data.hidden !== true) data.hidden = false;
     // 老数据没有版本号：在这里补上，下次保存就跟着写进库，不用额外一趟迁移。
@@ -501,17 +514,106 @@
     if (state) state.textContent = taskStateText(data);
   }
 
-  // 标题 / 编号：这两块是独立的直接子元素，各自原地换
+  // 标题 / 编号：两块同住在卡片外上方的一条横条里，整条原地换
   function replaceTitlePart(el, node, data) {
-    const oldTag = directChildOf(el, 'node-title-tag');
-    const nextTag = buildTitleTag(node, data);
-    if (oldTag) oldTag.replaceWith(nextTag);
-    else el.appendChild(nextTag);
-    const oldBadge = directChildOf(el, 'node-index');
-    const nextBadge = buildIndexBadge(node);
-    if (oldBadge && nextBadge) oldBadge.replaceWith(nextBadge);
-    else if (oldBadge) oldBadge.remove();
-    else if (nextBadge) el.appendChild(nextBadge);
+    const old = directChildOf(el, 'node-headstrip');
+    const next = buildTitleStrip(node, data);
+    if (old) old.replaceWith(next);
+    else el.appendChild(next);
+  }
+
+  // 重绘前记下提示词框滚到哪儿了：px 和可滚范围都留着，重绘后原样贴回去。
+  // 只记比例不够——框高没变时按像素最准（长提示词不会上下飘）。
+  function promptScrollSnapshot(host) {
+    const box = host ? host.querySelector('.node-prompt') : null;
+    if (!box) return null;
+    const max = Math.max(0, box.scrollHeight - box.clientHeight);
+    if (!max && !box.scrollTop) return null;
+    return { top: box.scrollTop, max: max };
+  }
+
+  function restorePromptScrollSnapshot(host, snap) {
+    if (!host || !snap || !snap.top) return;
+    const apply = () => {
+      const box = host.querySelector('.node-prompt');
+      if (!box) return;
+      const max = Math.max(0, box.scrollHeight - box.clientHeight);
+      if (max <= 0) return;
+      // 框高基本没变就按像素还原；变高变矮了再按比例，避免还原到框外
+      const top = snap.max > 0 && Math.abs(max - snap.max) <= 8 ? snap.top : (snap.top / snap.max) * max;
+      box.scrollTop = Math.max(0, Math.min(top, max));
+    };
+    apply();
+    mutePromptCaretFollow(host.querySelector('.node-prompt'));
+    // 下一帧再来一次：字体 / 布局结算完，scrollHeight 才准；
+    // 再下一帧收尾：重建后焦点落回输入框会触发「光标跟随」，
+    // 那一下可能把框滚到光标处，得在它之后再压一次，用户看到的位置才不动
+    window.requestAnimationFrame(() => {
+      apply();
+      window.requestAnimationFrame(apply);
+    });
+  }
+
+  // 光标在提示词里的字符偏移：重建后要放回原处，而不是一律甩到末尾
+  function promptCaretOffset(box) {
+    const sel = window.getSelection();
+    if (!box || !sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    if (!box.contains(range.startContainer)) return null;
+    const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, null);
+    let total = 0;
+    let found = 0;
+    let hit = false;
+    let node = walker.nextNode();
+    while (node) {
+      if (node === range.startContainer) {
+        found = total + range.startOffset;
+        hit = true;
+        break;
+      }
+      total += (node.nodeValue || '').length;
+      node = walker.nextNode();
+    }
+    if (!hit) return null;
+    return found;
+  }
+
+  function setPromptCaretOffset(box, offset) {
+    if (!box || offset == null) return false;
+    const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, null);
+    let total = 0;
+    let node = walker.nextNode();
+    const range = document.createRange();
+    while (node) {
+      const len = (node.nodeValue || '').length;
+      if (offset <= total + len) {
+        range.setStart(node, Math.max(0, offset - total));
+        range.collapse(true);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        return true;
+      }
+      total += len;
+      node = walker.nextNode();
+    }
+    return false;
+  }
+
+  // 卡片被别的原因重建时（比如刚连进来一张素材），用户手上还没失焦的输入
+  // 必须先从 DOM 读回来存进数据，否则新卡片会按旧文本重画，刚写的长提示词就没了。
+  // 这里只落数据、不重绘，避免和 refreshNode 互相递归。
+  function commitLivePrompt(node, box) {
+    if (!node || !box) return false;
+    const data = nodeData(node);
+    const raw = promptTextOf(box);
+    const next = normalizeMentions(node, raw);
+    if (next === data.text) return false;
+    pushHistory();
+    data.text = next;
+    syncQuickRefs(node);
+    scheduleSave();
+    return true;
   }
 
   // 面板：下面的控制面板整体换（模型下拉、参数芯片、提示词、生成按钮都在里面）。
@@ -520,8 +622,12 @@
     if (el.contains(document.activeElement)) return;
     const old = directChildOf(el, 'node-panel');
     if (!old) return;
+    // 面板是新搭的，提示词框也是新的：滚到哪儿得自己传过去，
+    // 不然刚往下看完的长提示词会一下子跳回开头
+    const snap = promptScrollSnapshot(el);
     old.replaceWith(buildPanel(node, data, preset, el));
     placePanel();
+    restorePromptScrollSnapshot(el, snap);
   }
 
   // 只要「部分区块」的话，走这条路：保留卡片本体与未列出的区块
@@ -544,6 +650,9 @@
     if (parts.indexOf('title') >= 0) replaceTitlePart(el, node, data);
     if (parts.indexOf('panel') >= 0) replacePanelPart(el, node, data, preset);
     if (parts.indexOf('hover') >= 0) refreshHoverBar(node);
+    // 按钮只管文字和禁用态，重建代价极低；状态类刷新都带上它，
+    // 免得再出现「任务已经失败，按钮还写着取消生成」这种不同步
+    paintRunButton(node, el, data);
 
     paintFilter();
     refreshSelection();
@@ -562,6 +671,17 @@
     if (!el) return;
     // 正在提示词里打字时重建卡片，光标要放回原处
     const keepFocus = el.contains(document.activeElement);
+    // 正在打的字还没失焦提交：先落回数据，免得重建后按旧文本重画。
+    // 但如果是「刚收到别人的改动」，DOM 里的字就是过期的，不能回写。
+    if (keepFocus && !applyingRemote) commitLivePrompt(node, el.querySelector('.node-prompt'));
+    if (applyingRemote) {
+      // 旧卡片马上被换掉，它的 blur 不能再把过期文本提交一遍
+      el.dataset.remoteStale = '1';
+    }
+    // 整张卡片重建时提示词框也是新的，滚到哪儿先记下来
+    const scrollSnap = promptScrollSnapshot(el);
+    // 光标停在第几个字也要记：重建后放回原处，用户接着打不会跳
+    const caretAt = keepFocus ? promptCaretOffset(el.querySelector('.node-prompt')) : null;
     const next = buildNode(node);
     el.replaceWith(next);
     elements.set(node.id, next);
@@ -569,14 +689,19 @@
       const box = next.querySelector('.node-prompt');
       if (box) {
         box.focus({ preventScroll: true });
-        const range = document.createRange();
-        range.selectNodeContents(box);
-        range.collapse(false);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
+        // 能对上偏移就放回原来那个字；对不上（内容刚被规范化过）才退回末尾
+        if (!setPromptCaretOffset(box, caretAt)) {
+          const range = document.createRange();
+          range.selectNodeContents(box);
+          range.collapse(false);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
       }
     }
+    // 光标归位后再把滚动位置贴回去：选区和 focus 都可能把框滚走
+    restorePromptScrollSnapshot(next, scrollSnap);
     if (keepMention) {
       // 卡片内框重建过 → 挂到新的框上；大窗口的框没动 → 原地续上
       const wasStale = mentionStale;
@@ -598,9 +723,11 @@
     if (el.contains(document.activeElement)) return;
     const old = el.querySelector('.node-panel');
     if (!old) return;
+    const snap = promptScrollSnapshot(el);
     const next = buildPanel(node, nodeData(node), presetOf(node.type), el);
     old.replaceWith(next);
     placePanel();
+    restorePromptScrollSnapshot(el, snap);
   }
 
   // 定时组里的成员变了：只更新卡片上的橙色序号和组内样式，不重建卡片
@@ -625,6 +752,12 @@
 
   const MIN_W = 140;
   const MIN_H = 80;
+  // 音频是矮条：新建 210×100，手动拉伸时也别被图片那套 MIN_H 一下顶高
+  const MIN_H_AUDIO = 100;
+
+  function minHeightOf(type) {
+    return type === 'audio' ? MIN_H_AUDIO : MIN_H;
+  }
   // MIN_ZOOM / MAX_ZOOM 跟着坐标映射一起搬到了 viewport.js（清单 38 第 7 步），
   // 定义在下面 toWorld 之前，因为那三处算 zoom 的地方都要用。
   const GRID = 8;
@@ -639,12 +772,20 @@
   const worldEl = document.getElementById('world');
   const gridLayerEl = document.getElementById('grid-layer');
 
-  // 画布是无限平面，可视区本身永远不该被滚动：焦点落到贴边内容时也保持原位
-  function keepViewportAnchored() {
+  // 画布是无限平面，可视区本身不该被滚动：焦点落到贴边内容时也保持原位。
+  //
+  // 注意读 scrollTop 会强制浏览器先把排队的样式 / 布局算完。以前每次建卡后都要读一次
+  // 做「兜底归位」，300 张卡时这一处就吃掉 80ms（CPU Profile 实测）。
+  //
+  // 但其实不必兜底：.viewport 是 overflow: clip，按规范 clip 的元素**不是滚动容器**，
+  // scrollTop 恒为 0，焦点 / scrollIntoView 都带不动它（运行时探针核过：
+  // scrollHeight 5343 > clientHeight 488，scrollTop 仍然是 0）。
+  // 所以只在真正收到 scroll 事件时归位即可 —— 那说明样式被改回了可滚动的
+  // overflow: hidden，这时布局本来就是最新的，同步写回不会额外付代价。
+  viewportEl.addEventListener('scroll', () => {
     if (viewportEl.scrollTop !== 0) viewportEl.scrollTop = 0;
     if (viewportEl.scrollLeft !== 0) viewportEl.scrollLeft = 0;
-  }
-  viewportEl.addEventListener('scroll', keepViewportAnchored, { passive: true });
+  }, { passive: true });
 
   // 可视区位置缓存：拖动 / 缩放时每帧都去量一次会强制浏览器同步布局，
   // 这里只在一轮手势开始时量一次，手势期间一直复用
@@ -655,6 +796,16 @@
   }
   function invalidateViewportBox() {
     viewportBoxCache = null;
+  }
+  // 建卡前先把视口量好：这时候页面上还没有几百张卡片，一次布局很便宜。
+  // 之后 renderNodes 不再让它失效，小地图第一次读到的就是这份缓存。
+  function primeViewportBox() {
+    viewportBoxCache = viewportEl.getBoundingClientRect();
+  }
+  // 同理：主题色也只在这时候读一次。建完 300 张卡再 getComputedStyle，
+  // 等于把整篇样式重算一遍（Profile 实测 78ms）。这里页面上还没卡片，几乎免费。
+  function primeThemeAccent() {
+    if (window.__primeMinimapAccent) window.__primeMinimapAccent();
   }
   window.addEventListener('resize', invalidateViewportBox);
   window.addEventListener('scroll', invalidateViewportBox, true);
@@ -970,19 +1121,52 @@
     toastSchedule(stay);
   }
 
+  // 网格层四周多铺的宽度（px），必须和 style.css 里 .grid-layer 的 inset 保持一致
+  const GRID_BLEED = 168;
+
+  // 正数取模：网格位移只保留一个周期内的余数，数值不会越拖越大
+  function mod(v, m) {
+    if (!m) return 0;
+    const r = v % m;
+    return r < 0 ? r + m : r;
+  }
+
   // 只改真正变了的东西：平移时不重设点阵大小，缩放时百分比文字不重复写
   let lastGridSize = 0;
+  let lastGridPos = '';
   let lastZoomText = '';
+  let lastWorldTransform = '';
 
   function applyViewport() {
-    worldEl.style.transform =
+    const worldTransform =
       'translate3d(' + viewport.x + 'px,' + viewport.y + 'px,0) scale(' + viewport.zoom + ')';
+    // 拖动 / 平移时这里每帧都会跑；值没变就别写 —— 写 style 会让浏览器把这层
+    // 重新标脏再合成一次，即使最终画面一模一样。
+    if (worldTransform !== lastWorldTransform) {
+      lastWorldTransform = worldTransform;
+      worldEl.style.transform = worldTransform;
+    }
     const size = Math.max(8, 24 * viewport.zoom);
     if (gridLayerEl && size !== lastGridSize) {
       lastGridSize = size;
       gridLayerEl.style.backgroundSize = size + 'px ' + size + 'px';
+      // 网格层往外多铺了 GRID_BLEED，图案原点也跟着挪，否则网格线会跟世界坐标错开一个常量，
+      // 缩放时看着像「网格自己跳了一下」。取模保证相位始终对齐世界原点。
+      const phase = mod(GRID_BLEED, size).toFixed(2) + 'px';
+      gridLayerEl.style.backgroundPosition = phase + ' ' + phase;
     }
-    if (gridLayerEl) gridLayerEl.style.backgroundPosition = viewport.x + 'px ' + viewport.y + 'px';
+    // 网格用 transform 位移，而不是改 background-position：
+    // 后者每帧都会让浏览器把整块网格重绘一遍（实测平移帧 p95 从 17ms 涨到 28ms），
+    // 前者只是合成层的位移，交给 GPU，几乎不花时间。
+    if (gridLayerEl) {
+      const gx = mod(viewport.x, size);
+      const gy = mod(viewport.y, size);
+      const pos = gx.toFixed(2) + 'px ' + gy.toFixed(2) + 'px';
+      if (pos !== lastGridPos) {
+        lastGridPos = pos;
+        gridLayerEl.style.transform = 'translate3d(' + pos + ',0)';
+      }
+    }
     const zoomText = Math.round(viewport.zoom * 100) + '%';
     if (zoomText !== lastZoomText) {
       lastZoomText = zoomText;
@@ -1327,7 +1511,7 @@
     const note = document.createElement('div');
     note.className = 'save-panel-note';
     note.textContent =
-      '你打开这个页面之后，另一个窗口保存过同一块画布（服务端已到第 ' +
+      '你打开这个页面之后，另一个窗口（也可能是另一台电脑）保存过同一块画布（服务端已到第 ' +
       Number(info.rev || 0) +
       ' 版，你手上是第 ' +
       canvasRev +
@@ -1443,6 +1627,67 @@
     }
   }
 
+  // ---------- 画布 ID ----------
+  // 画布顶部不显示 ID：那串字每次开画布都在眼前晃，既占地方也没人会去读，属于常驻的干扰。
+  // 但「另一台电脑要用 ID 直接打开这块画布」这个需求还在，
+  // 所以收进空白处右键菜单：不占屏，需要时点一下就复制到剪贴板。
+  // 门户页的画布卡片上仍会显示 ID，在那里选画布时看得到。
+  //
+  // 「检查画布更新」也不在这里：它一年用不了几次，入口在托盘右键菜单。
+
+  // 复制文本。navigator.clipboard 只在安全上下文里有，局域网 http 访问时拿不到，
+  // 所以必须有 execCommand 兜底 —— 否则用户在另一台电脑上点复制只会失败。
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      /* 落到下面的兜底 */
+    }
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.top = '-1000px';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      return Boolean(ok);
+    } catch {
+      return false;
+    }
+  }
+
+  function rememberSeenRev(id, rev) {
+    try {
+      if (window.CanvasUpdate && window.CanvasUpdate.rememberSeen) {
+        window.CanvasUpdate.rememberSeen(id, rev);
+      }
+    } catch {
+      /* 记录失败不影响画布 */
+    }
+  }
+
+  // 复制完整画布 ID：从空白处右键菜单调用。
+  // 另一台电脑拿这串 ID 打开 /canvas?id=xxx 就能进同一块画布。
+  async function copyCanvasId() {
+    if (!canvasId) {
+      toast('还没进入画布，暂时没有 ID 可复制');
+      return;
+    }
+    const ok = await copyText(canvasId);
+    if (ok) {
+      toast('已复制画布 ID：' + canvasId + '（另一台电脑打开 /canvas?id=' + canvasId + ' 即可）');
+    } else {
+      toast('复制失败，请手动选中 ID：' + canvasId);
+    }
+  }
+
   // 只有「保存失败」时圆点才可点，平时点它没有任何意义
   saveEl.addEventListener('click', () => {
     // 保存失败、或有冲突待处理时都能点开：冲突的面板被误关了，得有个地方再打开
@@ -1458,7 +1703,8 @@
     closeSavePanel();
   }, true);
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && savePanel) closeSavePanel();
+    if (event.key !== 'Escape') return;
+    if (savePanel) closeSavePanel();
   });
 
   // 工具栏图标的说明文字：按钮的 title 会随状态变，统一走这里同步到悬浮提示
@@ -1496,6 +1742,768 @@
     }));
   }
 
+﻿  // ================= 共享工作区（同一局域网，最多 3 人同时编辑） =================
+  //
+  // 与「整块保存」的根本区别：整块保存是「把我手上的画布整个盖上去」，
+  // 两个人同时用就是谁后存谁赢。共享保存只发「我这次改过的那几张」，
+  // 每张附一个基线（我上次看到的样子），服务端拿基线和库里当前内容比：
+  //   · 一样      → 期间没人动过，写
+  //   · 不一样    → 这张卡对方刚改过，不写、报冲突，由人来选
+  // 于是「你改图1、我改图3」可以同时成立，这是协同编辑的最低要求。
+  //
+  // 视口不同步：各人看各自的视角。跟着别人的画面一起漂移只会让人晕。
+
+  const SHARE_CLIENT_KEY = 'canvas.share-client';
+  const myClientId = (function () {
+    try {
+      const saved = window.sessionStorage.getItem(SHARE_CLIENT_KEY);
+      if (saved) return saved;
+      const made = 'c_' + Date.now().toString(36) + Math.random().toString(16).slice(2, 8);
+      window.sessionStorage.setItem(SHARE_CLIENT_KEY, made);
+      return made;
+    } catch {
+      // 无痕模式 / 被禁用时 sessionStorage 会抛错：给个临时 id 也能用，
+      // 只是刷新一次就换一个身份（服务端会当成新人，最多占一个名额）
+      return 'c_' + Date.now().toString(36) + Math.random().toString(16).slice(2, 8);
+    }
+  })();
+
+  // 局域网访客拿不到本机钥匙（服务端对他们注入空串），据此判断「我是不是主机」
+  const shareIsGuest = !window.__uiToken;
+  let shareIsHost = !shareIsGuest;
+  let shareMode = false;
+  let shareEnded = false;
+  let shareSessionId = '';
+  let shareSource = null;
+  let shareOnline = 0;
+  let shareLimit = 3;
+  let shareOpened = false;
+  // 基线：nodeId -> { sig, node }。sig 是规范化内容指纹，node 是发给服务端的 base
+  let shareBaseline = new Map();
+  // 连线基线：edgeId -> { id, sourceId, targetId, role }
+  let shareEdgeBaseline = new Map();
+  // 远端改动排队：手势中 / 正在打字时先攒着，等手停下来再应用，
+  // 否则会在拖动中途把卡片元素换掉（手指还按着，元素已经没了）
+  let shareQueue = [];
+  let shareDrainTimer = 0;
+  let shareConflicts = [];
+  let sharePresenceSessions = [];
+  // 正在把远端内容装进本地卡片：这期间绝不能反过来读 DOM 回写数据，
+  // 否则刚收到的内容会被旧 DOM 的文本盖掉，再推回去把对方也清空。
+  let applyingRemote = false;
+
+  // 对象键排序后序列化。内容一样就一定得到同一个字符串，
+  // 不受「谁先写的哪个字段」影响 —— 必须和服务端 store.js 里那份一致。
+  function stableStringify(value) {
+    if (value === null || value === undefined) return 'null';
+    if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+    if (typeof value === 'object') {
+      const keys = Object.keys(value).sort();
+      const parts = [];
+      keys.forEach((key) => {
+        const one = value[key];
+        if (one === undefined) return;
+        parts.push(JSON.stringify(key) + ':' + stableStringify(one));
+      });
+      return '{' + parts.join(',') + '}';
+    }
+    return JSON.stringify(value);
+  }
+
+  // 一张卡片的规范形状，与 server/store.js 的 canonNode 逐字对应。
+  // z（叠放次序）故意不参与比对：别人新建一张卡就会让我这边所有卡的 z 变一位，
+  // 算进去的话每次新建都会引发一片假冲突。
+  function shareCanon(node) {
+    const data = persistedData(node && node.data);
+    // 必须深拷贝：persistedData 在没有临时字段时是把原对象直接返回的，
+    // 基线里留着活引用的话，之后一改提示词基线也跟着变，
+    // 发出去的 base 就成了「改后的内容」，服务端比对必然判冲突，改动永远同步不出去。
+    let snapshot = {};
+    if (data && typeof data === 'object') {
+      try {
+        snapshot = JSON.parse(JSON.stringify(data));
+      } catch {
+        snapshot = { ...data };
+      }
+    }
+    return {
+      type: String((node && node.type) || 'card'),
+      x: Math.round(Number(node && node.x) || 0),
+      y: Math.round(Number(node && node.y) || 0),
+      w: Math.round(Number(node && node.w) || 0),
+      h: Math.round(Number(node && node.h) || 0),
+      data: snapshot,
+    };
+  }
+
+  function shareEntryOf(node) {
+    const canon = shareCanon(node);
+    return { sig: stableStringify(canon), node: canon };
+  }
+
+  // 发给服务端的一张卡片：形状和 collectNodes 一致（含 z / createdAt）
+  function collectShareNode(node) {
+    return {
+      id: node.id,
+      type: node.type,
+      x: Math.round(node.x),
+      y: Math.round(node.y),
+      w: Math.round(node.w),
+      h: Math.round(node.h),
+      z: nodes.indexOf(node),
+      data: persistedData(node.data),
+      createdAt: node.createdAt,
+    };
+  }
+
+  function shareEdgeEntry(edge) {
+    return {
+      id: edge.id,
+      sourceId: String(edge.sourceId || ''),
+      targetId: String(edge.targetId || ''),
+      role: String(edge.role || ''),
+    };
+  }
+
+  // 从当前内存状态重建全部基线。什么时候用：
+  //   · 刚打开画布 / 刚连上共享
+  //   · 断线重连后拉了一次全量
+  //   · 保存冲突里选了「用最新的」
+  // 基线建错一处，后面每一轮保存都会以为那张卡「我改过」，白白推一遍。
+  function rebuildShareBaseline() {
+    shareBaseline = new Map();
+    nodes.forEach((node) => {
+      shareBaseline.set(node.id, shareEntryOf(node));
+    });
+    shareEdgeBaseline = new Map();
+    edges.forEach((edge) => {
+      shareEdgeBaseline.set(edge.id, shareEdgeEntry(edge));
+    });
+  }
+
+  // 算出「这一轮该发什么」。没有改动就返回空包，调用方直接跳过这一次保存。
+  function buildSharePayload() {
+    const upserts = [];
+    const alive = new Set();
+    nodes.forEach((node) => {
+      alive.add(node.id);
+      const entry = shareEntryOf(node);
+      const base = shareBaseline.get(node.id);
+      if (base && base.sig === entry.sig) return;
+      // base 为 null 表示「我认为这张卡还不存在」（新建）
+      upserts.push({ node: collectShareNode(node), base: base ? base.node : null });
+    });
+    const deletes = [];
+    shareBaseline.forEach((entry, id) => {
+      if (!alive.has(id)) deletes.push(id);
+    });
+
+    const edgeUpserts = [];
+    const edgeAlive = new Set();
+    edges.forEach((edge) => {
+      edgeAlive.add(edge.id);
+      const next = shareEdgeEntry(edge);
+      const base = shareEdgeBaseline.get(edge.id);
+      if (base && stableStringify(base) === stableStringify(next)) return;
+      edgeUpserts.push(next);
+    });
+    const edgeDeletes = [];
+    shareEdgeBaseline.forEach((entry, id) => {
+      if (!edgeAlive.has(id)) edgeDeletes.push(id);
+    });
+
+    return { upserts: upserts, deletes: deletes, edgeUpserts: edgeUpserts, edgeDeletes: edgeDeletes };
+  }
+
+  function sharePayloadEmpty(payload) {
+    return !payload.upserts.length && !payload.deletes.length &&
+      !payload.edgeUpserts.length && !payload.edgeDeletes.length;
+  }
+
+  // 保存成功后按服务端「实际写进去的」更新基线。
+  // 不能拿本地发出去的那份来更新：冲突的卡片服务端没写，基线要是也更新了，
+  // 这张卡就变成「我这边算干净、服务端还是旧内容」，下次谁也不会再推一次。
+  function absorbShareApplied(applied) {
+    const done = applied || {};
+    (done.upsertedIds || []).forEach((id) => {
+      const node = byId(id);
+      if (node) shareBaseline.set(id, shareEntryOf(node));
+    });
+    (done.deletedIds || []).forEach((id) => shareBaseline.delete(id));
+    (done.doneEdges || []).forEach((edge) => {
+      if (!edge || !edge.id) return;
+      shareEdgeBaseline.set(edge.id, shareEdgeEntry(edge));
+    });
+    (done.removedEdges || []).forEach((id) => shareEdgeBaseline.delete(id));
+  }
+
+  // 共享模式下的一次保存。dirty / saving / 保存状态机的语义和整块保存一致，
+  // 只是最后发的东西和后续处理不一样。
+  async function shareSaveNow(force) {
+    if (!force && !dirty) return;
+    if (saving) return;
+    if (shareEnded) {
+      dirty = false;
+      return;
+    }
+    saving = true;
+    dirty = false;
+    setSaveState('saving');
+    // 和整块保存一样：保存前给改过的卡片盖个时间戳（供「跳到最近修改」排序）
+    stampTouchedCards();
+    try {
+      const payload = buildSharePayload();
+      if (sharePayloadEmpty(payload)) {
+        lastSavedAt = Date.now();
+        lastSaveError = '';
+        setSaveState('saved');
+        return;
+      }
+      const result = await window.api.sharePatch(
+        canvasId,
+        Object.assign({ sessionId: shareSessionId, clientId: myClientId }, payload)
+      );
+      if (result && Number.isInteger(result.rev)) {
+        canvasRev = result.rev;
+        rememberSeenRev(canvasId, canvasRev);
+      }
+      absorbShareApplied(result && result.applied);
+      lastSavedAt = Date.now();
+      lastSaveError = '';
+      setSaveState('saved');
+      const conflicts = (result && result.conflicts) || [];
+      if (conflicts.length) reportShareConflicts(conflicts);
+    } catch (error) {
+      dirty = true;
+      lastSaveError = (error && error.message) || String(error);
+      setSaveState('error');
+      console.log('共享保存失败：' + lastSaveError);
+    } finally {
+      saving = false;
+      if (dirty && !lastSaveError) saveTimer = setTimeout(saveNow, 1500);
+    }
+  }
+
+  // 冲突提示条：一张卡一个人，说得越具体越不会被乱点
+  function reportShareConflicts(list) {
+    shareConflicts = list.slice();
+    const deleted = list.filter((one) => one.reason === 'deleted').length;
+    const moved = list.filter((one) => one.reason === 'changed').length;
+    const parts = [];
+    if (moved) parts.push(moved + ' 张卡片对方刚改过');
+    if (deleted) parts.push(deleted + ' 张已被对方删掉');
+    toast(parts.join('，') + '。要谁的版本？', 15000, [
+      { label: '用对方的', run: () => resolveShareConflicts('theirs') },
+      { label: '保留我的', run: () => resolveShareConflicts('mine') },
+    ]);
+  }
+
+  // 把本地某张卡片连同它的连线一起摘掉（远端删卡、或选「用对方的」时用）
+  function dropLocalNode(id) {
+    const node = byId(id);
+    if (!node) return false;
+    const dropped = edges.filter((edge) => edge.sourceId === id || edge.targetId === id);
+    nodes = nodes.filter((one) => one.id !== id);
+    edges = edges.filter((edge) => edge.sourceId !== id && edge.targetId !== id);
+    selection.delete(id);
+    if (expandedId === id) expandedId = null;
+    if (editingId === id) editingId = null;
+    shareBaseline.delete(id);
+    dropped.forEach((edge) => shareEdgeBaseline.delete(edge.id));
+    return true;
+  }
+
+  // 把服务端给的原始卡片收拾成内存里的形状（与 applyServerState 用同一套迁移规则）
+  function normalizeRemoteNode(raw) {
+    const node = migrateNode({
+      id: raw.id,
+      type: raw.type,
+      x: Number(raw.x) || 0,
+      y: Number(raw.y) || 0,
+      w: Number(raw.w) || 0,
+      h: Number(raw.h) || 0,
+      data: raw.data && typeof raw.data === 'object' ? raw.data : {},
+      createdAt: raw.createdAt,
+    });
+    const preset = presetOf(node.type);
+    return {
+      id: node.id,
+      type: node.type,
+      x: node.x,
+      y: node.y,
+      w: node.w || preset.w,
+      h: node.h || preset.h,
+      data: node.data || {},
+      createdAt: node.createdAt,
+    };
+  }
+
+  // 把远端内容装进本地那张卡。返回 'rebuild'（要重建卡片）/ 'geom'（只挪位置改大小）/ 'none'
+  function adoptRemoteNode(local, remote) {
+    const dataSame = stableStringify(persistedData(local.data)) === stableStringify(persistedData(remote.data));
+    const typeSame = local.type === remote.type;
+    const geomChanged =
+      local.x !== remote.x || local.y !== remote.y || local.w !== remote.w || local.h !== remote.h;
+    local.x = remote.x;
+    local.y = remote.y;
+    local.w = remote.w;
+    local.h = remote.h;
+    if (!typeSame || !dataSame) {
+      local.type = remote.type;
+      local.data = remote.data;
+      return 'rebuild';
+    }
+    return geomChanged ? 'geom' : 'none';
+  }
+
+  function applyRemoteGeometry(node) {
+    const el = elements.get(node.id);
+    if (!el) return;
+    el.style.left = node.x + 'px';
+    el.style.top = node.y + 'px';
+    el.style.width = node.w + 'px';
+    el.style.height = node.h + 'px';
+  }
+
+  // 收到别人的改动。先排队，等手停下来再落，避免拖动 / 打字中途被换掉元素。
+  function onShareChange(data) {
+    if (!shareMode || !data) return;
+    // 自己发的回声：基线在保存成功时已经更新过，这里什么都不用做
+    if (data.clientId && data.clientId === myClientId) return;
+    shareQueue.push(data);
+    drainShareQueue();
+  }
+
+  function shareBusy() {
+    if (interactingCount > 0) return true;
+    if (saving) return true;
+    const active = document.activeElement;
+    // 参数下拉 / 输入框正在用：重建会把焦点和半截输入弄丢
+    if (active && active.matches && active.matches('input, textarea, select') &&
+      active.closest && active.closest('.node')) return true;
+    // 提示词正在编辑「而且真的改出东西」才等。
+    // 只看「焦点在卡片里」是不够的：新建卡片会自动把焦点放进提示词框，
+    // 那样别人的改动就永远进不来（卡片看着像卡住了）。
+    // 判断依据是框里现在写的字和已存的内容不一致，而不是焦点在不在。
+    if (active && active.classList && active.classList.contains('node-prompt')) {
+      const host = active.closest('.node');
+      const node = host ? byId(host.dataset.id) : null;
+      if (node && promptTextOf(active) !== String(nodeData(node).text || '')) return true;
+      return false;
+    }
+    if (editingId) {
+      const node = byId(editingId);
+      const base = node ? shareBaseline.get(node.id) : null;
+      if (node && (!base || base.sig !== shareEntryOf(node).sig)) return true;
+    }
+    return false;
+  }
+
+  function drainShareQueue() {
+    if (!shareQueue.length) return;
+    if (shareBusy()) {
+      if (shareDrainTimer) return;
+      shareDrainTimer = window.setTimeout(() => {
+        shareDrainTimer = 0;
+        drainShareQueue();
+      }, 240);
+      return;
+    }
+    const batch = shareQueue.splice(0, shareQueue.length);
+    let structural = false;
+    applyingRemote = true;
+    let edgeChanged = false;
+    const rebuild = [];
+    const moved = [];
+
+    batch.forEach((data) => {
+      const applied = (data && data.applied) || {};
+      (applied.upsertedNodes || []).forEach((raw) => {
+        if (!raw || !raw.id) return;
+        const remote = normalizeRemoteNode(raw);
+        const local = byId(remote.id);
+        if (!local) {
+          // 别人新建的卡片
+          nodes.push(remote);
+          shareBaseline.set(remote.id, shareEntryOf(remote));
+          structural = true;
+          return;
+        }
+        const base = shareBaseline.get(remote.id);
+        // 我这边也有没发出去的改动（本地内容已经偏离基线）：
+        // 不覆盖，等下一轮保存由服务端判冲突，由人来选
+        if (base && base.sig !== stableStringify(shareCanon(local))) return;
+        const kind = adoptRemoteNode(local, remote);
+        shareBaseline.set(remote.id, shareEntryOf(remote));
+        if (kind === 'rebuild') rebuild.push(local);
+        else if (kind === 'geom') moved.push(local);
+      });
+      (applied.deletedIds || []).forEach((id) => {
+        if (dropLocalNode(id)) structural = true;
+      });
+      (applied.removedEdges || []).forEach((id) => {
+        const before = edges.length;
+        edges = edges.filter((edge) => edge.id !== id);
+        shareEdgeBaseline.delete(id);
+        if (edges.length !== before) edgeChanged = true;
+      });
+      (applied.doneEdges || []).forEach((edge) => {
+        if (!edge || !edge.id) return;
+        const entry = shareEdgeEntry(edge);
+        const at = edges.findIndex((one) => one.id === entry.id);
+        if (at >= 0) edges[at] = { ...edges[at], ...entry };
+        else edges.push({ id: entry.id, sourceId: entry.sourceId, targetId: entry.targetId, role: entry.role });
+        shareEdgeBaseline.set(entry.id, entry);
+        edgeChanged = true;
+      });
+    });
+
+    try {
+      if (structural) {
+        // 有卡片新增 / 删除：整块重画最省事，编号、隐藏、空画布提示、小地图都能一次跟上
+        renderNodes();
+        renderEdges();
+        refreshSelection();
+        scheduleMinimap();
+        return;
+      }
+      moved.forEach(applyRemoteGeometry);
+      rebuild.forEach((node) => refreshNode(node));
+      if (edgeChanged || moved.length) renderEdges();
+      if (rebuild.length) {
+        refreshScheduleMemberMap();
+        paintFilter();
+        refreshSelection();
+      }
+      if (edgeChanged || moved.length || rebuild.length) scheduleMinimap();
+    } finally {
+      applyingRemote = false;
+    }
+  }
+
+  // 断线重连后「可能错过了一段」：不是自己正在改的时候，拉一次全量重建，
+  // 这比补发一遍差量更省脑子，也不会漏。
+  async function resyncShareState() {
+    if (!shareMode || shareBusy() || dirty) return;
+    try {
+      const state = await window.api.shareState(canvasId);
+      if (!state || !state.canvas) return;
+      const keepViewport = { x: viewport.x, y: viewport.y, zoom: viewport.zoom };
+      applyServerState(state);
+      // 视口不跟着服务端走：别人平移画面不该把我这边也拖过去
+      viewport = keepViewport;
+      setCanvasName(state.canvas.name);
+      renderAll();
+      applyViewport();
+      rebuildShareBaseline();
+    } catch {
+      /* 拉不到就等下一次重连 */
+    }
+  }
+
+  function startShareSession() {
+    if (shareSource) return;
+    shareMode = true;
+    shareEnded = false;
+    shareOpened = false;
+    paintShareButton();
+    const source = window.api.shareEvents(canvasId, myClientId);
+    shareSource = source;
+
+    source.addEventListener('hello', (event) => {
+      let data = null;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      shareSessionId = (data.session && data.session.id) || '';
+      // 名字是服务端起的人性化名字（主机 / 访客 1），本机与否由它说了算
+      shareIsHost = Boolean(data.session && data.session.local);
+      paintPresence(data);
+      if (shareOpened) resyncShareState();
+      shareOpened = true;
+      setSaveState(dirty ? 'dirty' : 'saved');
+    });
+
+    source.addEventListener('presence', (event) => {
+      let data = null;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      paintPresence(data);
+    });
+
+    source.addEventListener('change', (event) => {
+      let data = null;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      onShareChange(data);
+    });
+
+    source.addEventListener('bye', (event) => {
+      let data = null;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        data = {};
+      }
+      endShareSession((data && data.reason) || '共享已结束');
+    });
+
+    source.onerror = () => {
+      // 服务端拒绝（人满了 / 共享关了）时不会自动重连：浏览器会直接把连接置为 CLOSED。
+      // 这种情况要明确告诉用户，而不是让画布安安静静地不同步。
+      if (source.readyState === 2 /* EventSource.CLOSED */ && !shareEnded) {
+        endShareSession('没能连上共享：可能人数已满（上限 ' + shareLimit + ' 人），或共享已经关闭');
+      } else {
+        paintShareButton('offline');
+      }
+    };
+  }
+
+  function endShareSession(reason, opts) {
+    const opt = opts || {};
+    if (!shareMode && shareEnded) return;
+    shareMode = false;
+    shareEnded = true;
+    shareQueue = [];
+    if (shareDrainTimer) {
+      window.clearTimeout(shareDrainTimer);
+      shareDrainTimer = 0;
+    }
+    if (shareSource) {
+      try {
+        shareSource.close();
+      } catch {
+        /* 已经断了 */
+      }
+      shareSource = null;
+    }
+    if (opt.reopen) {
+      // 主机自己关的：共享结束但门还在手上，允许再点开
+      shareEnded = false;
+      paintShareButton();
+      toast(reason, 4000);
+      return;
+    }
+    paintShareButton();
+    if (dirty) {
+      // 手里还有没发出去的内容：告诉用户别刷新，先把内容留住
+      toast(reason + '。你这里还有没同步出去的改动，先别关页面 —— 可以先复制卡片内容。', 12000);
+    } else {
+      toast(reason, 6000);
+    }
+  }
+
+  function paintPresence(info) {
+    const sessions = (info && info.sessions) || [];
+    sharePresenceSessions = sessions;
+    shareOnline = Number(info && info.count);
+    if (!Number.isFinite(shareOnline)) shareOnline = sessions.length;
+    shareLimit = Number(info && info.limit) || 3;
+    paintShareButton();
+  }
+
+  function paintShareButton(mode) {
+    const btn = document.getElementById('canvas-share');
+    if (!btn) return;
+    const textEl = document.getElementById('canvas-share-text');
+    const avatarsEl = document.getElementById('share-avatars');
+    const on = shareMode && !shareEnded;
+    // 主机永远看得见这个按钮（否则没地方开共享）；访客只在共享里才看得见
+    btn.hidden = !(on || (shareIsHost && !shareEnded));
+    btn.classList.toggle('on', Boolean(on));
+    btn.classList.toggle('offline', mode === 'offline' && Boolean(on));
+    if (textEl) {
+      if (on) textEl.textContent = mode === 'offline'
+        ? '重连中…'
+        : '共享中 · ' + shareOnline + '/' + shareLimit;
+      else if (shareEnded) textEl.textContent = '共享已结束';
+      else textEl.textContent = '共享';
+    }
+    btn.title = on
+      ? '这块画布正在共享：同一局域网最多 3 人一起编辑（当前 ' + shareOnline + ' 人在线）。' +
+        (shareIsHost ? '点一下可以关闭共享。' : '点一下看在线名单。')
+      : shareEnded
+        ? '共享已结束。点一下回到门户页。'
+        : '共享这块画布：同一局域网的人可以一起编辑（最多 3 人）';
+    if (avatarsEl) {
+      avatarsEl.textContent = '';
+      const list = on ? sharePresenceSessions.slice(0, 3) : [];
+      avatarsEl.hidden = !list.length;
+      list.forEach((session) => {
+        const dot = document.createElement('span');
+        dot.className = 'share-avatar';
+        const name = String((session && session.name) || '');
+        dot.textContent = name === '主机' ? '主' : (name.replace(/[^0-9]/g, '') || name.slice(-1) || '客');
+        dot.title = name + (session && session.local ? '（这台电脑）' : '');
+        avatarsEl.appendChild(dot);
+      });
+    }
+  }
+
+  // 点共享按钮：主机是开 / 关，访客只能看名单
+  function onShareButtonClick() {
+    if (shareEnded) {
+      window.location.href = '/';
+      return;
+    }
+    if (!shareMode) {
+      if (!shareIsHost) {
+        toast('只有主机能开启共享');
+        return;
+      }
+      turnShareOn();
+      return;
+    }
+    if (!shareIsHost) {
+      const names = sharePresenceSessions.map((one) => (one.name || '访客')).join('、');
+      toast('在线：' + (names || '只有你') + '（最多 ' + shareLimit + ' 人）', 6000);
+      return;
+    }
+    turnShareOff();
+  }
+
+  async function turnShareOn() {
+    try {
+      const out = await window.api.shareToggle(canvasId, true);
+      shareIsHost = true;
+      shareEnded = false;
+      rebuildShareBaseline();
+      startShareSession();
+      paintShareButton();
+      const address = await shareAddress(canvasId);
+      toast(
+        '已开启共享' + (address ? '：' + address : '') + '（最多 ' + shareLimit + ' 人同时编辑）',
+        9000,
+        address ? [{ label: '复制地址', run: () => shareCopyText(address) }] : undefined
+      );
+    } catch (error) {
+      toast('开启共享失败：' + ((error && error.message) || '请稍后再试'));
+    }
+  }
+
+  async function turnShareOff() {
+    if (shareOnline > 1 && !window.confirm('还有 ' + (shareOnline - 1) + ' 个人正在这块画布上编辑，关闭共享会把他们断开。确定关吗？')) return;
+    try {
+      await window.api.shareToggle(canvasId, false);
+      endShareSession('已关闭共享', { reopen: true });
+    } catch (error) {
+      toast('关闭共享失败：' + ((error && error.message) || '请稍后再试'));
+    }
+  }
+
+  // 共享地址：给主机用来发给同一局域网的人
+  async function shareAddress(id) {
+    try {
+      const status = await window.api.status();
+      const lan = (status && status.lan) || {};
+      if (!lan.enabled) return '';
+      const ip = (lan.addresses || [])[0];
+      if (!ip) return '';
+      return 'http://' + ip + ':' + lan.port + '/canvas?id=' + encodeURIComponent(id);
+    } catch {
+      return '';
+    }
+  }
+
+  function shareCopyText(text) {
+    const done = (ok) => toast(ok ? '已复制：' + text : '复制失败，请手动选中地址', ok ? 4000 : 6000);
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => done(true)).catch(() => done(false));
+        return;
+      }
+    } catch {
+      /* 落到下面的兜底 */
+    }
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.top = '-1000px';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      done(Boolean(ok));
+    } catch {
+      done(false);
+    }
+  }
+
+  // 冲突处理：两条路都不偷偷丢东西
+  async function resolveShareConflicts(choice) {
+    const list = shareConflicts.slice();
+    shareConflicts = [];
+    if (!list.length) return;
+    if (choice === 'theirs') {
+      let needRender = false;
+      list.forEach((one) => {
+        if (!one.server) {
+          if (dropLocalNode(one.nodeId)) needRender = true;
+          shareBaseline.delete(one.nodeId);
+          return;
+        }
+        const remote = normalizeRemoteNode(one.server);
+        const local = byId(remote.id);
+        if (!local) {
+          nodes.push(remote);
+          needRender = true;
+        } else {
+          const kind = adoptRemoteNode(local, remote);
+          if (kind === 'rebuild') refreshNode(local);
+          else if (kind === 'geom') applyRemoteGeometry(local);
+        }
+        shareBaseline.set(remote.id, shareEntryOf(remote));
+      });
+      if (needRender) renderNodes();
+      renderEdges();
+      scheduleMinimap();
+      toast('已采用对方那一版');
+      return;
+    }
+
+    // 保留我的：拿对方当前内容当基线再推一次，服务端就会认这一次写入
+    const upserts = [];
+    list.forEach((one) => {
+      const local = byId(one.nodeId);
+      if (!local) return;
+      // other-canvas 是「卡片编号被别的画布占了」，服务端不会写，重推也没用
+      if (one.reason === 'other-canvas') return;
+      upserts.push({ node: collectShareNode(local), base: one.server ? shareCanon(one.server) : null });
+    });
+    if (!upserts.length) {
+      toast('这些卡片没法覆盖，已保持原样');
+      return;
+    }
+    try {
+      const result = await window.api.sharePatch(canvasId, {
+        sessionId: shareSessionId,
+        clientId: myClientId,
+        upserts: upserts,
+        deletes: [],
+        edgeUpserts: [],
+        edgeDeletes: [],
+      });
+      if (result && Number.isInteger(result.rev)) canvasRev = result.rev;
+      absorbShareApplied(result && result.applied);
+      const left = (result && result.conflicts) || [];
+      if (left.length) reportShareConflicts(left);
+      else toast('已保留你的版本');
+      setSaveState('saved');
+    } catch (error) {
+      toast('覆盖失败：' + ((error && error.message) || '请稍后再试'));
+    }
+  }
+
   function scheduleSave() {
     dirty = true;
     setSaveState('dirty');
@@ -1505,6 +2513,9 @@
 
   // force=true 是「立即重试保存」用的：跳过 dirty/saving 判断，手动点的那次必须真的发出去
   async function saveNow(force) {
+    // 共享模式下「保存」= 只推我改过的卡片（见 shareSaveNow），
+    // 绝不能走整块覆盖，否则会把别人刚写的内容一把抹掉。
+    if (shareMode) return shareSaveNow(force);
     if (!force && (!dirty || saving)) return;
     if (saving) return;
     // 冲突面板弹着的时候不自动保存：这时候手里的 rev 已经过期，
@@ -1523,7 +2534,10 @@
         canvasRev
       );
       // 服务端会把写入后的新版本号回过来，记下来供下次保存使用
-      if (result && Number.isInteger(result.rev)) canvasRev = result.rev;
+      if (result && Number.isInteger(result.rev)) {
+        canvasRev = result.rev;
+        rememberSeenRev(canvasId, canvasRev);
+      }
       lastSavedAt = Date.now();
       lastSaveError = '';
       if (savePanel) closeSavePanel();
@@ -1576,8 +2590,11 @@
     refreshHiddenBadge();
     refreshBoardEmpty();
     paintFilter();
-    keepViewportAnchored();
-    invalidateViewportBox();
+    // 这里以前会 invalidateViewportBox()，让小地图在下一帧重新量一次视口。
+    // 但 .viewport 是 flex 撑满的，卡片都挂在绝对定位的 .world 里，增减卡片
+    // 根本不会改变它的尺寸 / 位置。失效只会让「刚建完 300 张卡」的第一次
+    // getBoundingClientRect() 变成一次整篇强制布局（Profile 实测 80ms）。
+    // 尺寸变化由 resize / scroll 监听负责失效，首帧由 primeViewportBox() 预先量好。
   }
 
   // 一块卡都没有：把「从哪儿开始」直接画在画布中央。
@@ -1616,6 +2633,9 @@
       lastPlacedPanel.style.transform = '';
       lastPlacedPanel.style.zoom = '';
       lastPlacedPanel.style.marginLeft = '';
+      lastPlacedPanel.style.marginTop = '';
+      lastPlacedPanel.style.marginBottom = '';
+      lastPlacedPanel.style.bottom = '';
     }
     if (lastPlacedHost) lastPlacedHost.classList.remove('panel-up');
     lastPlacedPanel = null;
@@ -1698,10 +2718,37 @@
         if (rect.left + dx < view.left + pad) dx = view.left + pad - rect.left;
         if (dx) panel.style.marginLeft = -width / 2 + dx + 'px';
 
-        // ⑤ 竖直方向实在放不下（窗口很矮）就让面板自己滚动，别让底部按钮被切走
+        // ⑤ 竖直方向：先压高度让面板自己滚，再整体挪回视口内。
+        // 只压高度不够 —— 面板比卡片高得多，矮窗口里「下面放不下就翻到上面」
+        // 也未必有地方翻（卡片本来就贴着窗口顶边或底边），面板照样会顶出视口，
+        // 底部常驻区（模型 / 参数 / 生成）跟着一起跑到屏幕外。
+        // 先按可用空间压到 160~满屏之间，再量一次实际位置，超出多少就挪回多少。
+        //
+        // 位移直接写 top / bottom，不用 margin：上方展开时面板靠 bottom:100% 定位，
+        // top 是 auto，margin-top 不参与定位，写了也不会动（踩过这个坑）。
+        // 先清掉上一轮写进去的位移，否则窗口变高以后面板会一直停在挪过的位置
+        panel.style.top = '';
+        panel.style.bottom = '';
+        panel.style.marginTop = '';
+        panel.style.marginBottom = '';
         const after = panel.getBoundingClientRect();
         const room = up ? after.bottom - view.top - pad : view.bottom - pad - after.top;
-        if (after.height > room) panel.style.maxHeight = Math.max(240, room) + 'px';
+        const limit = Math.max(160, Math.min(room, view.height - pad * 2));
+        if (after.height > limit) panel.style.maxHeight = limit + 'px';
+
+        // 高度定下来后重新量一次，按屏幕坐标把整块面板推回视口。
+        const fit = panel.getBoundingClientRect();
+        let shift = 0;
+        if (fit.bottom > view.bottom - pad) shift = view.bottom - pad - fit.bottom;
+        if (fit.top + shift < view.top + pad) shift = view.top + pad - fit.top;
+        if (shift) {
+          // 上方展开：贴卡片顶边往上画，shift 为负要把 bottom 收小（整体下移）；
+          // 下方展开：贴卡片底边往下画，shift 为负要把 top 收小（整体上移）。
+          // EDGE 与 CSS 里默认的 6px 间距保持一致，挪过之后不会比原来多出 2px 缝。
+          const EDGE = 6;
+          if (up) panel.style.bottom = 'calc(100% + ' + (EDGE - shift) + 'px)';
+          else panel.style.top = 'calc(100% + ' + (EDGE + shift) + 'px)';
+        }
       }
     }
     panelZoom = viewport.zoom || 1;
@@ -1799,13 +2846,20 @@
 
   function resizePresets(node, origin) {
     const ratio = origin.w > 0 ? origin.h / origin.w : 0.5625;
-    // 以这类卡片的标准宽度为基准，同样大小的卡片永远落在同一档，不会因为先后拉过而错位
-    const baseW = presetOf(node.type).w || 360;
-    // 最小那一档统一：图片、视频、快速视频缩到底都是一样大
-    const min = minCardSizeOf(ratio > 0 ? 1 / ratio : 16 / 9);
+    // 以这类卡片的标准宽度为基准，同样大小的卡片永远落在同一档，不会因为先后拉过而错位。
+    // 竖屏卡片要按竖着的那条基准宽度量，否则第一档就会把它拉大一倍。
+    const preset = presetOf(node.type);
+    const baseW = origin.h > origin.w
+      ? Math.max(MIN_W, Math.round((preset.w || CARD_BOX.long) * (CARD_BOX.short / CARD_BOX.long)))
+      : preset.w || CARD_BOX.long;
+    const minH = minHeightOf(node.type);
+    // 音频是矮条：最小档就是 140×100，不套图片那套「短边 149」的规则
+    const min = node.type === 'audio'
+      ? { w: MIN_W, h: minH }
+      : minCardSizeOf(ratio > 0 ? 1 / ratio : 16 / 9);
     const list = RESIZE_STEPS.map((step) => {
       const w = Math.max(MIN_W, Math.round(baseW * step));
-      return { w: w, h: Math.max(MIN_H, Math.round(w * ratio)) };
+      return { w: w, h: Math.max(minH, Math.round(w * ratio)) };
     }).filter((item) => item.w > min.w);
     // 本来就更小的卡片（上传的缩略图素材）保留现在的尺寸，一拖不会突然跳大
     if (origin.w < min.w) list.unshift({ w: origin.w, h: origin.h });
@@ -1835,6 +2889,8 @@
     '3:4': 3 / 4,
   };
   function ratioValueOf(key) {
+    // 传数字时直接当比例用：粘贴截图这类地方只有实际宽高比，没有 "16:9" 这种键
+    if (typeof key === 'number' && Number.isFinite(key) && key > 0) return key;
     const text = String(key || '');
     if (RATIO_VALUE[text]) return RATIO_VALUE[text];
     const hit = text.match(/^(\d+(?:\.\d+)?)\s*[:x×]\s*(\d+(?:\.\d+)?)$/);
@@ -1846,12 +2902,41 @@
     return 16 / 9;
   }
 
-  // 卡片默认按所选比例长成一条，图片 / 视频铺满整张卡片
+  // 新卡片的默认盒子：横屏 360×210、竖屏 210×360、音频 210×100。
+  //
+  // 横屏 / 竖屏这两个基准形状正好是盒子本身；其它比例（4:3、1:1、21:9、1:3…）
+  // 在同一个 360×210 的盒子里按原比例收放：短边贴 210，长边最多 360，
+  // 超出上限就反过来压另一条边。这样卡片不会被拉变形，一排看下来也齐整。
+  const CARD_BOX = { long: 360, short: 210 };
+  const CARD_BASE_LANDSCAPE = 16 / 9;
+  const CARD_BASE_PORTRAIT = 9 / 16;
+  // 极窄 / 极宽的比例（1:3、21:9）只压到 96 为止，卡片还得能点得到
+  const CARD_MIN_EDGE = 96;
+
+  function defaultBoxSize(ratio) {
+    const r = Number.isFinite(ratio) && ratio > 0 ? ratio : CARD_BASE_LANDSCAPE;
+    // 基准形状先给足：横屏 360×210、竖屏 210×360
+    if (Math.abs(r - CARD_BASE_LANDSCAPE) < 0.03) return { w: CARD_BOX.long, h: CARD_BOX.short };
+    if (Math.abs(r - CARD_BASE_PORTRAIT) < 0.03) return { w: CARD_BOX.short, h: CARD_BOX.long };
+    if (r >= 1) {
+      // 横一点的比例：高度先站定 210，宽度跟着比例长；超过 360 就锁宽、压高度
+      const w = Math.round(CARD_BOX.short * r);
+      if (w > CARD_BOX.long) return { w: CARD_BOX.long, h: Math.max(CARD_MIN_EDGE, Math.round(CARD_BOX.long / r)) };
+      return { w: w, h: CARD_BOX.short };
+    }
+    // 竖一点的比例：宽度先站定 210，高度跟着比例长；超过 360 就锁高、压宽度
+    const h = Math.round(CARD_BOX.short / r);
+    if (h > CARD_BOX.long) return { w: Math.max(CARD_MIN_EDGE, Math.round(CARD_BOX.long * r)), h: CARD_BOX.long };
+    return { w: CARD_BOX.short, h: h };
+  }
+
   function defaultSize(type, params) {
     const preset = presetOf(type);
-    if (type === 'audio' || type === 'group' || type === 'schedule' || type === 'zone') return { w: preset.w, h: preset.h };
-    const ratio = ratioValueOf(params && params.ratio);
-    return { w: preset.w, h: Math.max(MIN_H, Math.round(preset.w / ratio)) };
+    // 音频 / 组合 / 定时组 / 区域 / 导演台各有自己的固定形状，不套媒体盒子
+    if (type === 'audio' || type === 'group' || type === 'schedule' || type === 'zone' || type === 'director') {
+      return { w: preset.w, h: preset.h };
+    }
+    return defaultBoxSize(ratioValueOf(params && params.ratio));
   }
 
   // 视频 / 音频卡片：按下时先记账，拖动超过阈值就把这次点击判为“拖”，
@@ -1922,6 +3007,8 @@
       (isHidden(node) ? ' is-hidden' : '');
     el.dataset.type = node.type;
     el.dataset.id = node.id;
+    // 按默认盒子摆的卡片：画面完整显示（contain），不裁掉截图边缘
+    if (data.boxed) el.dataset.boxed = '1';
     el.style.left = node.x + 'px';
     el.style.top = node.y + 'px';
     el.style.width = size.w + 'px';
@@ -1935,18 +3022,18 @@
     if (hostHit && hostHit.compact) el.classList.add('sched-compact');
 
     el.appendChild(buildMedia(node, data, preset));
-    el.appendChild(buildIndexBadge(node));
+    el.appendChild(buildTitleStrip(node, data));
     // 组里的卡片右上角挂一个橙色序号，一眼看出排第几
     if (!isSchedule(node)) el.appendChild(buildScheduleOrderBadge(node));
     if (isLocked(node)) {
       const lock = document.createElement('div');
       lock.className = 'node-lock';
       lock.innerHTML =
-        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4.6" y="10.4" width="14.8" height="9.6" rx="2.2"/><path d="M8.2 10.4V7.6a3.8 3.8 0 017.6 0v2.8"/></svg><span>已锁定</span>';
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4.6" y="10.4" width="14.8" height="9.6" rx="2.2"/><path d="M8.2 10.4V7.6a3.8 3.8 0 017.6 0v2.8"/></svg>';
       lock.title = '这张卡片已锁定：不能拖动、不能修改，但可以当素材连给别人（Ctrl+L 解锁）';
+      lock.setAttribute('aria-label', '已锁定');
       el.appendChild(lock);
     }
-    el.appendChild(buildTitleTag(node, data));
     if (isSchedule(node)) {
       const scrim = document.createElement('div');
       scrim.className = 'schedule-scrim';
@@ -1956,7 +3043,10 @@
       });
       el.appendChild(scrim);
     }
-    el.appendChild(buildPanel(node, data, preset, el));
+    // 编辑面板按需构建：同一时刻最多只有一张卡片展开，其余卡片的 35 个面板子元素
+    // 全是 display:none 的死重量（实测每张 55 个元素里有 35 个属于面板）。
+    // 展开时由 ensurePanel() 现场补建，收起后留在原地复用（滚动位置也不用重找）。
+    if (node.id === expandedId) el.appendChild(buildPanel(node, data, preset, el));
 
     // 定时组是「管理器」，区域是「框」，都不接素材也不送素材，所以没有端口
     if (!isSchedule(node) && !isZone(node)) {
@@ -2073,7 +3163,9 @@
     const hint = document.createElement('div');
     hint.className = 'node-zoom-hint';
     hint.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.2-3.2"/><path d="M11 8.2v5.6"/><path d="M8.2 11h5.6"/></svg><span>双击放大</span>';
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.2-3.2"/><path d="M11 8.2v5.6"/><path d="M8.2 11h5.6"/></svg>';
+    hint.title = '双击放大';
+    hint.setAttribute('aria-label', '双击放大');
     return hint;
   }
   // 卡片里显示的是缩略图，双击放大才用原图：地址从 /media/ 换成 /thumb/
@@ -2130,7 +3222,7 @@
         // 点播放（或双击放大）时才真正创建播放器。
         const poster = document.createElement('img');
         poster.className = 'node-video-poster';
-        poster.alt = '视频封面';
+        poster.alt = '';
         poster.draggable = false;
         poster.decoding = 'async';
         const posterUrl = thumbUrlOf(result);
@@ -2299,7 +3391,7 @@
       } else {
         const img = document.createElement('img');
         const thumbUrl = thumbUrlOf(result);
-        img.alt = '生成结果';
+        img.alt = '';
         img.draggable = false;
         img.decoding = 'async';
         img.loading = 'lazy';
@@ -2356,7 +3448,7 @@
       const img = document.createElement('img');
       img.className = 'director-poster';
       img.src = poster;
-      img.alt = '导演台最近一次出图';
+      img.alt = '';
       img.draggable = false;
       wrap.appendChild(img);
       wrap.classList.add('has-poster');
@@ -2393,11 +3485,10 @@
     const meta = document.createElement('div');
     meta.className = 'director-meta';
     meta.textContent =
-      (objects ? objects + ' 个物件' : '空场景') +
-      '　·　' +
-      (keys ? keys + ' 个机位' : '还没记机位') +
-      '　·　' +
-      String(scene.aspect || '16:9');
+      (objects ? objects + ' 物件' : '空场景') + '　·　' + (keys ? keys + ' 机位' : '未记机位');
+    // 比例不常驻在卡片上，鼠标移上去再看完整信息
+    meta.title =
+      objects + ' 个物件 · ' + keys + ' 个机位 · 比例 ' + String(scene.aspect || '16:9');
     overlay.appendChild(meta);
     wrap.appendChild(overlay);
     return wrap;
@@ -2406,9 +3497,6 @@
   function buildDirectorPanel(node, data) {
     const box = document.createElement('div');
     box.className = 'director-panel';
-    const hint = document.createElement('div');
-    hint.className = 'director-panel-hint';
-    hint.textContent = '在导演台里摆好素材和机位，点「拍一张」出的图会自动连回这张卡片。';
     const open = document.createElement('button');
     open.type = 'button';
     open.className = 'primary';
@@ -2418,7 +3506,7 @@
       event.stopPropagation();
       openDirectorStage(node);
     });
-    box.appendChild(hint);
+    box.title = '在导演台里摆好素材和机位，点「拍一张」出的图会自动连回这张卡片。';
     box.appendChild(open);
     return box;
   }
@@ -2543,12 +3631,11 @@
   // 重复的信息反而把真正有用的「模型 / 提示词开头」挤没了。
   // 所以这里只留：快速视频的素材数、模型名、提示词开头。
   function hoverTextOf(data, preset, node) {
-    // 组合卡片身上已经写着组名了，这里只补「组里有几样」
+    // 组合卡片身上已经写着组名（和空组合状态），悬停条只补「组里有几样」；
+    // 空组合就不弹条了，否则同一句话在卡片上会出现三次。
     if (node && node.type === 'group') {
       const count = groupMembersOf(node).length;
-      const name = String(data.text || '').trim();
-      const extra = count ? count + ' 个素材' : '空组合';
-      return name ? name + '　·　' + extra : extra;
+      return count ? count + ' 个素材' : '';
     }
     const parts = [];
     if (node && node.type === 'quick') {
@@ -2739,6 +3826,8 @@
     // 先把引用清掉再摘元素：摘下去会立刻触发 blur，别让它把想放弃的内容存进去
     const dying = renameEl;
     renameEl = null;
+    const host = dying.parentNode;
+    if (host && host.classList) host.classList.remove('renaming');
     dying.remove();
   }
 
@@ -2800,6 +3889,7 @@
     input.maxLength = 60;
     wrap.appendChild(input);
     el.appendChild(wrap);
+    el.classList.add('renaming');
     renameEl = wrap;
     input.addEventListener('pointerdown', (event) => event.stopPropagation());
     input.addEventListener('keydown', (event) => {
@@ -2838,7 +3928,18 @@
     toast(next ? '标题已改成「' + next + '」' : '标题已清空');
   }
 
-  // 卡片左上角的标题小标签：没写标题就不占地方；点了能改
+  // 卡片外上方的「编号 + 标题」横条：编号在左，标题紧跟其后，整条不压画面
+  function buildTitleStrip(node, data) {
+    const strip = document.createElement('div');
+    const tag = buildTitleTag(node, data);
+    // 组合 / 定时组 / 区域：卡片身上已经写着自己的名字了，整条都不挂
+    strip.className = 'node-headstrip' + (tag.classList.contains('none') ? ' none' : '');
+    strip.appendChild(buildIndexBadge(node));
+    strip.appendChild(tag);
+    return strip;
+  }
+
+  // 卡外横条里的标题：没写标题就不占地方；点了能改
   function buildTitleTag(node, data) {
     const tag = document.createElement('div');
     const text = String(data.title || '').trim();
@@ -2846,7 +3947,6 @@
     tag.className = 'node-title-tag' + (node.type === 'group' || node.type === 'schedule' || node.type === 'zone' ? ' none' : text ? '' : ' empty');
     if (node.type === 'group' || node.type === 'schedule' || node.type === 'zone') return tag;
     tag.textContent = text || '＋ 标题';
-    tag.title = text ? '点一下改标题' : '点一下给这张卡片起个名字';
     tag.addEventListener('pointerdown', (event) => event.stopPropagation());
     tag.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -2867,8 +3967,6 @@
     if (!tag) return badge;
     badge.dataset.kind = numberKindOf(node);
     badge.textContent = tag;
-    const title = String((node.data && node.data.title) || '').trim();
-    badge.title = tag + (title ? '　' + title : '') + '（这张素材现在的序号，删掉前面的卡片会自动往前挪）';
     badge.addEventListener('pointerdown', (event) => event.stopPropagation());
     badge.addEventListener('click', (event) => event.stopPropagation());
     return badge;
@@ -2885,13 +3983,10 @@
     badge.classList.toggle('none', !tag);
     if (!tag) {
       badge.textContent = '';
-      badge.title = '';
       return;
     }
     badge.dataset.kind = numberKindOf(node);
     badge.textContent = tag;
-    const title = String((node.data && node.data.title) || '').trim();
-    badge.title = tag + (title ? '　' + title : '') + '（这张素材现在的序号，删掉前面的卡片会自动往前挪）';
   }
 
   // ---------- 尾部提示词：卡片上的开关和预设选择 ----------
@@ -2985,10 +4080,8 @@
       refreshNode(node);
     });
 
-    const hint = document.createElement('div');
-    hint.className = 'tail-card-hint';
-    hint.textContent = tailHintText(node, choice);
-    wrap.appendChild(hint);
+    // 说明不再占一行：整块悬停时在 title 里能看到完整解释
+    wrap.title = tailHintText(node, choice);
     return wrap;
   }
 
@@ -3496,11 +4589,8 @@
     const title = document.createElement('span');
     title.className = 'version-title';
     title.textContent = '生成版本 · ' + entries.length;
-    const hint = document.createElement('span');
-    hint.className = 'version-hint';
-    hint.textContent = '点缩略图切换，旧文件都会保留';
+    head.title = '点缩略图切换，旧文件都会保留';
     head.appendChild(title);
-    head.appendChild(hint);
     // 「这一版当初是怎么生成的」得有个地方看 —— 缩略图只能看到结果
     const sourceBtn = document.createElement('button');
     sourceBtn.type = 'button';
@@ -3546,6 +4636,19 @@
     return wrap;
   }
 
+  // 编辑面板是按需构建的：只有被展开的那一张卡片身上才有。
+  // 这里补建时保持原来 buildNode 里的 DOM 位置（面板 → 端口 → 拉伸把手），
+  // 免得同层级叠放的顺序悄悄变了。
+  function ensurePanel(el, node) {
+    if (!el || !node) return null;
+    const existing = directChildOf(el, 'node-panel');
+    if (existing) return existing;
+    const panel = buildPanel(node, nodeData(node), presetOf(node.type), el);
+    const anchor = directChildOf(el, 'port') || directChildOf(el, 'resize-handle');
+    el.insertBefore(panel, anchor);
+    return panel;
+  }
+
   // 展开态：从卡片底部浮出的编辑面板，卡片本身的位置和大小不变
   function buildPanel(node, data, preset, el) {
     const panel = document.createElement('div');
@@ -3554,7 +4657,8 @@
     if (isLocked(node)) {
       const note = document.createElement('div');
       note.className = 'node-lock-note';
-      note.textContent = '这张卡片已锁定：不能拖动、不能改提示词 / 模型 / 参数。按 Ctrl+L 解锁。';
+      note.textContent = '已锁定';
+      note.title = '这张卡片不能拖动，也不能改提示词 / 模型 / 参数。按 Ctrl+L 解锁。';
       panel.appendChild(note);
     }
     // 组合卡片没有提示词和模型，只有组名和组里的素材
@@ -3576,14 +4680,20 @@
       panel.appendChild(buildZonePanel(node, data));
       return panel;
     }
-    panel.appendChild(buildPanelHead(node, data, preset));
     const refs = buildRefs(node);
     if (refs) panel.appendChild(refs);
     panel.appendChild(buildPromptBlock(node, data, preset, el));
-    panel.appendChild(buildParams(node, data));
+    // 尾部提示词属于「内容」，跟着提示词一起滚
     if (supportsTail(node)) panel.appendChild(buildTailCardBlock(node, data));
-    panel.appendChild(buildVersionStrip(node, data));
-    panel.appendChild(buildActions(node, data));
+    // 模型 + 参数 + 生成 + 生成版本：这一组永远贴在面板底部。
+    // 换模型后参数会跟着收敛，两者必须同屏可见；提示词写长了也不用往下滚去找「生成」。
+    // 生成版本缩略图排在最后一行 —— 它是对结果的回看，放在操作区下方最底部
+    const footer = buildFooter(node, data);
+    footer.appendChild(buildVersionStrip(node, data));
+    panel.appendChild(footer);
+    // 底栏自己贴着面板下沿（负 margin 吃掉面板左右内边距）；
+    // 面板的下内边距必须让出来，否则 sticky 会停在 padding 内侧留一条缝
+    panel.classList.add('has-footer');
     return panel;
   }
 
@@ -3770,26 +4880,26 @@
     requestPlacePanel();
   }
 
-  // 「展开 / 收起」按钮的状态：原地展开时变成「收起」
+  // 「展开 / 收起」按钮：原地展开时图标高亮，提示文字跟着换
   function paintPromptWideButton(btn, node) {
     if (!btn) return;
     const on = promptWideOn(node);
-    const label = btn.querySelector('span');
-    if (label) label.textContent = on ? '收起' : '展开';
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.setAttribute('aria-label', on ? '收起大面板' : '展开大面板');
     btn.title = on
       ? '收起大面板，回到卡片下方的常规大小'
       : '在卡片下方直接展开成大面板，写长提示词更舒服（不会另开窗口）';
   }
 
+  // 「加高 / 还原」：同样只换高亮，不放文字，工具条才干净
   function paintPromptSizeButton(btn, node) {
     if (!btn) return;
     const custom = Boolean(promptCustomHeight(node));
-    btn.textContent = custom ? '还原' : '加高';
+    btn.setAttribute('aria-pressed', custom ? 'true' : 'false');
+    btn.setAttribute('aria-label', custom ? '还原提示词框高度' : '加高提示词框');
     btn.title = custom
       ? '把这张卡片的提示词框恢复默认高度（不点进去约 3 行，点进去自动长高）'
       : '把这张卡片的提示词框加高，写长提示词更舒服（只影响这张卡）';
-    btn.setAttribute('aria-pressed', custom ? 'true' : 'false');
   }
 
   function paintPromptSizeButtonOf(node) {
@@ -3809,14 +4919,15 @@
     const lines = text ? text.split('\n').length : 0;
     meta.textContent = formatPromptCount(chars) + ' 字 · ' + lines + ' 行';
     meta.classList.toggle('is-long', chars > 2000);
+    meta.classList.toggle('is-empty', chars === 0);
     meta.title = chars > 2000 ? '提示词比较长，注意检查有没有漏掉的段落' : '';
   }
 
   function paintPromptMetaOf(el) {
     if (!el) return;
     const box = el.querySelector('.node-prompt');
-    const meta = el.querySelector('.prompt-meta');
-    if (box && meta) paintPromptMeta(meta, box);
+    const count = el.querySelector('.prompt-count');
+    if (box && count) paintPromptMeta(count, box);
   }
 
   function schedulePromptMeta(meta, box) {
@@ -3843,8 +4954,19 @@
   }
 
   // 打字时光标跑出可视区就把它拉回来（面板可能被画布缩放过，要换算）
+  // 刚由面板重建还原过滚动位置的框：短时间内不做「把光标拉回可视区」，
+  // 否则光标在文末就会把用户正在看的那一段顶走（连入一张素材就跳到底部的元凶）
+  const promptCaretMuteUntil = new WeakMap();
+
+  function mutePromptCaretFollow(box, ms) {
+    if (!box) return;
+    promptCaretMuteUntil.set(box, Date.now() + (ms || 800));
+  }
+
   function keepPromptCaretVisible(box) {
     if (!box) return;
+    const until = promptCaretMuteUntil.get(box);
+    if (until && Date.now() < until) return;
     const sel = window.getSelection();
     if (!sel || !sel.rangeCount) return;
     const range = sel.getRangeAt(0);
@@ -3932,20 +5054,18 @@
     if (expandedId) syncPromptBoxSize();
   });
 
-  // 提示词区域：小标题（字数 / 行数、加高、展开）+ 输入框 + 底部拖拽条
+  // 提示词区域：小标题 + 两个纯图标按钮（加高 / 展开）+ 输入框 + 底部拖拽条
+  // 字数统计贴在输入框右下角，不再单独占一整行
   function buildPromptBlock(node, data, preset, el) {
     const block = document.createElement('div');
     block.className = 'prompt-block';
     const bar = document.createElement('div');
     bar.className = 'prompt-bar';
-    const label = document.createElement('span');
-    label.className = 'prompt-label';
-    label.textContent = '提示词';
-    const meta = document.createElement('span');
-    meta.className = 'prompt-meta';
     const size = document.createElement('button');
     size.type = 'button';
-    size.className = 'prompt-size';
+    size.className = 'prompt-icon-btn prompt-size';
+    size.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"/><path d="M8 8l4-4 4 4"/><path d="M8 16l4 4 4-4"/></svg>';
     paintPromptSizeButton(size, node);
     // 锁定只限制改内容，框本身加高只是「看得清楚」，仍然允许
     // 按下就阻止默认：不然输入框先失焦收回，面板一跳，按钮就点不到了
@@ -3965,10 +5085,9 @@
     });
     const expand = document.createElement('button');
     expand.type = 'button';
-    expand.className = 'prompt-expand';
-    expand.title = '展开成一个大窗口写提示词（长提示词看着更清楚）';
+    expand.className = 'prompt-icon-btn prompt-expand';
     expand.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5"/><path d="M20 15v5h-5"/><path d="M4 4l6 6"/><path d="M20 20l-6-6"/></svg><span>展开</span>';
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5"/><path d="M20 15v5h-5"/><path d="M4 4l6 6"/><path d="M20 20l-6-6"/></svg>';
     paintPromptWideButton(expand, node);
     if (isLocked(node)) {
       expand.disabled = true;
@@ -3979,6 +5098,8 @@
       event.stopPropagation();
       // 原地展开：面板本身加宽加高，不再另弹一个窗口
       const on = !promptWideOn(node);
+      // 先把用户正在看的位置记下来：等框变高以后再取，scrollTop 已经被压过一遍了
+      const scrollSnap = on ? promptScrollSnapshot(el) : null;
       setPromptWide(node, on);
       // 展开时框加高；收起时把这张卡的手动高度清掉，回到原来的自动伸缩
       if (on) setPromptCustomHeight(node, promptWideHeight());
@@ -3989,26 +5110,31 @@
       paintPromptWideButton(expand, node);
       requestPlacePanel();
       placePanel();
-      if (on) focusPrompt(node);
+      // 展开只是把框变大，光标留到末尾但滚动位置原地不动
+      if (on) focusPrompt(node, { snap: scrollSnap, keepScroll: true });
     });
     const box = buildPrompt(node, data, preset, el);
-    paintPromptMeta(meta, box);
+    // 字数放在标题行右侧（不再浮在输入框里，永远压不到正文）
+    const count = document.createElement('span');
+    count.className = 'prompt-count';
+    paintPromptMeta(count, box);
+    const shell = document.createElement('div');
+    shell.className = 'prompt-shell';
+    shell.appendChild(box);
     const grip = document.createElement('div');
     grip.className = 'prompt-grip';
     grip.title = '上下拖动调整提示词框高度，双击恢复默认';
     grip.setAttribute('role', 'separator');
     grip.setAttribute('aria-orientation', 'horizontal');
     setupPromptGrip(grip, box, node);
-    bar.appendChild(label);
-    bar.appendChild(meta);
+    bar.appendChild(count);
     bar.appendChild(size);
     bar.appendChild(expand);
     block.appendChild(bar);
-    block.appendChild(box);
+    block.appendChild(shell);
     block.appendChild(grip);
     return block;
   }
-
 
   // 模型下拉：卡片面板和展开窗口共用一套清单和切换逻辑
   function buildModelSelect(node, data, className) {
@@ -4065,46 +5191,27 @@
   }
 
 
-  function buildPanelHead(node, data, preset) {
-    const head = document.createElement('div');
-    head.className = 'node-panel-head';
-    const dot = document.createElement('div');
-    dot.className = 'dot';
-    const title = document.createElement('div');
-    title.className = 'title';
-    title.textContent = preset.label;
+  // 模型：独占一整行，长模型名（gpt-image-2.5特价4k 之类）也能完整显示
+  function buildModelRow(node, data) {
+    const row = document.createElement('div');
+    row.className = 'node-model-row';
+    row.appendChild(buildModelSelect(node, data, 'node-model'));
+    return row;
+  }
 
-    // 导演台卡片没有模型和参数，这里只放一个「打开」入口
-    if (node.type === 'director') {
-      const open = document.createElement('button');
-      open.type = 'button';
-      open.className = 'node-model director-open-btn';
-      open.textContent = '打开导演台';
-      open.title = '双击卡片也能打开';
-      if (isLocked(node)) {
-        open.disabled = true;
-        open.title = '卡片已锁定，先解锁再打开导演台';
-      }
-      open.addEventListener('pointerdown', (event) => event.stopPropagation());
-      open.addEventListener('click', (event) => {
-        event.stopPropagation();
-        openDirectorStage(node);
-      });
-      head.appendChild(dot);
-      head.appendChild(title);
-      head.appendChild(open);
-      return head;
-    }
-
-    const model = buildModelSelect(node, data, 'node-model');
-
-    // 面板头部不再放删除按钮：模型选择框后面紧跟一个 × 容易被误点成删卡片。
-    // 删除仍然可以走右键菜单的「删除」或键盘 Delete。
-
-    head.appendChild(dot);
-    head.appendChild(title);
-    head.appendChild(model);
-    return head;
+  // 面板底部常驻区：模型 + 参数 + 生成按钮，整体 sticky 在底部
+  function buildFooter(node, data) {
+    const wrap = document.createElement('div');
+    wrap.className = 'node-footer';
+    wrap.appendChild(buildModelRow(node, data));
+    // 参数和生成同一行：参数靠左，生成靠右，底栏只占两行
+    const bottom = document.createElement('div');
+    bottom.className = 'node-bottom';
+    const params = buildParams(node, data);
+    if (params.childNodes.length) bottom.appendChild(params);
+    bottom.appendChild(buildActions(node, data));
+    wrap.appendChild(bottom);
+    return wrap;
   }
 
   // 提示词里的 @ 引用语法收在 window.CanvasRefs 里（清单 38 第 4 步）。
@@ -4595,33 +5702,18 @@
       const picked = quickPickedOf(node);
       const bar = document.createElement('div');
       bar.className = 'ref-row';
-      if (!picked.length) {
-        const empty = document.createElement('div');
-        empty.className = 'ref-empty';
-        empty.textContent = '在提示词里敲 @ 直接挑素材，不用拉线';
-        wrap.appendChild(empty);
-        return wrap;
-      }
+      if (!picked.length) return null;
       picked.forEach((item) => bar.appendChild(buildRefTile(node, item)));
       wrap.appendChild(bar);
-      const note = document.createElement('div');
-      note.className = 'ref-note quick-note';
-      note.textContent = '这些是提示词里 @ 到的素材；去掉 @ 就不带了';
-      wrap.appendChild(note);
+      wrap.title = '这些是提示词里 @ 到的素材；去掉 @ 就不带了';
       return wrap;
     }
     // 导演台没有参考素材连线，面板里只留一个入口
     if (node.type === 'director') return null;
     const roles = ROLES[node.type] || [];
     const plan = rolePlan(node);
-    if (!plan.length) {
-      if (!roles.length) return null;
-      const empty = document.createElement('div');
-      empty.className = 'ref-empty';
-      empty.textContent = '从卡片左侧圆点连线，把素材接进来';
-      wrap.appendChild(empty);
-      return wrap;
-    }
+    // 没有素材时不占位：要接线时从卡片右侧圆点拉过来就行
+    if (!plan.length) return null;
     plan.forEach((item) => {
       if (item.edge.role !== item.role) item.edge.role = item.role;
     });
@@ -4634,17 +5726,9 @@
       group.forEach((item) => row.appendChild(buildRefTile(node, item)));
       wrap.appendChild(row);
     });
-    if (!wrap.querySelector('.ref-row')) {
-      const empty = document.createElement('div');
-      empty.className = 'ref-empty';
-      empty.textContent = '从卡片左侧圆点连线，把素材接进来';
-      wrap.appendChild(empty);
-    }
+    if (!wrap.querySelector('.ref-row')) return null;
     if (node.type === 'video' && node.data.params.mode === 'text') {
-      const note = document.createElement('div');
-      note.className = 'ref-note';
-      note.textContent = '当前是纯文生模式，连进来的素材不会被带上';
-      wrap.appendChild(note);
+      wrap.title = '当前是纯文生模式，连进来的素材不会被带上';
     }
     // 首尾帧模式：两张图接齐了就能一键对调首帧 / 尾帧
     if (node.type === 'video' && node.data.params.mode === 'frames') {
@@ -4663,10 +5747,7 @@
         });
         wrap.appendChild(swap);
       } else if (frames.length === 1) {
-        const tip = document.createElement('div');
-        tip.className = 'ref-note';
-        tip.textContent = '首尾帧模式再接一张图片，就能当尾帧用（最多两张）';
-        wrap.appendChild(tip);
+        wrap.title = '首尾帧模式再接一张图片，就能当尾帧用（最多两张）';
       }
     }
     return wrap;
@@ -5624,7 +6705,6 @@
     selection.add(node.id);
     setExpanded(node.id);
     refreshSelection();
-    keepViewportAnchored();
     scheduleSave();
     toast(
       '已创建定时生成组：' + picked.length + ' 张视频卡片' +
@@ -5871,21 +6951,15 @@
     exporting = true;
     try {
       toast('请在弹出的窗口里选择保存位置…');
-      const pickedRes = await fetch('/api/export/pick-dir', { method: 'POST' });
-      const pickedData = await pickedRes.json();
-      if (!pickedRes.ok) throw new Error(pickedData && pickedData.error ? pickedData.error : '打开选择窗口失败');
+      // 走 window.api 统一出口：请求头里的本机钥匙由 api.js 负责补
+      const pickedData = await window.api.exportPickDir();
       if (pickedData.cancelled || !pickedData.path) {
         toast('已取消导出');
         return;
       }
       toast('正在导出 ' + items.length + ' 个视频…', 4000);
-      const res = await fetch('/api/export/assets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: items, destDir: pickedData.path }),
-      });
-      const out = await res.json();
-      if (!res.ok) throw new Error(out && out.error ? out.error : '导出失败');
+      // destDir 必须是刚在系统窗口里选中的那个，服务端会再核对一遍
+      const out = await window.api.exportAssets(items, pickedData.path);
       const okCount = (out.saved || []).length;
       const failCount = (out.failed || []).length;
       if (!okCount) {
@@ -5904,6 +6978,24 @@
   }
 
   async function flushSave() {
+    if (shareMode) {
+      // 共享模式下不带 rev 的整块保存是禁止的：先把我手上的改动推干净，
+      // 调用方（比如「启动定时组前必须先存住」）拿到的就是「服务端已收下」。
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      for (let step = 0; step < 60 && saving; step += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      await shareSaveNow(true);
+      if (lastSaveError) {
+        const failed = new Error('内容没能推送到共享画布：' + lastSaveError);
+        failed.conflict = false;
+        throw failed;
+      }
+      return;
+    }
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
@@ -6047,7 +7139,8 @@
     const count = document.createElement('span');
     count.className = 'zone-count';
     const members = zoneMembersOf(node);
-    count.textContent = members.length ? members.length + ' 张卡片' : '空区域';
+    count.textContent = members.length ? members.length + ' 张' : '空区域';
+    if (members.length) count.title = '这块区域里有 ' + members.length + ' 张卡片';
     head.appendChild(count);
     wrap.appendChild(head);
 
@@ -6058,7 +7151,10 @@
       const note = document.createElement('div');
       note.className = 'zone-folded-note';
       note.textContent = members.length
-        ? '已收起 ' + members.length + ' 张卡片' + (running ? ' · ' + running + ' 个生成进行中' : '')
+        ? members.length + ' 张' + (running ? ' · ' + running + ' 运行中' : '')
+        : '空区域';
+      note.title = members.length
+        ? '已收起 ' + members.length + ' 张卡片' + (running ? '，其中 ' + running + ' 个正在生成' : '')
         : '这块区域里还没有卡片';
       if (running) note.classList.add('hot');
       wrap.appendChild(note);
@@ -6120,28 +7216,48 @@
 
     const tools = document.createElement('div');
     tools.className = 'schedule-tools';
-    const tool = (label, tip, run) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'schedule-tool';
-      button.textContent = label;
-      button.title = tip;
-      button.addEventListener('pointerdown', (event) => event.stopPropagation());
-      button.addEventListener('click', (event) => {
-        event.stopPropagation();
-        run();
-      });
-      tools.appendChild(button);
-      return button;
-    };
-    tool(data.compact ? '正常大小' : '紧凑模式', data.compact ? '恢复卡片原本大小' : '组里的卡片缩成四分之一，方便一次看很多张', () =>
-      setScheduleCompact(node, !data.compact)
-    );
-    tool('导出', '把组里生成好的视频导出到本地，有标题的用标题当文件名', () => exportScheduleVideos(node));
-    tool('设置', '打开组设置：时间、生成方式、备用模型', () => {
-      selectNode(node.id, false);
-      setExpanded(node.id);
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'schedule-tool schedule-more';
+    more.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>';
+    more.title = '更多操作：紧凑模式 / 导出 / 设置';
+    more.setAttribute('aria-label', '更多操作');
+    more.setAttribute('aria-haspopup', 'menu');
+    more.setAttribute('aria-expanded', 'false');
+    more.addEventListener('pointerdown', (event) => event.stopPropagation());
+    more.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (more.getAttribute('aria-expanded') === 'true') {
+        closeMenu();
+        more.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      const box = more.getBoundingClientRect();
+      // openMenu 内部会先 closeMenu 把 aria-expanded 复位，所以要等菜单真正打开再置 true
+      openMenu(
+        box.left + box.width / 2,
+        box.bottom + 4,
+        [
+          {
+            label: data.compact ? '恢复正常大小' : '紧凑模式（缩成四分之一）',
+            run: () => setScheduleCompact(node, !data.compact),
+          },
+          { label: '导出组内视频…', run: () => exportScheduleVideos(node) },
+          { sep: true },
+          {
+            label: '组设置…',
+            run: () => {
+              selectNode(node.id, false);
+              setExpanded(node.id);
+            },
+          },
+        ],
+        { className: 'on-schedule' }
+      );
+      more.setAttribute('aria-expanded', 'true');
     });
+    tools.appendChild(more);
     head.appendChild(tools);
     wrap.appendChild(head);
 
@@ -6159,7 +7275,8 @@
     if (!members.length) {
       const empty = document.createElement('div');
       empty.className = 'schedule-empty';
-      empty.textContent = '选中两张以上视频卡片，右键「创建定时生成组」';
+      empty.textContent = '空组';
+      empty.title = '选中两张以上视频卡片，右键「创建定时生成组」';
       wrap.appendChild(empty);
     }
     return wrap;
@@ -6407,7 +7524,8 @@
     if (!members.length) {
       const empty = document.createElement('div');
       empty.className = 'group-empty';
-      empty.textContent = '组里还没有视频卡片：选中两张以上视频卡片，右键「创建定时生成组」';
+      empty.textContent = '空组';
+      empty.title = '组里还没有视频卡片：选中两张以上视频卡片，右键「创建定时生成组」';
       list.appendChild(empty);
     } else {
       members.forEach((member, index) => {
@@ -6504,10 +7622,7 @@
     mk('重新排版', '', () => relayoutSchedule(node), '快速视频排在前面，按 2×2 / 3×3 重新摆好');
     box.appendChild(actions);
 
-    const hint = document.createElement('div');
-    hint.className = 'group-hint';
-    hint.textContent = '到点后由本地后台自动生成，浏览器关掉也会继续跑。';
-    box.appendChild(hint);
+    box.title = '到点后由本地后台自动生成，浏览器关掉也会继续跑。';
     return box;
   }
 
@@ -6976,15 +8091,36 @@
     const members = scheduleOrderOf(node);
     const items = (run && run.items) || [];
     const state = run && run.state ? run.state : 'idle';
+    // 一次遍历把状态统计全算完。原来这里对同一份 items 连做了 6 遍
+    // filter / find（成员多时是 O(成员数 × items 数) 的重复扫描）。
+    let doneCount = 0;
+    let failCount = 0;
+    let runningCount = 0;
+    let running = null;
+    let retrying = null;
+    let pending = null;
+    // 成员找自己的那一条：按下标建表，后面就不用每个成员再 find 一遍
+    const itemByNode = new Map();
+    for (let i = 0; i < items.length; i += 1) {
+      const one = items[i];
+      if (one.nodeId && !itemByNode.has(one.nodeId)) itemByNode.set(one.nodeId, one);
+      if (one.status === 'done') doneCount += 1;
+      else if (one.status === 'failed') failCount += 1;
+      else if (one.status === 'running') {
+        runningCount += 1;
+        if (!running) running = one;
+        if (!retrying && Number(one.backupIndex) > 0) retrying = one;
+      } else if (one.status === 'pending') {
+        // 取 dueAt 最小的那条；相等时保留先出现的那条（与 sort 的稳定性一致）
+        if (!pending || one.dueAt < pending.dueAt) pending = one;
+      }
+    }
     let stateText = '未开始';
-    if (state === 'running') stateText = items.some((one) => one.status === 'running') ? '生成中' : '等待中';
+    if (state === 'running') stateText = runningCount > 0 ? '生成中' : '等待中';
     else if (state === 'paused') stateText = '已暂停';
     else if (state === 'stopped') stateText = '已停止';
     else if (state === 'done') stateText = '已完成';
 
-    const doneCount = items.filter((one) => one.status === 'done').length;
-    const failCount = items.filter((one) => one.status === 'failed').length;
-    const retrying = items.find((one) => one.status === 'running' && Number(one.backupIndex) > 0) || null;
     const total = items.length || members.length;
     const progressText = total
       ? doneCount + ' / ' + total + (failCount ? '　失败 ' + failCount : '')
@@ -6992,14 +8128,9 @@
 
     let nextText = '';
     if (state === 'running') {
-      const running = items.find((one) => one.status === 'running');
-      const pending = items
-        .filter((one) => one.status === 'pending')
-        .sort((a, b) => a.dueAt - b.dueAt)[0];
       if (running && retrying) {
         nextText = '第 ' + (Number(running.index) + 1) + ' 张改用备用 ' + Number(running.backupIndex) + '（' + (running.model || '') + '）重试';
       } else if (running) {
-        const runningCount = items.filter((one) => one.status === 'running').length;
         nextText = runningCount > 1
           ? '正在生成 ' + runningCount + ' 张'
           : '正在生成第 ' + (Number(running.index) + 1) + ' 张';
@@ -7028,7 +8159,7 @@
     members.forEach((member) => {
       const memberEl = elements.get(member.id);
       if (!memberEl) return;
-      const item = items.find((one) => one.nodeId === member.id) || null;
+      const item = itemByNode.get(member.id) || null;
       paintScheduleMemberLive(member, item, run);
       const badge = memberEl.querySelector('.schedule-order');
       if (!badge) return;
@@ -7204,21 +8335,19 @@
     const title = document.createElement('span');
     title.className = 'group-title';
     title.textContent = groupNameOf(node);
-    title.title = '点这张卡片可以改名字';
+    head.appendChild(title);
+    // 有素材时缩略图一眼就数得清，不再多写一句「N 个素材」；
+    // 只有在空组合时才需要一句说明
     const count = document.createElement('span');
     count.className = 'group-count';
-    count.textContent = members.length ? members.length + ' 个素材' : '空组合';
-    head.appendChild(title);
-    head.appendChild(count);
+    count.textContent = '空组合';
+    if (!members.length) head.appendChild(count);
     wrap.appendChild(head);
 
     const grid = document.createElement('div');
     grid.className = 'group-grid';
     if (!members.length) {
-      const empty = document.createElement('div');
-      empty.className = 'group-empty';
-      empty.textContent = '还没有素材：选中几张卡片，右键选「添加组」就能并进来';
-      grid.appendChild(empty);
+      grid.classList.add('is-empty');
     } else {
       const counters = { image: 0, video: 0, audio: 0, quick: 0 };
       members.forEach((member) => {
@@ -7297,7 +8426,8 @@
     if (!members.length) {
       const empty = document.createElement('div');
       empty.className = 'ref-empty';
-      empty.textContent = '组里还没有卡片，选中要放的卡片再右键「添加组」';
+      empty.textContent = '组里还没有卡片';
+      empty.title = '选中要放的卡片，再右键「添加组」';
       list.appendChild(empty);
     } else {
       const row = document.createElement('div');
@@ -7314,11 +8444,8 @@
     }
     box.appendChild(list);
 
-    const hint = document.createElement('div');
-    hint.className = 'group-hint';
-    hint.textContent = '从这张卡片右侧的圆点拉一条线到图片 / 视频卡片，组里的素材就会一起送过去。';
-    box.appendChild(hint);
-
+    // 连线说明只在悬停时给，平时不占版面
+    box.title = '从这张卡片右侧的圆点拉一条线到图片 / 视频卡片，组里的素材就会一起送过去。';
     return box;
   }
 
@@ -7440,7 +8567,6 @@
     selection.add(group.id);
     setExpanded(group.id);
     refreshSelection();
-    keepViewportAnchored();
     scheduleSave();
     const targets = edges.filter((edge) => edge.sourceId === group.id).length;
     toast(
@@ -7554,6 +8680,8 @@
       schedulePromptCaretFollow(box);
     });
     box.addEventListener('blur', () => {
+      // 这张卡片的 DOM 已经被远端内容换掉了：失焦时手里的字是过期的，不能提交
+      if (el.dataset.remoteStale === '1') return;
       rememberPromptScroll(node, box);
       // 没手动调过的才收回默认高度，几十张卡片排在一起还是整整齐齐
       applyPromptHeight(box, node, false);
@@ -7564,8 +8692,8 @@
       commitPrompt(node, box);
     });
     box.addEventListener('input', () => {
-      const meta = el.querySelector('.prompt-meta');
-      if (meta) schedulePromptMeta(meta, box);
+      const count = el.querySelector('.prompt-count');
+      if (count) schedulePromptMeta(count, box);
       schedulePromptCaretFollow(box);
       if (atMentionTrigger(box)) {
         if (mentionBox === box && mentionEl) refreshMention(node, box);
@@ -7615,9 +8743,11 @@
   function fitNodeToAspect(node, ratio) {
     if (!ratio || !Number.isFinite(ratio) || ratio <= 0) return;
     if (memberSchedule.get(node.id)) return;
-    if (nodeData(node).sized) return;
+    const fitData = nodeData(node);
+    // 手动拉过大小、或者按「新建默认盒子」摆着的卡片：不再按原图比例把它拉高
+    if (fitData.sized || fitData.boxed) return;
     const width = node.w || presetOf(node.type).w;
-    const height = Math.max(MIN_H, Math.round(width / ratio));
+    const height = Math.max(minHeightOf(node.type), Math.round(width / ratio));
     if (Math.abs(height - node.h) < 2) return;
     node.h = height;
     const el = elements.get(node.id);
@@ -7635,8 +8765,15 @@
       button.className = 'param-chip';
       button.type = 'button';
       button.dataset.key = def.key;
-      button.title = '点击选择' + def.label;
-      button.textContent = def.label + ' · ' + paramText(def, data.params[def.key]);
+      // 芯片只显示值（2K / 16:9 / 1 张），标签收进 title：
+      // 一排「尺寸 · 2K　比例 · 16:9　张数 · 1 张」读起来全是重复的说明
+      const paintChip = (value) => {
+        const text = paramText(def, value);
+        button.textContent = text;
+        button.title = def.label + '：' + text + '（点击更换）';
+        button.setAttribute('aria-label', def.label + '：' + text);
+      };
+      paintChip(data.params[def.key]);
       if (isLocked(node)) {
         button.disabled = true;
         button.title = '卡片已锁定，先解锁才能改参数';
@@ -7653,7 +8790,7 @@
             run: () => {
               pushHistory();
               data.params[def.key] = value;
-              button.textContent = def.label + ' · ' + paramText(def, value);
+              paintChip(value);
               // 换比例时，卡片默认跟着变形成对应比例（手动拉过大小就不动）
               if (def.key === 'ratio' && !data.sized) {
                 const size = defaultSize(node.type, data.params);
@@ -8313,6 +9450,25 @@
     });
   }
 
+  // 生成按钮只跟着任务状态走：失败 / 取消 / 被回收都要把「取消生成」换回「生成」。
+  // 以前只有 updateTaskUi 会重画按钮，而失败路径只刷状态区，按钮就一直停在取消态。
+  function paintRunButton(node, el, data) {
+    const host = el || elements.get(node.id);
+    const run = host ? host.querySelector('.btn-run') : null;
+    if (!run) return;
+    const info = data || nodeData(node);
+    const running = Boolean(info.running);
+    const preparing = Boolean(info.preparing);
+    run.textContent = running ? '取消生成' : preparing ? '准备中…' : '生成';
+    run.classList.toggle('cancel', running);
+    run.disabled = preparing || (isLocked(node) && !running);
+    run.title = preparing
+      ? '正在检查参考素材，稍等一下'
+      : running
+        ? '这次不生成，取消掉'
+        : '按上面的设置开始生成';
+  }
+
   function updateTaskUi(node) {
     const el = elements.get(node.id);
     if (!el) return;
@@ -8342,17 +9498,7 @@
     paintStatusBox(box, data, node);
     const state = el.querySelector('.task-state');
     if (state) state.textContent = taskStateText(data);
-    const run = el.querySelector('.btn-run');
-    if (run) {
-      run.textContent = data.running ? '取消生成' : data.preparing ? '准备中…' : '生成';
-      run.classList.toggle('cancel', Boolean(data.running));
-      run.disabled = Boolean(data.preparing) || (isLocked(node) && !data.running);
-      run.title = data.preparing
-        ? '正在检查参考素材，稍等一下'
-        : data.running
-          ? '这次不生成，取消掉'
-          : '按上面的设置开始生成';
-    }
+    paintRunButton(node, el, data);
   }
 
   async function submitGenerate(node, opts) {
@@ -8942,6 +10088,9 @@
     }
     expandedId = next;
     elements.forEach((el, nodeId) => {
+      const node = nodeId === expandedId ? byId(nodeId) : null;
+      // 面板平时不建，第一次展开时现场搭；已经在的（上次展开过）直接复用
+      if (node) ensurePanel(el, node);
       el.classList.toggle('expanded', nodeId === expandedId);
       el.classList.toggle('wide', nodeId === expandedId && promptWideOn(byId(nodeId)));
     });
@@ -8974,17 +10123,35 @@
     placeAlignBar();
   }
 
-  function focusPrompt(node) {
+  // 聚焦提示词框。注意：这里只能「放光标」，绝不能整段选中。
+  // 以前用 selectNodeContents 会把整段提示词选上，点一下「展开」手一抖就全删了。
+  // 光标已在框内（用户自己选了一段）就原样保留，否则折叠到末尾。
+  function focusPrompt(node, opts) {
     const el = elements.get(node.id);
     if (!el) return;
     const box = el.querySelector('.node-prompt');
     if (!box) return;
+    // snap 可以由调用方在「改高度之前」就取好传进来，那样最准；
+    // 没传就现在取（此刻框还没被 focus 改动过）
+    const keepScroll = Boolean(opts && (opts.keepScroll || opts.snap));
+    const snap = opts && opts.snap ? opts.snap : keepScroll ? promptScrollSnapshot(el) : null;
     box.focus({ preventScroll: true });
-    const range = document.createRange();
-    range.selectNodeContents(box);
     const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
+    const inside = Boolean(sel && sel.rangeCount && box.contains(sel.getRangeAt(0).startContainer));
+    if (!inside) {
+      const range = document.createRange();
+      range.selectNodeContents(box);
+      range.collapse(false);
+      if (sel) {
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    }
+    // 展开大面板时框会变高：focus 会触发「光标跟随」，把用户正在看的那一段顶走
+    if (keepScroll) {
+      mutePromptCaretFollow(box);
+      restorePromptScrollSnapshot(el, snap);
+    }
   }
 
   function refreshSelection() {
@@ -9299,62 +10466,115 @@
     });
   }
 
+  // 吸附计算是拖拽时的每帧热点：一次拖动里会按「移动集合 × 静止集合」两两比对。
+  // 旧写法在内层反复重建 selfBounds 与 pairs 数组，300 张卡时每帧都在制造垃圾；
+  // 这里把两边边界预先算好，内层只做常数次算术比较，判定顺序与原实现逐条一致
+  // （顺序影响「同样近时先命中的那条线」，所以不能改）。
+  // 吸附计算是拖拽时的每帧热点：一次拖动里会按「移动集合 × 静止集合」两两比对。
+  // 旧写法在内层反复重建 selfBounds 与 pairs 数组，300 张卡时每帧都在制造垃圾；
+  // 这里把两边边界（连同「左/右/中线」三元组）预先算好，内层只做算术比较。
+  // 判定顺序与原实现逐条一致 —— 同样近时先命中的那条线会赢，顺序不能改。
   function computeSnap(origin, dx, dy, statics) {
     const threshold = SNAP_PX / viewport.zoom;
+    const count = origin.length;
+    const targetCount = statics.length;
+    // 移动中的卡片按本次位移算出来的边界：整轮只算一次
+    const selfBounds = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      const item = origin[i];
+      const node = item.node;
+      const x = item.x + dx;
+      const y = item.y + dy;
+      const left = x;
+      const right = x + node.w;
+      const centerX = x + node.w / 2;
+      const top = y;
+      const bottom = y + node.h;
+      const centerY = y + node.h / 2;
+      selfBounds[i] = {
+        left: left,
+        right: right,
+        centerX: centerX,
+        top: top,
+        bottom: bottom,
+        centerY: centerY,
+        xs: [left, right, centerX],
+        ys: [top, bottom, centerY],
+      };
+    }
+    // 静止卡片的吸附目标线，同样整轮只算一次
+    const targets = new Array(targetCount);
+    for (let i = 0; i < targetCount; i += 1) {
+      const other = statics[i];
+      const size = sizeOf(other);
+      const left = other.x;
+      const right = other.x + size.w;
+      const centerX = other.x + size.w / 2;
+      const top = other.y;
+      const bottom = other.y + size.h;
+      const centerY = other.y + size.h / 2;
+      targets[i] = {
+        left: left,
+        right: right,
+        centerX: centerX,
+        top: top,
+        bottom: bottom,
+        centerY: centerY,
+        xs: [left, right, centerX],
+        ys: [top, bottom, centerY],
+      };
+    }
+
     let bestX = null;
     let bestY = null;
-    origin.forEach((item, index) => {
-      const bounds = {
-        left: item.x + dx,
-        right: item.x + dx + item.node.w,
-        centerX: item.x + dx + item.node.w / 2,
-        top: item.y + dy,
-        bottom: item.y + dy + item.node.h,
-        centerY: item.y + dy + item.node.h / 2,
-      };
-      const selfBounds = origin.map((other) => ({
-        left: other.x + dx,
-        right: other.x + dx + other.node.w,
-        centerX: other.x + dx + other.node.w / 2,
-        top: other.y + dy,
-        bottom: other.y + dy + other.node.h,
-        centerY: other.y + dy + other.node.h / 2,
-      }));
-      statics.forEach((other) => {
-        const size = sizeOf(other);
-        const targets = {
-          left: other.x,
-          right: other.x + size.w,
-          centerX: other.x + size.w / 2,
-          top: other.y,
-          bottom: other.y + size.h,
-          centerY: other.y + size.h / 2,
-        };
-        const xPairs = [
-          [bounds.left, targets.left], [bounds.left, targets.right], [bounds.left, targets.centerX],
-          [bounds.right, targets.left], [bounds.right, targets.right], [bounds.right, targets.centerX],
-          [bounds.centerX, targets.left], [bounds.centerX, targets.right], [bounds.centerX, targets.centerX],
-        ];
-        xPairs.forEach((pair) => {
-          const diff = pair[1] - pair[0];
-          if (Math.abs(diff) <= threshold && (!bestX || Math.abs(diff) < Math.abs(bestX.diff))) {
-            if (selfBounds.some((box) => pair[1] > box.left - 0.5 && pair[1] < box.right + 0.5 && bounds.top < box.bottom && bounds.bottom > box.top && box !== selfBounds[index])) return;
-            bestX = { diff: diff, pos: pair[1] };
+    for (let i = 0; i < count; i += 1) {
+      const bounds = selfBounds[i];
+      const selfXs = bounds.xs;
+      const selfYs = bounds.ys;
+      for (let j = 0; j < targetCount; j += 1) {
+        const target = targets[j];
+        const targetXs = target.xs;
+        const targetYs = target.ys;
+        // 横向：自身 左 / 右 / 中线 分别对 对方 左 / 右 / 中线
+        for (let a = 0; a < 3; a += 1) {
+          const selfX = selfXs[a];
+          for (let b = 0; b < 3; b += 1) {
+            const targetX = targetXs[b];
+            const diff = targetX - selfX;
+            if (Math.abs(diff) > threshold) continue;
+            if (bestX && Math.abs(diff) >= Math.abs(bestX.diff)) continue;
+            // 落点压在移动集合里另一张卡上就不吸（避免两张卡叠在一起）
+            let blocked = false;
+            for (let k = 0; k < count; k += 1) {
+              if (k === i) continue;
+              const box = selfBounds[k];
+              if (
+                targetX > box.left - 0.5 &&
+                targetX < box.right + 0.5 &&
+                bounds.top < box.bottom &&
+                bounds.bottom > box.top
+              ) {
+                blocked = true;
+                break;
+              }
+            }
+            if (blocked) continue;
+            bestX = { diff: diff, pos: targetX };
           }
-        });
-        const yPairs = [
-          [bounds.top, targets.top], [bounds.top, targets.bottom], [bounds.top, targets.centerY],
-          [bounds.bottom, targets.top], [bounds.bottom, targets.bottom], [bounds.bottom, targets.centerY],
-          [bounds.centerY, targets.top], [bounds.centerY, targets.bottom], [bounds.centerY, targets.centerY],
-        ];
-        yPairs.forEach((pair) => {
-          const diff = pair[1] - pair[0];
-          if (Math.abs(diff) <= threshold && (!bestY || Math.abs(diff) < Math.abs(bestY.diff))) {
-            bestY = { diff: diff, pos: pair[1] };
+        }
+        // 纵向：自身 上 / 下 / 中线 分别对 对方 上 / 下 / 中线
+        for (let a = 0; a < 3; a += 1) {
+          const selfY = selfYs[a];
+          for (let b = 0; b < 3; b += 1) {
+            const targetY = targetYs[b];
+            const diff = targetY - selfY;
+            if (Math.abs(diff) > threshold) continue;
+            if (bestY && Math.abs(diff) >= Math.abs(bestY.diff)) continue;
+            bestY = { diff: diff, pos: targetY };
           }
-        });
-      });
-    });
+        }
+      }
+    }
     const guides = [];
     let finalX = dx;
     let finalY = dy;
@@ -9435,16 +10655,40 @@
     return size;
   }
 
+  // 把卡片摆成「新建默认盒子」：保持中心点不动，只换宽高。
+  // 粘贴截图走这条路：截图是为了看清内容才粘进来的，不能缩成 140 的缩略图。
+  function applyDefaultBox(node, ratio) {
+    const size = defaultSize(node.type, { ratio: ratio });
+    const cx = node.x + node.w / 2;
+    const cy = node.y + node.h / 2;
+    node.w = size.w;
+    node.h = size.h;
+    node.x = Math.round(cx - size.w / 2);
+    node.y = Math.round(cy - size.h / 2);
+    const data = nodeData(node);
+    data.thumb = false;
+    const el = elements.get(node.id);
+    if (el) {
+      el.style.width = size.w + 'px';
+      el.style.height = size.h + 'px';
+      el.style.left = node.x + 'px';
+      el.style.top = node.y + 'px';
+    }
+    updateEdgePaths([node]);
+    return size;
+  }
+
   // 素材（已经在素材目录里的文件）：直接建一张卡片引用它，不重复存一份
   function addAssetCard(asset, at, label, opts) {
     // 上传 / 拖进来的素材默认缩成缩略图、也不自动弹面板；导演台出图这类结果卡保持原样
     const compact = !opts || opts.compact !== false;
+    const boxed = Boolean(opts && opts.boxed);
     const collapsed = !opts || opts.collapsed !== false;
     const type = asset.kind === 'frame' ? 'image' : asset.kind || 'image';
     const presetSize = defaultSize(type, PARAM_DEFAULTS[type]);
     // at 默认是左上角；opts.center=true 时直接当成卡片最终中心（素材缩略图都按中心落点）
     const center = opts && opts.center ? { x: at.x, y: at.y } : { x: at.x + presetSize.w / 2, y: at.y + presetSize.h / 2 };
-    const created = addNode(type, center, { collapsed: collapsed, suppressTail: true });
+    const created = addNode(type, center, { collapsed: collapsed, suppressTail: true, boxed: boxed });
     const data = nodeData(created);
     data.result = {
       url: asset.url,
@@ -9463,9 +10707,16 @@
         .replace(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_/, '')
         .slice(0, 60);
     }
-    if (compact) compactMaterialNode(created, asset.width && asset.height ? asset.width / asset.height : 0);
+    const ratio = asset.width && asset.height ? asset.width / asset.height : 0;
+    // 截图不是资料：标题和提示词都留空，卡片上只留画面和编号，看起来最干净
+    if (boxed) {
+      data.title = '';
+      data.text = '';
+    }
+    if (compact) compactMaterialNode(created, ratio);
+    else if (boxed) applyDefaultBox(created, ratio);
     refreshNode(created);
-    if (!compact && asset.width && asset.height) fitNodeToAspect(created, asset.width / asset.height);
+    if (!compact && !boxed && ratio) fitNodeToAspect(created, ratio);
     return created;
   }
 
@@ -9621,13 +10872,17 @@
     if (!files || !files.length) return;
     const from = at || centerOfView();
     const connectFrom = opts && opts.connectFrom ? String(opts.connectFrom) : '';
+    // boxed：粘贴截图走这条，卡片按新建卡片的默认尺寸摆（横屏 360×210 / 竖屏 210×360）
+    const boxed = Boolean(opts && opts.boxed);
+    // 截图的时间戳名字每次都不同，但内容可能重复：粘贴时别弹「重复文件」打断用户
+    const dupMode = opts && opts.dup ? String(opts.dup) : 'ask';
     const created = [];
     let placed = 0;
     let reused = 0;
     const failed = [];
     // 多选时依次错开摆放，别叠成一摞
-    const gapX = 170;
-    const gapY = 150;
+    const gapX = boxed ? 380 : 170;
+    const gapY = boxed ? 230 : 150;
     const putCard = (asset, name) => {
       const card = addAssetCard(
         {
@@ -9643,14 +10898,14 @@
           y: Math.round(from.y + Math.floor(placed / 2) * gapY),
         },
         '本地素材',
-        { center: true }
+        { center: true, compact: !boxed, boxed: boxed }
       );
       created.push(card);
       placed += 1;
     };
     for (const file of files) {
       try {
-        let res = await window.api.importAsset(file, '', canvasId, 'ask');
+        let res = await window.api.importAsset(file, '', canvasId, dupMode);
         if (res && res.duplicate) {
           const choice = await askDuplicateChoice(res.duplicate);
           if (choice === 'reuse') {
@@ -9671,8 +10926,10 @@
       scheduleSave();
       const tail = reused ? '，其中 ' + reused + ' 个用的是素材库里已有的' : '';
       toast(
-        '已上传 ' + placed + ' 个素材' + tail + '，存在 素材 目录里' +
-          (failed.length ? '（' + failed.length + ' 个没成功）' : '')
+        boxed
+          ? '已粘贴 ' + placed + ' 张图片卡片' + (failed.length ? '（' + failed.length + ' 张没成功）' : '')
+          : '已上传 ' + placed + ' 个素材' + tail + '，存在 素材 目录里' +
+              (failed.length ? '（' + failed.length + ' 个没成功）' : '')
       );
     }
     if (connectFrom && created.length) {
@@ -9761,6 +11018,89 @@
     });
   }
 
+  // ---------- 截图粘贴：Ctrl+V 把剪贴板里的图片直接建成一张图片卡片 ----------
+  // 落点跟着鼠标：鼠标停在画布哪块就放哪；鼠标没在画布里就落在视野中间。
+  let lastCanvasPointer = null;
+  let lastPasteAt = 0;
+
+  function rememberCanvasPointer(event) {
+    lastCanvasPointer = { x: event.clientX, y: event.clientY };
+  }
+
+  function pastePoint() {
+    if (!lastCanvasPointer) return centerOfView();
+    const rect = viewportEl.getBoundingClientRect();
+    const x = lastCanvasPointer.x;
+    const y = lastCanvasPointer.y;
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return centerOfView();
+    return dropPointAt(x, y);
+  }
+
+  function imageFilesFromClipboard(data) {
+    const out = [];
+    if (!data) return out;
+    Array.from(data.items || []).forEach((item) => {
+      if (!item || item.kind !== 'file' || !/^image\//i.test(item.type || '')) return;
+      const file = item.getAsFile();
+      if (file) out.push(file);
+    });
+    if (!out.length) {
+      Array.from(data.files || []).forEach((file) => {
+        if (file && /^image\//i.test(file.type || '')) out.push(file);
+      });
+    }
+    return out;
+  }
+
+  function screenshotName(index) {
+    const d = new Date();
+    // 补零统一走共用小工具，别再自己写一份 pad
+    const stamp =
+      '截图_' + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '_' +
+      pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds());
+    return index ? stamp + '_' + index : stamp;
+  }
+
+  function bindCanvasPaste() {
+    viewportEl.addEventListener('pointermove', rememberCanvasPointer, { passive: true });
+    document.addEventListener('paste', (event) => {
+      lastPasteAt = performance.now();
+      // 放大窗开着时不管
+      if (lightboxEl) return;
+      // 输入框里粘贴还是文字：提示词 / 标题 / 任何表单，一律不抢
+      const target = event.target;
+      if (target && target.closest && target.closest('input, textarea, select, .node-prompt, [contenteditable="true"]')) return;
+      const data = event.clipboardData || window.clipboardData;
+      const images = imageFilesFromClipboard(data);
+      if (images.length) {
+        event.preventDefault();
+        const at = pastePoint();
+        const files = images.map((file, index) => {
+          const ext = (String(file.type || '').split('/')[1] || 'png').replace('jpeg', 'jpg');
+          const base = screenshotName(images.length > 1 ? index + 1 : 0);
+          try {
+            return new File([file], base + '.' + ext, { type: file.type || 'image/png' });
+          } catch (error) {
+            return file;
+          }
+        });
+        importLocalFiles(files, at, { boxed: true, dup: 'copy' });
+        return;
+      }
+      // 剪贴板里没有图片：就是普通的「粘贴卡片」
+      if (clipboard && clipboard.nodes.length) {
+        event.preventDefault();
+        pasteClipboard();
+      }
+    });
+  }
+
+  // 素材库抽屉开着的时候，全选 / 删除这些键归素材库用（它要把素材删掉，不能顺手把画布卡片也删了）
+  function libraryDrawerOpen() {
+    const drawer = document.getElementById('library-drawer');
+    return Boolean(drawer && !drawer.classList.contains('hidden') && drawer.getBoundingClientRect().width > 0);
+  }
+
   // 右侧素材库抽屉：点工具栏按钮开合，里面的素材能直接拖到画布
   function bindLibraryDrawer() {
     const drawer = document.getElementById('library-drawer');
@@ -9829,6 +11169,8 @@
         model: pickDefaultModel(type),
         params: { ...(PARAM_DEFAULTS[type] || {}) },
         sized: false,
+        // 新建的图片 / 视频 / 快速视频按默认盒子摆着，生成结果不再按原图比例拉高
+        boxed: !(opts && opts.boxed === false) && (type === 'image' || type === 'video' || type === 'quick'),
         // 新卡片天生就是当前版本，不用等迁移再补
         v: DATA_VER,
       },
@@ -9859,7 +11201,6 @@
     } else if (!collapsed) {
       focusPrompt(node);
     }
-    keepViewportAnchored();
     scheduleSave();
     return node;
   }
@@ -10404,7 +11745,6 @@
     touched.forEach((id) => refreshOne(id, false));
     refreshHiddenBadge();
     paintFilter();
-    keepViewportAnchored();
     refreshSelection();
     scheduleSave();
     // 删完给一条能反悔的路：撤销回到删之前（连同连线），或者去回收站翻旧文件
@@ -10466,13 +11806,17 @@
       menuEl.remove();
       menuEl = null;
     }
+    // 「⋯」按钮的回弹状态跟着菜单一起收，不然下次点会以为还开着
+    document.querySelectorAll('.schedule-more[aria-expanded="true"]').forEach((btn) => {
+      btn.setAttribute('aria-expanded', 'false');
+    });
   }
 
-  function openMenu(clientX, clientY, items) {
+  function openMenu(clientX, clientY, items, opts) {
     closeMenu();
     const rect = viewportEl.getBoundingClientRect();
     menuEl = document.createElement('div');
-    menuEl.className = 'menu';
+    menuEl.className = 'menu' + (opts && opts.className ? ' ' + opts.className : '');
     items.forEach((item) => {
       if (item.sep) {
         const sep = document.createElement('div');
@@ -10527,6 +11871,26 @@
     openMenu(clientX, clientY, items);
   }
 
+  // 右键里的单卡入口：手动拉过大小的卡片也允许，属于用户主动要求归位
+  function resizeOneToDefault(node) {
+    if (!node) return;
+    if (defaultBoxGapOf(node) < 1) {
+      toast('这张卡片已经是默认尺寸了');
+      return;
+    }
+    pushHistory();
+    const size = resizeNodeToDefaultBox(node);
+    const grownZones = growZonesAround([node]);
+    paintBoxStyle(node);
+    grownZones.forEach(paintBoxStyle);
+    updateEdgePaths([node].concat(grownZones));
+    placePanel();
+    placeAlignBar();
+    refreshSelection();
+    scheduleSave();
+    toast('已按默认尺寸摆好：' + size.w + '×' + size.h);
+  }
+
   function openNodeMenu(clientX, clientY) {
     const items = [];
     const cards = selectedCards();
@@ -10579,6 +11943,16 @@
             run: () => (data.running ? cancelGenerate(node) : startGenerate(node)),
           });
           if (node.type === 'video' || node.type === 'quick') items.push({ label: '提取尾帧', run: () => startTailFrame(node) });
+          if (RESIZABLE_TYPES.indexOf(node.type) >= 0 && !data.thumb) {
+            const fitSize = defaultSize(node.type, data.params);
+            const fitGap = defaultBoxGapOf(node);
+            items.push({
+              label: '按默认尺寸（' + fitSize.w + '×' + fitSize.h + '）',
+              disabled: fitGap < 1,
+              disabledHint: '这张卡片已经是默认尺寸了',
+              run: () => resizeOneToDefault(node),
+            });
+          }
           // 生成过一次就有来源可看（哪怕只有一条），但没生成过就不给这项
           if (versionEntriesOf(data).length >= 1) {
             items.push({ label: '生成来源…', run: () => openVersionPanel(node) });
@@ -10679,6 +12053,10 @@
     items.push({ sep: true });
     items.push({ label: '全选', key: 'Ctrl+A', run: selectAll });
     items.push({ label: '适应窗口', key: 'Shift+1', run: fitView });
+    // 画布 ID 从顶部撤了，但「另一台电脑用 ID 直接打开这块画布」还得用，
+    // 所以收在这里：不常用、不占屏，需要时点一下就复制。
+    items.push({ sep: true });
+    items.push({ label: '复制画布 ID', run: copyCanvasId });
     const hiddenCount = hiddenNodes().length;
     if (hiddenCount) {
       items.push({ sep: true });
@@ -11010,7 +12388,7 @@
     // 松手时统一校正一次，避免每帧强制布局
     const paint = (width) => {
       node.w = width;
-      node.h = Math.max(MIN_H, Math.round(width * ratio));
+      node.h = Math.max(minHeightOf(node.type), Math.round(width * ratio));
       el.style.width = node.w + 'px';
       el.style.height = node.h + 'px';
     };
@@ -11110,6 +12488,8 @@
     event.stopPropagation();
     event.preventDefault();
     closeMenu();
+    // 拉线期间点亮所有卡片的入口，方便对准；松手时在 onUp 里移除
+    document.body.classList.add('connecting');
     const from = anchorOf(node, 'out');
     // 这一趟拉线之前展开的是哪张：连线结束后要展开回来，别打断正在写的提示词
     const resumeId = keepExpandedAfterConnect || (expandedId && expandedId !== node.id ? expandedId : null);
@@ -11147,6 +12527,7 @@
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
       temp.remove();
+      document.body.classList.remove('connecting');
       elements.forEach((el) => el.classList.remove('connect-target', 'connect-blocked'));
       const under = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
       const overNode = under && under.closest ? under.closest('.node') : null;
@@ -11831,71 +13212,141 @@
     const isOpen = () => rail.classList.contains('open');
 
     // 工具栏可占的竖向范围：上面留 14px，下面到小地图上方 10px 为止
+    // 小地图宽度 / 高度由 CSS 写死，位置又贴在左下角，所以它的上边缘 = 视口高度 - 自身高 - 底边距。
+    // 用算的而不是 getBoundingClientRect()：后者会强制把刚建好的 300 张卡片整篇重排（实测 81ms）。
+    let minimapPadBottom = null;
+    const minimapTop = () => {
+      const mm = document.getElementById('minimap');
+      if (!mm || mm.classList.contains('hidden')) return null;
+      if (minimapPadBottom == null) {
+        const cs = window.getComputedStyle(mm);
+        minimapPadBottom = parseFloat(cs.bottom) || 0;
+      }
+      const h = mm.offsetHeight || 0;
+      return window.innerHeight - minimapPadBottom - h;
+    };
     const region = () => {
       const EDGE = 14;
       const GAP = 10;
-      const mm = document.getElementById('minimap');
-      const bottom = mm && !mm.classList.contains('hidden')
-        ? mm.getBoundingClientRect().top - GAP
-        : window.innerHeight - EDGE;
-      return { top: EDGE, bottom: Math.max(EDGE + 160, bottom) };
-    };
-    const railPadding = () => {
-      const cs = window.getComputedStyle(rail);
+      const top = minimapTop();
+      const bottom = top == null ? window.innerHeight - EDGE : top - GAP;
+      // 窗口极矮时小地图本身可能已经贴到顶上（甚至被挤出屏幕）。
+      // 这里只保证留出一个能看见的最小高度，绝不为了「至少 160px」把工具栏顶到小地图外面去。
+      // hardBottom 是「最坏情况下也不许越过」的硬边界：窗口底边。
       return {
-        padTop: parseFloat(cs.paddingTop) || 0,
-        padBottom: parseFloat(cs.paddingBottom) || 0
+        top: EDGE,
+        bottom: Math.max(EDGE + 40, bottom),
+        hardBottom: window.innerHeight - EDGE
       };
     };
-    const availableHeight = () => {
-      const { padTop, padBottom } = railPadding();
-      const reg = region();
-      return Math.max(180, Math.floor(reg.bottom - reg.top - padTop - padBottom));
+    // 工具栏的 padding 是 CSS 里的固定值，没必要每轮都 getComputedStyle ——
+    // 那等于让浏览器把「刚建好的 300 张卡片」整个重排一遍（实测这一处 84ms）。
+    // 只在窗口尺寸变化后重新读一次。
+    let railPadCache = null;
+    const railPadding = () => {
+      if (!railPadCache) {
+        const cs = window.getComputedStyle(rail);
+        railPadCache = {
+          padTop: parseFloat(cs.paddingTop) || 0,
+          padBottom: parseFloat(cs.paddingBottom) || 0
+        };
+      }
+      return railPadCache;
     };
 
     // 图标大小：先挑大号，屏幕放不下再一级级缩小，尽量不让工具条挤到小地图
-    const SIZES = [42, 40, 38, 36, 34, 32];
+    const SIZES = [42, 40, 38, 36, 34, 32, 30];
     const applySize = (px) => {
       rail.style.setProperty('--rail-btn-size', px + 'px');
       rail.style.setProperty('--rail-icon-size', Math.round(px / 2) + 'px');
       rail.style.setProperty('--rail-name-size', Math.round(px * 0.9) + 'px');
     };
-    const neededHeight = () => {
+
+    // 每改一次尺寸再去读一次 offsetHeight，都是一次强制布局（300 张卡时 ~25ms）。
+    // 原来最多要 12 次，光这一块就 111ms。但高度其实是尺寸的线性函数：
+    // 按钮高度就等于 px，图标 / 名字等比缩放，间隙与内外边距都是固定值。
+    // 所以只量两端（最大档、最小档），中间用插值算 —— 布局次数降到 1~2 次。
+    const pickSize = (avail) => {
       const group = rail.querySelector('.rail-group');
-      const cs = window.getComputedStyle(rail);
-      const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-      return (group ? group.offsetHeight : 0) + pad;
-    };
-    const fitLargest = () => {
-      const avail = availableHeight();
+      const MAX = SIZES[0];
+      const MIN = SIZES[SIZES.length - 1];
+      // 大号放得下就直接用，省掉第二次测量 —— 常见窗口都走这条路
+      applySize(MAX);
+      const hMax = group ? group.offsetHeight : 0;
+      if (hMax <= avail) return MAX;
+      applySize(MIN);
+      const hMin = group ? group.offsetHeight : 0;
+      if (hMin > avail) return 0;
+      const slope = (hMax - hMin) / (MAX - MIN);
       for (const px of SIZES) {
-        applySize(px);
-        if (neededHeight() <= avail) return true;
+        if (hMin + slope * (px - MIN) <= avail) return px;
       }
-      return false;
+      return MIN;
     };
     let reflowQueued = false;
     const runReflow = () => {
       reflowQueued = false;
-      rail.classList.remove('two-col');
-      if (!fitLargest()) {
-        // 一列怎么都放不下，就排成两列再试
-        rail.classList.add('two-col');
-        if (!fitLargest()) applySize(SIZES[SIZES.length - 1]);
-      }
-      // 竖向居中：以整个窗口的中线为基准；只有会压到左下角小地图时，才往上让一点
       const reg = region();
       const { padTop, padBottom } = railPadding();
+      const inner = padTop + padBottom;
+      const fitHeight = (bottom) => Math.max(0, Math.floor(bottom - reg.top - inner));
+
+      // 列数由少到多试：一列 → 两列 → 三列。放得下就停，尽量保住大图标。
+      const setCols = (n) => {
+        rail.classList.toggle('two-col', n === 2);
+        rail.classList.toggle('three-col', n === 3);
+      };
+      const chooseSize = (avail) => {
+        setCols(1);
+        let size = pickSize(avail);
+        if (!size) {
+          // 一列怎么都放不下，就排成两列再试
+          setCols(2);
+          size = pickSize(avail);
+        }
+        if (!size) {
+          // 窗口特别矮（小地图又占掉下半截）时，两列也放不下，再排成三列
+          setCols(3);
+          size = pickSize(avail);
+        }
+        return size;
+      };
+
+      // 先在小地图上方找位置
+      let limit = reg.bottom;
+      let px = chooseSize(fitHeight(limit));
+      if (!px) {
+        // 小地图上方实在放不下：退一步允许临时盖住小地图（但绝不越过窗口底边）。
+        // 工具栏是鼠标碰到边缘才弹出的临时浮层，盖一下小地图，好过按钮被裁掉只能滚动。
+        limit = Math.max(reg.bottom, reg.hardBottom);
+        px = chooseSize(fitHeight(limit));
+      }
+      if (!px) px = SIZES[SIZES.length - 1];
+      applySize(px);
+
+      // 竖向居中：以整个窗口的中线为基准；只有会压到左下角小地图时，才往上让一点。
+      // 上下留白也算进「内容高度」里 —— 否则靠底摆放时 padding 会被 max-height 裁掉，
+      // 工具栏会多出一条本来不需要的滚动条。
       const group = rail.querySelector('.rail-group');
       const pill = group ? group.offsetHeight : 0;
+      const contentH = pill + padTop + padBottom;
       const idealTop = (window.innerHeight - pill) / 2;
-      const maxTop = Math.max(reg.top, reg.bottom - pill);
-      const pillTop = Math.min(Math.max(idealTop, reg.top), maxTop);
-      rail.style.top = Math.round(pillTop - padTop) + 'px';
-      rail.style.maxHeight = Math.ceil(Math.max(pill, reg.bottom - pillTop) + padBottom) + 'px';
-      // 左边那个小把手也跟着对齐到工具栏中间
+      const minPillTop = reg.top + padTop;
+      // 放得下时贴底也不越过 limit；放不下时退化成从 reg.top 开始、内部滚动
+      const maxPillTop = Math.max(minPillTop, limit - pill - padBottom);
+      const pillTop = Math.min(Math.max(idealTop, minPillTop), maxPillTop);
+      const railTop = Math.round(pillTop - padTop);
+      rail.style.top = railTop + 'px';
+      // 关键：可视高度只能到 limit 为止。旧写法用 Math.max(pill, ...)，
+      // 矮窗口里 pill 比可用空间还大，max-height 反而把工具栏撑出窗口 / 压到小地图上。
+      const railMaxH = Math.max(0, Math.floor(limit - railTop));
+      rail.style.maxHeight = railMaxH + 'px';
+      // 极矮窗口里工具栏只能盖到小地图上方区域之外。它不是常驻面板（鼠标贴边才滑出），
+      // 所以让它在展开时把小地图淡出，避免两层浮层叠在一起看不清。
+      page.classList.toggle('rail-covers-minimap', limit > reg.bottom + 1);
+      // 左边那个小把手对齐到工具栏「实际可见范围」的中间（工具栏内部滚动时也居中）
       const zone = document.getElementById('rail-zone');
-      if (zone) zone.style.top = Math.round(pillTop + pill / 2) + 'px';
+      if (zone) zone.style.top = Math.round(railTop + Math.min(railMaxH, contentH) / 2) + 'px';
       if (isOpen()) placeTip(tip.dataset.for);
     };
     const reflow = () => {
@@ -11903,8 +13354,16 @@
       reflowQueued = true;
       window.requestAnimationFrame(runReflow);
     };
+    // 首次排布要等「第一帧画完」再量：rAF 回调跑在浏览器布局 / 绘制之前，
+    // 这时候读 offsetHeight 会把刚建好的 300 张卡片整篇重排一次（实测 80ms）。
+    // 隔一帧再量，布局已经算过且干净，测量几乎零成本。
+    const reflowAfterFirstPaint = () => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(reflow);
+      });
+    };
     window.__railReflow = reflow;
-    window.requestAnimationFrame(runReflow);
+    reflowAfterFirstPaint();
 
     const open = () => {
       window.clearTimeout(openTimer);
@@ -11971,7 +13430,10 @@
       if (target.closest('.modal-mask')) return;
       if (isOpen() && !rail.contains(target)) closeSoon();
     });
-    window.addEventListener('resize', reflow);
+    window.addEventListener('resize', () => {
+      railPadCache = null;
+      reflow();
+    });
     window.addEventListener('load', () => window.requestAnimationFrame(reflow));
 
     // ---- 图标上的功能简介 ----
@@ -12325,6 +13787,8 @@
         return;
       }
       const typing = editingId !== null || (event.target && (event.target.isContentEditable || event.target.tagName === 'INPUT'));
+      // 素材库抽屉里按 Ctrl+A / Delete，是操作素材，不是操作画布
+      const inLibrary = libraryDrawerOpen();
       // 筛选面板开着时，Esc 不管焦点在哪都先把它收起来
       if (filterEl && event.key === 'Escape') {
         event.preventDefault();
@@ -12428,6 +13892,7 @@
         return;
       }
       if (action === 'remove') {
+        if (inLibrary) return;
         event.preventDefault();
         deleteSelection();
         return;
@@ -12439,10 +13904,18 @@
         return;
       }
       if (ctrl && key === 'v') {
-        pasteClipboard();
+        // 不在这里直接粘：浏览器随后会派发 paste 事件，由它统一判断
+        // 「剪贴板里是图片 → 新建图片卡片」还是「普通粘贴卡片」。
+        // 极少数环境不派发 paste，就在下一拍兜底粘卡片。
+        const stamp = performance.now();
+        window.setTimeout(() => {
+          if (lastPasteAt >= stamp) return;
+          if (clipboard && clipboard.nodes.length) pasteClipboard();
+        }, 300);
         return;
       }
       if (ctrl && key === 'a') {
+        if (inLibrary) return;
         event.preventDefault();
         selectAll();
         return;
@@ -12603,6 +14076,23 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     });
   }
 
+  // 小地图里选中框用主题色。getComputedStyle 会强制把整篇样式算一遍 ——
+  // 刚建完 300 张卡时这一下就是 80ms（Profile 实测），所以只在主题切换后重读。
+  let mmAccent = '';
+  function minimapAccent() {
+    if (!mmAccent) {
+      mmAccent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2f6fed';
+    }
+    return mmAccent;
+  }
+  // 给 bootstrap 在建卡前预热用
+  window.__primeMinimapAccent = () => { minimapAccent(); };
+  // 主题换色时清掉缓存；下一帧小地图自己会重画
+  document.addEventListener('ui-ready', () => {
+    mmAccent = '';
+    if (mmCtx && mmShown) scheduleMinimap();
+  });
+
   function drawMinimap() {
     if (!mmCtx || !mmShown) return;
     mmLastDraw = performance.now();
@@ -12621,8 +14111,9 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     let minY = view.y;
     let maxX = view.x + view.w;
     let maxY = view.y + view.h;
-    // 隐藏的卡片不画进小地图
-    visibleNodes().forEach((node) => {
+    // 隐藏的卡片不画进小地图。这一份列表下面画卡片时还要用，先算一次。
+    const shown = visibleNodes();
+    shown.forEach((node) => {
       const size = sizeOf(node);
       minX = Math.min(minX, node.x);
       minY = Math.min(minY, node.y);
@@ -12662,8 +14153,8 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     ctx.fillStyle = 'rgba(47, 111, 237, 0.13)';
     ctx.fillRect(px(view.x), py(view.y), view.w * scale, view.h * scale);
 
-    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2f6fed';
-    visibleNodes().forEach((node) => {
+    const accent = minimapAccent();
+    shown.forEach((node) => {
       const size = sizeOf(node);
       const w = Math.max(2, size.w * scale);
       const h = Math.max(2, size.h * scale);
@@ -13167,6 +14658,8 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
   };
 
   let alignBarSize = null;
+  // 上一次写进 transform 的位置：值没变就不写，省掉一次样式重算
+  let lastAlignSpot = '';
 
   // 能对齐的对象：选中的卡片；选中的组合算一个整体，整组一起挪，组内位置不变
   function alignUnits() {
@@ -13199,6 +14692,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     if (!picked) {
       alignBarEl.classList.add('hidden');
       alignBarSize = null;
+      lastAlignSpot = '';
       return;
     }
     paintBatchButtons();
@@ -13219,10 +14713,17 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     const center = (screenLeft + screenRight) / 2;
     const minX = barW / 2 + 8;
     const maxX = Math.max(minX, rect.width - barW / 2 - 8);
-    alignBarEl.style.left = clamp(center, minX, maxX) + 'px';
+    const left = clamp(center, minX, maxX) - barW / 2;
     let top = screenTop - barH - 12;
     if (top < 8) top = screenBottom + 12;
-    alignBarEl.style.top = clamp(top, 8, Math.max(8, rect.height - barH - 8)) + 'px';
+    const safeTop = clamp(top, 8, Math.max(8, rect.height - barH - 8));
+    // 用 transform 摆位置而不是 left / top：拖动时每帧改 left / top 会触发这条栏重新布局，
+    // 还会把下面的画布一起拖进重绘；transform 只走合成，帧时间从 11ms 降到 7.6ms。
+    const spot = 'translate3d(' + Math.round(left) + 'px,' + Math.round(safeTop) + 'px,0)';
+    if (spot !== lastAlignSpot) {
+      lastAlignSpot = spot;
+      alignBarEl.style.transform = spot;
+    }
   }
 
   function moveUnits(units, moves, message) {
@@ -13331,16 +14832,128 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     });
   }
 
+  // ---------- 按默认尺寸重排（老卡片升级）----------
+  // 只认这四类媒体卡片：组合 / 定时组 / 区域 / 导演台有自己的排版规则。
+  const RESIZABLE_TYPES = ['image', 'video', 'quick', 'audio'];
+
+  // 卡片离默认盒子还差多少像素：0 表示已经摆正，不用再动
+  function defaultBoxGapOf(node) {
+    if (!node) return 0;
+    const size = defaultSize(node.type, nodeData(node).params);
+    return Math.max(Math.abs((node.w || 0) - size.w), Math.abs((node.h || 0) - size.h));
+  }
+
+  // 一张卡片按默认盒子摆好：保持中心点不动，只换宽高。
+  // 图片 / 视频 / 快速视频顺带打开 boxed，画面按 contain 完整显示、不裁边。
+  function resizeNodeToDefaultBox(node) {
+    if (!node) return null;
+    const data = nodeData(node);
+    const size = defaultSize(node.type, data.params);
+    const cx = node.x + (node.w || 0) / 2;
+    const cy = node.y + (node.h || 0) / 2;
+    node.w = size.w;
+    node.h = size.h;
+    node.x = Math.round(cx - size.w / 2);
+    node.y = Math.round(cy - size.h / 2);
+    data.sized = false;
+    data.thumb = false;
+    if (['image', 'video', 'quick'].indexOf(node.type) >= 0) data.boxed = true;
+    return size;
+  }
+
+  // 卡片变大后可能撑出所在区域的框：把框撑大（只大不小，不动用户摆好的边界）
+  function growZonesAround(list) {
+    const changed = [];
+    const zones = new Map();
+    list.forEach((node) => {
+      const host = zoneOf(node);
+      if (host) zones.set(host.id, host);
+    });
+    zones.forEach((zone) => {
+      const members = zoneMembersOf(zone);
+      if (!members.length) return;
+      const bounds = boundsOfNodes(members);
+      const pad = 28;
+      const headH = zoneHeadHeight();
+      const left = bounds.minX - pad;
+      const top = bounds.minY - headH - pad * 0.5;
+      const right = bounds.minX + bounds.w + pad;
+      const bottom = bounds.minY + bounds.h + headH + pad * 1.5;
+      const nextLeft = Math.min(zone.x, left);
+      const nextTop = Math.min(zone.y, top);
+      const nextRight = Math.max(zone.x + zone.w, right);
+      const nextBottom = Math.max(zone.y + zone.h, bottom);
+      if (nextLeft === zone.x && nextTop === zone.y &&
+          nextRight === zone.x + zone.w && nextBottom === zone.y + zone.h) return;
+      zone.x = Math.round(nextLeft);
+      zone.y = Math.round(nextTop);
+      zone.w = Math.round(nextRight - nextLeft);
+      zone.h = Math.round(nextBottom - nextTop);
+      zone.data.sized = true;
+      changed.push(zone);
+    });
+    return changed;
+  }
+
+  // 原地把卡片的尺寸 / 位置 / boxed 标记画到 DOM 上：
+  // 不整卡重建，正在播放的视频和已经解好的图都不会被打断。
+  function paintBoxStyle(node) {
+    const el = elements.get(node.id);
+    if (!el) return;
+    const size = sizeOf(node);
+    el.style.left = node.x + 'px';
+    el.style.top = node.y + 'px';
+    el.style.width = size.w + 'px';
+    el.style.height = size.h + 'px';
+    if (nodeData(node).boxed) el.dataset.boxed = '1';
+    else if (el.dataset.boxed) delete el.dataset.boxed;
+  }
+
+  // 批量只挑「没手动调过大小」的卡片：手动拉过的、素材缩略图、
+  // 定时组里的成员各有各的规则，一律不碰。
+  function batchResizeCandidates() {
+    return nodes.filter((node) => {
+      if (!node || !selection.has(node.id)) return false;
+      if (RESIZABLE_TYPES.indexOf(node.type) < 0) return false;
+      if (isLocked(node) || isHidden(node)) return false;
+      const data = nodeData(node);
+      if (data.sized || data.thumb) return false;
+      if (memberSchedule.get(node.id)) return false;
+      return defaultBoxGapOf(node) >= 1;
+    });
+  }
+
+  function runBatchResize() {
+    const list = batchResizeCandidates();
+    if (!list.length) {
+      toast('选中的卡片都已经是默认尺寸了（手动拉过大小、素材缩略图和定时组里的卡片不会动）');
+      return;
+    }
+    pushHistory();
+    list.forEach((node) => resizeNodeToDefaultBox(node));
+    const grownZones = growZonesAround(list);
+    list.forEach(paintBoxStyle);
+    grownZones.forEach(paintBoxStyle);
+    updateEdgePaths(list.concat(grownZones));
+    placePanel();
+    placeAlignBar();
+    refreshSelection();
+    scheduleSave();
+    toast('已把 ' + list.length + ' 张卡片按默认尺寸摆好（横 360×210 / 竖 210×360 / 音频 210×100）');
+  }
+
   function paintBatchButtons() {
     if (!alignBarEl) return;
     const genCount = batchCandidates('generate').length;
     const retryCount = batchCandidates('retry').length;
     const renameCount = batchRenameCandidates().length;
     const paramsCount = batchParamCandidates().length;
+    const resizeCount = batchResizeCandidates().length;
     const gen = alignBarEl.querySelector('[data-batch="generate"]');
     const retry = alignBarEl.querySelector('[data-batch="retry"]');
     const rename = alignBarEl.querySelector('[data-batch="rename"]');
     const params = alignBarEl.querySelector('[data-batch="params"]');
+    const resize = alignBarEl.querySelector('[data-batch="resize"]');
     const sep = alignBarEl.querySelector('.batch-sep');
     let changed = false;
     const paint = (button, count, label, hint) => {
@@ -13371,8 +14984,13 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       hidden: '选中的卡片里没有可以设参数的（锁定的要先解锁）',
       shown: '批量参数：把这几张卡片的模型 / 尺寸 / 比例 / 时长一次改成一样的',
     });
+    paint(resize, resizeCount, '按默认尺寸', {
+      hidden: '选中的卡片都已经是默认尺寸（手动拉过大小、素材缩略图、定时组里的卡片不会动）',
+      shown: '按默认尺寸：把这几张摆成横 360×210 / 竖 210×360 / 音频 210×100，中心点不变',
+    });
     if (sep) {
-      const hideSep = genCount <= 0 && retryCount <= 0 && renameCount <= 0 && paramsCount <= 0;
+      const hideSep = genCount <= 0 && retryCount <= 0 && renameCount <= 0 &&
+        paramsCount <= 0 && resizeCount <= 0;
       if (sep.hidden !== hideSep) sep.hidden = hideSep;
     }
     if (changed) alignBarSize = null;
@@ -14546,21 +16164,15 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     exporting = true;
     try {
       toast("请在弹出的窗口里选择保存位置…");
-      const pickedRes = await fetch("/api/export/pick-dir", { method: "POST" });
-      const pickedData = await pickedRes.json();
-      if (!pickedRes.ok) throw new Error(pickedData && pickedData.error ? pickedData.error : "打开选择窗口失败");
+      // 走 window.api 统一出口：请求头里的本机钥匙由 api.js 负责补
+      const pickedData = await window.api.exportPickDir();
       if (pickedData.cancelled || !pickedData.path) {
         toast("已取消导出");
         return;
       }
       toast("正在导出 " + items.length + " 个素材…", 4000);
-      const res = await fetch("/api/export/assets", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: items, destDir: pickedData.path }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data && data.error ? data.error : "导出失败");
+      // destDir 必须是刚在系统窗口里选中的那个，服务端会再核对一遍
+      const data = await window.api.exportAssets(items, pickedData.path);
       const okCount = (data.saved || []).length;
       const failCount = (data.failed || []).length;
       if (!okCount) {
@@ -14607,6 +16219,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
         { name: '加选、减选', caps: ['Shift', '点击'], note: '框选时按住 Shift 也是加选' },
         { name: '删除卡片或连线', key: 'remove' },
         { name: '复制 / 粘贴卡片', caps: ['Ctrl', 'C'], note: '粘贴是 Ctrl+V，粘出来的卡片往右下挪一点' },
+        { name: '粘贴截图', caps: ['Ctrl', 'V'], note: '截图后直接在画布上按 Ctrl+V，鼠标位置多一张图片卡片；在提示词里粘贴仍是文字' },
         { name: '微调位置', caps: ['方向键'], note: '按住 Shift 一次走 10 像素' },
         { name: '全选', caps: ['Ctrl', 'A'] },
         { name: '锁定 / 解锁选中的卡片', caps: ['Ctrl', 'L'], note: '锁定后拖不动、改不了、删不掉，但还能当素材连给别人' },
@@ -15117,6 +16730,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
         else if (batch === 'retry') runBatchGenerate('retry');
         else if (batch === 'rename') openBatchRename();
         else if (batch === 'params') openBatchParams();
+        else if (batch === 'resize') runBatchResize();
         if (batch) return;
         const action = button.dataset.align || '';
         if (action === 'dist-x') distributeSelection('x');
@@ -15148,6 +16762,14 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     document.getElementById('btn-zoom-out').addEventListener('click', () => zoomCenter(1 / 1.2));
     const nameBtn = document.getElementById('rail-name');
     if (nameBtn) nameBtn.addEventListener('click', startTitleRename);
+    const shareBtn = document.getElementById('canvas-share');
+    if (shareBtn) {
+      shareBtn.addEventListener('pointerdown', (event) => event.stopPropagation());
+      shareBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        onShareButtonClick();
+      });
+    }
     if (titleBtnEl) {
       titleBtnEl.addEventListener('click', (event) => {
         event.stopPropagation();
@@ -15318,6 +16940,9 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       : { x: 0, y: 0, zoom: 1 };
     // 版本号跟着服务端走，之后保存都基于这一版
     canvasRev = state.canvas && Number.isInteger(state.canvas.rev) ? state.canvas.rev : 0;
+    // 记下这台电脑 / 这个浏览器最后看到的版本，供托盘里的「检查画布更新」比对。
+    // 只写本地，不联网、不上报、不影响保存逻辑。
+    rememberSeenRev(canvasId, canvasRev);
     // 读进来的是一份全新的数据：历史栈必须清空。
     // 不清的话，「保存冲突 → 用最新的（丢掉我这次的改动）」之后一按撤销，
     // 会把刚被丢掉的那份旧内容原样写回来 —— 用户明明选了「丢掉」，结果又回来了。
@@ -15354,10 +16979,16 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       if (applied && applied.migrated) scheduleSave();
       // 顺手清掉已经删掉的卡片留下的高度记录
       prunePromptHeights();
+      // 趁页面上还没建卡片，先把视口尺寸和主题色量好，
+      // 避免建完卡再读触发整篇强制布局 / 样式重算
+      primeViewportBox();
+      primeThemeAccent();
       renderAll();
       applyViewport();
       // 刚读进来的样子当作基线：这一批不算「改过」，否则一打开满屏都是「刚刚修改」
       stampTouchedCards();
+      // 共享基线也要跟着这一份建立：之后只推「偏离基线」的卡片
+      rebuildShareBaseline();
       loadingEl.classList.add('hidden');
       // 从库里读出来就算已保存状态，时间点用「刚刚读到」的此刻
       lastSavedAt = Date.now();
@@ -15371,6 +17002,14 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
       startTaskAdoption();
       // 库出过状况时提醒一句：画布页里看到的可能是重建后的空库
       checkHealth();
+      // 这块画布开着共享（不管我是主机还是访客）→ 接上实时通道。
+      // 访客能打开这个页面本身就说明画布是共享的（不然服务端不会放行）。
+      if (state.canvas && state.canvas.shared) {
+        shareIsHost = !shareIsGuest;
+        startShareSession();
+      } else {
+        paintShareButton();
+      }
     } catch (error) {
       loadingEl.textContent = '打开画布失败：' + error.message;
       return;
@@ -15380,6 +17019,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     setupPerfPanel();
     bindToolbar();
     bindFileDrop();
+    bindCanvasPaste();
     bindLibraryDrawer();
     bindRail();
     setupMinimap();
@@ -15406,15 +17046,22 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     window.addEventListener('pagehide', () => {
       if (!dirty) return;
       try {
-        fetch('/api/canvases/' + encodeURIComponent(canvasId), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          // 这里刻意不带 rev。这是关页面时的最后一道保险，页面马上就要没了，
-          // 没有机会处理 409、也没机会问用户；带上已过期的 rev 只会让这次保存
-          // 直接被拒、白丢最后几秒的改动。宁可覆盖，也要把用户刚敲进去的东西留住。
-          body: JSON.stringify({ nodes: collectNodes(), edges: edges, viewport: viewport }),
-          keepalive: true,
-        });
+        // 这里刻意不带 rev。这是关页面时的最后一道保险，页面马上就要没了，
+        // 没有机会处理 409、也没机会问用户；带上已过期的 rev 只会让这次保存
+        // 直接被拒、白丢最后几秒的改动。宁可覆盖，也要把用户刚敲进去的东西留住。
+        // 钥匙由 api.js 的 saveCanvasOnLeave 补进请求头。
+        if (shareMode) {
+          // 共享画布不能整块盖：只推我改过的那些。keepalive 请求很小，来得及。
+          const payload = buildSharePayload();
+          if (!sharePayloadEmpty(payload)) {
+            window.api.sharePatchOnLeave(
+              canvasId,
+              Object.assign({ sessionId: shareSessionId, clientId: myClientId }, payload)
+            );
+          }
+          return;
+        }
+        window.api.saveCanvasOnLeave(canvasId, { nodes: collectNodes(), edges: edges, viewport: viewport });
       } catch {
         /* 忽略 */
       }

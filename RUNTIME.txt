@@ -50,6 +50,7 @@
   无限画布.exe          约 0.2MB   启动器
   server/tray/CanvasTray.exe       系统托盘程序（由 CanvasTray.cs 编译）
   tools/icon-gen/MakeIcon.exe      图标生成工具
+  server/keybox-helper.exe         约 4.6KB   平台密钥保护（由 keybox.cs 编译）
   web/vendor/three/                本地 three.js（3D 导演台用）
     three.module.min.js   约 672KB
     OrbitControls.js

@@ -15,6 +15,7 @@
     { value: 'json', label: 'JSON（最常用）' },
     { value: 'form', label: '表单 form-urlencoded' },
     { value: 'text', label: '纯文本' },
+    { value: 'multipart', label: 'multipart 表单（带本地素材时用）' },
     { value: 'none', label: '不带请求体' },
   ];
   const UPLOAD_TYPES = [
@@ -479,7 +480,7 @@
     keyRow.appendChild(keyBox);
     body.appendChild(keyRow);
     body.appendChild(
-      hintRow('密钥只保存在这台电脑的 data\\config.json 里，不写进画布文件。整个文件夹复制到别的电脑时密钥会跟着走，别随便外发。')
+      hintRow('密钥加密后保存在这台电脑的 data\\config.json 里，不写进画布文件。加密钥匙（data\\secret.key）与当前 Windows 用户绑定：换个 Windows 账户或换台电脑就打不开，需要重新填一次密钥。')
     );
 
     body.appendChild(buildBalanceRow(channel));

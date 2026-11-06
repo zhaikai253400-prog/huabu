@@ -68,6 +68,9 @@
       '<div class="lib-foot">' +
       '  <span class="lib-pick" id="lib-pick">没有选中</span>' +
       '  <span class="grow"></span>' +
+      '  <button id="lib-all" title="把当前筛选出来的全部勾选（Ctrl+A）">全选</button>' +
+      '  <button id="lib-invert" title="勾选的取消、没勾的勾上">反选</button>' +
+      '  <button id="lib-clear" title="一个都不选">清空</button>' +
       '  <button id="lib-recycle" title="看看删掉的素材，还能摆回去">回收站</button>' +
       '  <button id="lib-orphan" title="清理没有被任何画布引用的素材">清理孤儿文件</button>' +
       '  <button class="danger" id="lib-delete">删除选中（进回收站）</button>' +
@@ -230,6 +233,7 @@
   function cardFor(item) {
     const card = document.createElement('div');
     card.className = 'lib-card';
+    card.dataset.relPath = item.relPath;
     card.title = item.relPath + '\n拖到画布上，就能在落点放一张卡片';
     card.draggable = false;
     card.addEventListener('dragstart', (event) => event.preventDefault());
@@ -330,16 +334,57 @@
 
   function renderFoot() {
     const el = host.querySelector('#lib-pick');
+    if (!el) return;
     const count = state.selected.size;
-    el.textContent = count ? '已选中 ' + count + ' 个' : '没有选中';
+    const total = state.items.length;
+    el.textContent = count ? '已选中 ' + count + ' / ' + total + ' 个' : '没有选中（当前 ' + total + ' 个）';
+    const allBtn = host.querySelector('#lib-all');
+    if (allBtn) allBtn.disabled = !total || count >= total;
+    const clearBtn = host.querySelector('#lib-clear');
+    if (clearBtn) clearBtn.disabled = !count;
   }
 
+  // 全选 / 反选 / 清空：只作用于「当前筛选出来的这一批」，
+  // 搜索或切类型之后看不见的那些不会被动到，避免误删。
+  function selectAllVisible() {
+    state.items.forEach((item) => state.selected.add(item.relPath));
+    paintSelection();
+  }
+
+  function invertVisible() {
+    state.items.forEach((item) => {
+      if (state.selected.has(item.relPath)) state.selected.delete(item.relPath);
+      else state.selected.add(item.relPath);
+    });
+    paintSelection();
+  }
+
+  function clearSelection() {
+    state.selected.clear();
+    paintSelection();
+  }
+
+  // 勾选状态改了之后，只更新卡片外观和底部计数，不整块重画（重画会丢滚动位置）
+  function paintSelection() {
+    host.querySelectorAll(".lib-card").forEach((card) => {
+      const rel = card.dataset.relPath || "";
+      const on = state.selected.has(rel);
+      card.classList.toggle("picked", on);
+      const box = card.querySelector(".lib-check");
+      if (box) box.checked = on;
+    });
+    renderFoot();
+  }
   async function reload() {
     if (!host) return;
     try {
       const data = await window.api.library({ kind: state.kind, q: state.q, sort: state.sort });
       state.items = data.items || [];
       state.stats = data.stats || null;
+      const alive = new Set(state.items.map((item) => item.relPath));
+      Array.from(state.selected).forEach((rel) => {
+        if (!alive.has(rel)) state.selected.delete(rel);
+      });
       renderKinds();
       renderGrid();
       renderStats();
@@ -506,6 +551,64 @@
     }
   }
 
+  // 面板是不是真的摆在眼前：画布抽屉靠 hidden 类控制，门户那条路是整块弹窗被移除
+  function panelVisible() {
+    if (!host || !host.isConnected) return false;
+    const drawer = host.closest('.library-drawer');
+    if (drawer) return !drawer.classList.contains('hidden') && drawer.getBoundingClientRect().width > 0;
+    const mask = host.closest('.modal-mask');
+    if (mask) return mask.isConnected && mask.getBoundingClientRect().width > 0;
+    return host.getBoundingClientRect().width > 0;
+  }
+
+  // 焦点在能打字的地方时快捷键让给输入框；复选框不算，点完勾选框再按 Ctrl+A 是很常见的操作
+  function typingFocus(event) {
+    const el = event.target;
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (tag === 'INPUT') {
+      const type = String(el.type || '').toLowerCase();
+      return type !== 'checkbox' && type !== 'radio' && type !== 'button' && type !== 'submit';
+    }
+    return false;
+  }
+
+  // 上面盖着别的弹窗（删除确认框之类）时，快捷键不给素材库用，免得确认框还没点就再删一轮
+  function otherDialogOpen() {
+    const masks = document.querySelectorAll('.modal-mask');
+    for (let index = 0; index < masks.length; index += 1) {
+      if (!masks[index].contains(host)) return true;
+    }
+    return false;
+  }
+
+  let keysBound = false;
+  // 快捷键挂在 document 上：原来挂在 host 上，可 host 拿不到焦点（点完卡片焦点在 BODY），等于死代码
+  function bindKeysOnce() {
+    if (keysBound) return;
+    keysBound = true;
+    // 用捕获阶段抢在画布前面：画布那边也在 document 上听 Ctrl+A / Delete
+    document.addEventListener('keydown', (event) => {
+      if (event.defaultPrevented) return;
+      if (!panelVisible() || otherDialogOpen() || typingFocus(event)) return;
+      const mod = event.ctrlKey || event.metaKey;
+      const key = String(event.key || '').toLowerCase();
+      if (mod && !event.altKey && key === 'a') {
+        event.preventDefault();
+        event.stopPropagation();
+        selectAllVisible();
+        return;
+      }
+      if (!mod && !event.altKey && (key === 'delete' || key === 'backspace')) {
+        event.preventDefault();
+        event.stopPropagation();
+        deleteSelected();
+      }
+    }, true);
+  }
+
   function mount(el, options) {
     host = el;
     opts = options || {};
@@ -529,6 +632,9 @@
       }, 250);
     });
     host.querySelector('#lib-refresh').addEventListener('click', reload);
+    host.querySelector('#lib-all').addEventListener('click', selectAllVisible);
+    host.querySelector('#lib-invert').addEventListener('click', invertVisible);
+    host.querySelector('#lib-clear').addEventListener('click', clearSelection);
     host.querySelector('#lib-delete').addEventListener('click', deleteSelected);
     host.querySelector('#lib-orphan').addEventListener('click', cleanOrphans);
     host.querySelector('#lib-recycle').addEventListener('click', () => {
@@ -536,6 +642,7 @@
       if (typeof window.openRecycleBin === 'function') window.openRecycleBin();
       else window.alert('回收站面板在画布页打开：删掉的素材都放在 data\\recycle 里，手动挪回素材目录也能恢复。');
     });
+    bindKeysOnce();
     reload();
   }
 
@@ -544,5 +651,8 @@
     reload: reload,
     formatBytes: formatBytes,
     selected: () => Array.from(state.selected),
+    selectAll: selectAllVisible,
+    invert: invertVisible,
+    clear: clearSelection,
   };
 })();

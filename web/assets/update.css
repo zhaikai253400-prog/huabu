@@ -1,0 +1,134 @@
+/* ---------- 检查画布更新窗口（托盘右键 → 检查画布更新…） ---------- */
+
+.update-shell {
+  max-width: 940px;
+  padding-top: 24px;
+  padding-bottom: 40px;
+}
+
+.update-card {
+  padding: 20px 22px 22px;
+}
+
+.update-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.update-head .section-title { margin: 0; }
+
+.update-head .hint { margin: 0 0 0 auto; }
+
+.update-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.update-row:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+}
+
+/* 有新版本的那一行给一条左侧色条：扫一眼就知道该看哪几行 */
+.update-row[data-state="new"] {
+  border-color: var(--warn);
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.update-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.update-row-name {
+  font-weight: 600;
+  font-size: 1em;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-row-facts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.82em;
+}
+
+.update-fact {
+  white-space: nowrap;
+}
+
+.update-id {
+  padding: 1px 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.94em;
+  line-height: 1.5;
+}
+
+.update-id:hover {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.update-badge {
+  flex: 0 0 auto;
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
+.update-row[data-state="new"] .update-badge {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.update-row[data-state="same"] .update-badge {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.update-row-actions {
+  flex: 0 0 auto;
+}
+
+.update-row-actions button {
+  padding: 6px 14px;
+  font-size: 0.86em;
+}
+
+.update-foot { margin-top: 14px; text-align: center; }
+
+@media (max-width: 620px) {
+  .update-row { flex-wrap: wrap; }
+  .update-row-actions { width: 100%; }
+  .update-row-actions button { width: 100%; }
+}

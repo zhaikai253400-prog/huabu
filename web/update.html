@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>检查画布更新 · 本地无限画布</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/style.css" />
+  <link rel="stylesheet" href="/assets/local-pages.css" />
+  <link rel="stylesheet" href="/assets/update.css" />
+</head>
+<body class="local-page">
+  <div class="topbar local-topbar">
+    <div class="brand"><span class="local-brand-dot"></span>检查画布更新</div>
+    <span class="local-sub">只读检查 · 不改任何画布</span>
+    <div class="chips">
+      <button id="btn-refresh" title="重新读一遍各块画布的版本号">重新检查</button>
+      <button class="primary" id="btn-open-canvas">打开画布</button>
+    </div>
+  </div>
+
+  <div class="wrap update-shell">
+    <div class="card-box update-card">
+      <div class="update-head">
+        <h2 class="section-title">哪块画布在别处改过</h2>
+        <span class="hint" id="update-hint">正在读取…</span>
+      </div>
+
+      <div class="local-note">
+        这里只读版本号（每保存一次 +1），不读卡片内容，也不改任何东西。
+        「这台电脑看过」指的是本浏览器上次打开或保存这块画布时的版本；
+        另一台电脑改过，这里就会标出新了几版。点「打开」再按需要载入最新版。
+      </div>
+
+      <div class="update-list" id="update-list"></div>
+
+      <div class="empty hidden" id="update-empty">还没有画布。</div>
+    </div>
+
+    <div class="hint update-foot">
+      这个窗口可以随便关掉：它不轮询、不后台跑，只在打开时读一次。
+    </div>
+  </div>
+
+  <script>window.__uiToken = '__UI_TOKEN__';</script>
+  <script src="/assets/utils.js"></script>
+  <script src="/assets/api.js"></script>
+  <script src="/assets/ui.js"></script>
+  <script src="/assets/canvas-update.js"></script>
+  <script src="/assets/update.js"></script>
+</body>
+</html>

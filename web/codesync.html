@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>同步程序代码 · 本地无限画布</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/style.css" />
+  <link rel="stylesheet" href="/assets/local-pages.css" />
+  <link rel="stylesheet" href="/assets/codesync.css" />
+</head>
+<body class="local-page">
+  <div class="topbar local-topbar">
+    <div class="brand"><span class="local-brand-dot"></span>同步程序代码</div>
+    <span class="local-sub">只同步程序 · 画布与素材各存各的</span>
+    <div class="chips">
+      <button id="btn-check" title="先对比一次，看看会改哪些文件，什么都不写">对比一下</button>
+      <button class="primary" id="btn-pull" disabled title="把对方的程序文件拉到这台电脑">开始同步</button>
+    </div>
+  </div>
+
+  <div class="wrap sync-shell">
+    <div class="card-box sync-card">
+      <div class="sync-head">
+        <h2 class="section-title">从另一台电脑拉取最新程序</h2>
+        <span class="hint" id="sync-hint">填好地址，先点「对比一下」</span>
+      </div>
+
+      <div class="sync-form">
+        <label for="sync-host">另一台电脑的画布地址</label>
+        <div class="sync-input-row">
+          <input id="sync-host" type="text" spellcheck="false" placeholder="http://192.168.3.13:17890"
+                 autocomplete="off" />
+          <button id="btn-save-host" class="ghost" title="记住这个地址，下次打开自动填好">记住</button>
+        </div>
+        <div class="set-hint">
+          地址在另一台电脑的画布里：「显示」→「显示与设置」→「另一台电脑同步程序」，
+          点「复制」就能拿到。对方要先勾上那个开关并重启服务。
+        </div>
+      </div>
+
+      <div class="sync-scope">
+        <div class="sync-scope-title">会同步</div>
+        <div class="sync-scope-list">
+          <code>web/</code><code>server/</code><code>tools/</code><code>runtime/</code>
+          <code>无限画布.exe</code><code>*.bat</code><code>使用说明.txt</code>
+        </div>
+        <div class="sync-scope-title never">永不同步</div>
+        <div class="sync-scope-list never">
+          <code>data/</code><code>素材/</code><code>work/</code><code>*.bak</code>
+        </div>
+        <div class="set-hint">
+          画布、素材库、通道密钥都在各自的 <code>data/</code> 与 <code>素材/</code> 里，互不影响。
+          同步只覆盖程序文件，覆盖前会把老文件备份到 <code>data\codesync-backup\</code>。
+        </div>
+      </div>
+
+      <div class="sync-result hidden" id="sync-result">
+        <div class="sync-stats" id="sync-stats"></div>
+        <div class="sync-groups" id="sync-groups"></div>
+      </div>
+
+      <div class="sync-empty" id="sync-empty">
+        还没对比过。点右上角「对比一下」只会读对方清单，不会写任何文件。
+      </div>
+
+      <div class="sync-restart hidden" id="sync-restart">
+        <span>代码已经换新，需要重启服务才会生效。</span>
+        <button id="btn-restart-tip" class="ghost">怎么重启</button>
+        <span class="sync-restart-how hidden" id="sync-restart-how">
+          右键托盘图标 →「重启服务」。同步过程中如果提示文件被占用，先「退出（停止画布服务）」再同步一次。
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <script>window.__uiToken = '__UI_TOKEN__';</script>
+  <script src="/assets/utils.js"></script>
+  <script src="/assets/api.js"></script>
+  <script src="/assets/ui.js"></script>
+  <script src="/assets/codesync.js"></script>
+</body>
+</html>

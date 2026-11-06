@@ -78,6 +78,8 @@
   let submitCompress = { enabled: true };
   // 尾部提示词：每套预设只存名字和正文，卡片只记「用哪一套」
   let tailPrompts = { enabled: true, defaultId: '', presets: [] };
+  // 局域网访问：开关 + 这台电脑的网卡地址（服务端算好，前端只负责显示和复制）
+  let lan = { enabled: false, addresses: [], port: 0 };
 
   function normalizeTailPresets(value) {
     const raw = value && typeof value === 'object' ? value : {};
@@ -125,6 +127,13 @@
     if (status.shortcuts) shortcuts = Object.assign({}, DEFAULT_SHORTCUTS, status.shortcuts);
     submitCompress = { enabled: !(status.submitCompress && status.submitCompress.enabled === false) };
     tailPrompts = normalizeTailPresets(status.tailPrompts);
+    if (status.lan && typeof status.lan === 'object') {
+      lan = {
+        enabled: status.lan.enabled === true,
+        addresses: Array.isArray(status.lan.addresses) ? status.lan.addresses : [],
+        port: Number(status.lan.port) || 0,
+      };
+    }
     checks = status.checks || [];
     assetRoot = status.assetRoot || '';
   }
@@ -148,6 +157,7 @@
     if (patch.submitCompress) body.submitCompress = Object.assign({}, submitCompress, patch.submitCompress);
     if (patch.tailPrompts) body.tailPrompts = cloneTailPrompts(patch.tailPrompts);
     if (patch.assetRoot) body.assetRoot = patch.assetRoot;
+    if (patch.lan) body.lan = { enabled: Boolean(patch.lan.enabled) };
     const status = await window.api.saveSettings(body);
     applyStatus(status);
     document.dispatchEvent(new CustomEvent('ui-ready', { detail: current }));
@@ -212,6 +222,14 @@
       '      <div class="set-hint">换目录只影响以后新存的文件，旧素材不会搬走也不会丢。归档方式决定生成结果要不要再分一层子文件夹。</div>' +
       '    </div>' +
 
+      '    <div class="set-group"><div class="set-title">另一台电脑同步程序</div>' +
+      '      <div class="set-row"><label>允许局域网（仅程序文件）</label>' +
+      '        <label class="lan-check"><input type="checkbox" id="set-lan" /><span id="set-lan-state">关闭</span></label>' +
+      '      </div>' +
+      '      <div class="lan-body" id="set-lan-body"></div>' +
+      '      <div class="set-hint">打开后，另一台电脑可以从这台电脑拉取程序文件（另一台右键托盘 →「同步程序代码…」）。只传程序，画布和素材库各自一份，不会被同步。改完要重启服务才生效。</div>' +
+      '    </div>' +
+
       '    <div class="set-group"><div class="set-title">启动自检</div>' + checkListHtml() +
       '      <div class="set-hint">素材库、日志、导入备份都在门户页顶部那一排按钮里。</div>' +
       '    </div>' +
@@ -235,6 +253,9 @@
     const assetEl = mask.querySelector('#set-asset');
     const subEl = mask.querySelector('#set-sub');
     const savedEl = mask.querySelector('#set-saved');
+    const lanEl = mask.querySelector('#set-lan');
+    const lanStateEl = mask.querySelector('#set-lan-state');
+    const lanBodyEl = mask.querySelector('#set-lan-body');
 
     const keysBox = mask.querySelector('#set-keys');
     let capturing = null;
@@ -288,6 +309,68 @@
     sizeEl.value = String(current.fontSize);
     assetEl.value = assetRoot;
 
+    // 局域网地址：点一下就复制，省得手动选中
+    const copyText = (text) => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch { /* 非安全上下文，走下面的兜底 */ }
+      try {
+        const box = document.createElement('textarea');
+        box.value = text;
+        box.style.position = 'fixed';
+        box.style.opacity = '0';
+        document.body.appendChild(box);
+        box.select();
+        document.execCommand('copy');
+        document.body.removeChild(box);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const renderLan = () => {
+      lanEl.checked = lan.enabled;
+      lanStateEl.textContent = lan.enabled ? '已打开' : '关闭';
+      lanStateEl.className = lan.enabled ? 'lan-on' : '';
+      lanBodyEl.textContent = '';
+      if (!lan.enabled) return;
+      const port = lan.port || Number(location.port) || 17890;
+      if (!lan.addresses.length) {
+        const warn = document.createElement('div');
+        warn.className = 'lan-warn';
+        warn.textContent = '这台电脑现在没有可用的局域网地址（网线或 Wi-Fi 没连上），连上后重启服务再看。';
+        lanBodyEl.appendChild(warn);
+        return;
+      }
+      lan.addresses.forEach((ip) => {
+        const url = 'http://' + ip + ':' + port;
+        const row = document.createElement('div');
+        row.className = 'lan-addr';
+        const text = document.createElement('code');
+        text.textContent = url;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ghost';
+        btn.textContent = '复制';
+        btn.addEventListener('click', () => {
+          btn.textContent = copyText(url) ? '已复制' : '请手动选中';
+          setTimeout(() => { btn.textContent = '复制'; }, 1500);
+        });
+        row.appendChild(text);
+        row.appendChild(btn);
+        lanBodyEl.appendChild(row);
+      });
+      const note = document.createElement('div');
+      note.className = 'set-hint';
+      note.textContent = '另一台电脑在托盘右键 →「同步程序代码…」里填上面这个地址，点「对比一下」再「开始同步」。打不开多半是 Windows 防火墙拦了：允许 node.exe 访问专用网络即可。';
+      lanBodyEl.appendChild(note);
+    };
+    renderLan();
+
     let timer = null;
     const flash = (text, bad) => {
       savedEl.textContent = text;
@@ -333,6 +416,18 @@
       const value = assetEl.value.trim();
       if (!value) return;
       persist({ assetRoot: value }, '素材目录已改');
+    });
+    lanEl.addEventListener('change', async () => {
+      lan = Object.assign({}, lan, { enabled: lanEl.checked });
+      renderLan();
+      try {
+        await save({ lan: { enabled: lanEl.checked } });
+        flash(lanEl.checked ? '已允许另一台电脑拉取程序，重启服务后生效' : '已不允许另一台电脑访问，重启服务后生效', false);
+      } catch (error) {
+        lan = Object.assign({}, lan, { enabled: !lanEl.checked });
+        renderLan();
+        flash('保存失败：' + error.message, true);
+      }
     });
 
     mask.querySelector('#set-reset').addEventListener('click', async () => {
@@ -529,6 +624,7 @@
     submitCompress: () => submitCompress,
     tailPrompts: () => tailPrompts,
     openTailPromptsPanel: openTailPromptsPanel,
+    lan: () => lan,
     assetRoot: () => assetRoot,
   };
 })();

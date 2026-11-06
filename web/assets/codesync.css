@@ -1,0 +1,242 @@
+/* ---------- 同步程序代码窗口（托盘右键 → 同步程序代码…） ---------- */
+
+.sync-shell {
+  max-width: 900px;
+  padding-top: 24px;
+  padding-bottom: 44px;
+}
+
+.sync-card {
+  padding: 20px 22px 22px;
+}
+
+.sync-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.sync-head .section-title { margin: 0; }
+.sync-head .hint { margin: 0 0 0 auto; }
+
+.sync-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sync-form > label {
+  font-size: 0.86em;
+  color: var(--muted);
+}
+
+.sync-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sync-input-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.94em;
+}
+
+.sync-input-row button { flex: 0 0 auto; }
+
+/* 白名单说明：一眼看清搬什么、不搬什么 */
+.sync-scope {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft, var(--panel));
+}
+
+.sync-scope-title {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--ok);
+  margin-bottom: 5px;
+}
+
+.sync-scope-title.never {
+  color: var(--muted);
+  margin-top: 9px;
+}
+
+.sync-scope-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sync-scope-list code {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.8em;
+}
+
+.sync-scope-list.never code {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: var(--line-strong);
+}
+
+.sync-result { margin-top: 16px; }
+
+.sync-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sync-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft, var(--panel));
+  font-size: 0.82em;
+  color: var(--muted);
+}
+
+.sync-stat b {
+  font-size: 1.35em;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sync-stat.add b { color: var(--ok); }
+.sync-stat.update b { color: var(--accent); }
+.sync-stat.warn b { color: var(--warn); }
+
+.sync-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sync-group {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.sync-group-head {
+  padding: 8px 12px;
+  background: var(--panel-soft, var(--panel));
+  border-bottom: 1px solid var(--line);
+  font-size: 0.82em;
+  font-weight: 600;
+}
+
+.sync-file-list {
+  max-height: 300px;
+  overflow: auto;
+  padding: 6px 0;
+}
+
+.sync-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 12px;
+  font-size: 0.82em;
+}
+
+.sync-file:hover { background: var(--panel-soft, var(--panel)); }
+
+.sync-file code {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--text);
+}
+
+.sync-file-size {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.92em;
+}
+
+.sync-file.extra code { color: var(--muted); }
+.sync-file.warn code { color: var(--warn); }
+
+.sync-file-more {
+  padding: 4px 12px;
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.sync-allgood,
+.sync-note {
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 0.84em;
+  line-height: 1.7;
+}
+
+.sync-allgood {
+  border: 1px dashed var(--ok);
+  color: var(--ok);
+}
+
+.sync-note {
+  border: 1px dashed var(--line-strong);
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.sync-note.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.sync-empty {
+  margin-top: 16px;
+  padding: 22px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.86em;
+}
+
+.sync-restart {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 11px 14px;
+  border: 1px solid var(--warn);
+  border-radius: 12px;
+  background: var(--panel-soft, var(--panel));
+  font-size: 0.86em;
+  color: var(--warn);
+}
+
+.sync-restart-how {
+  flex: 1 1 100%;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.sync-restart.hidden,
+.sync-restart-how.hidden,
+.sync-result.hidden { display: none; }

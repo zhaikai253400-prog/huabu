@@ -14,6 +14,7 @@
     <span class="local-sub">启动器</span>
     <div class="chips">
       <span class="chip ok" id="st-service">正在连接本机服务…</span>
+      <span class="chip" id="st-lan" hidden></span>
     </div>
   </div>
 
@@ -38,6 +39,8 @@
   </main>
 
   <script src="/assets/utils.js"></script>
+  <!-- 本机钥匙：服务端下发时替换掉占位符。放在 api.js 之前，因为 api.js 加载时就要读它 -->
+  <script>window.__uiToken = '__UI_TOKEN__';</script>
   <script src="/assets/api.js"></script>
   <script>
     (function () {
@@ -50,7 +53,21 @@
         location.href = '/';
       });
 
-      document.getElementById('btn-channels').addEventListener('click', function () {
+      // 只有在这台电脑上（回环地址）才能打开通道设置：密钥不能下发到别的机器
+      const isLoopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].indexOf(location.hostname) >= 0;
+      const channelsBtn = document.getElementById('btn-channels');
+      const lanChip = document.getElementById('st-lan');
+      const footEl = document.querySelector('.launcher-foot');
+      if (!isLoopback) {
+        channelsBtn.disabled = true;
+        channelsBtn.textContent = '接口通道设置（需在本机打开）';
+        channelsBtn.title = '为了不把平台密钥发到别的电脑，通道设置只能在这台电脑上打开';
+        document.querySelector('.launcher-sub').textContent =
+          '你正在通过局域网访问另一台电脑。这里只开放程序文件的同步，画布和素材库不对外开放。';
+        if (footEl) footEl.textContent = '接口通道设置只能在运行服务的那台电脑上打开。';
+      }
+      channelsBtn.addEventListener('click', function () {
+        if (!isLoopback) return;
         window.open('/channels', 'canvas-channels', 'width=1280,height=920');
       });
 
@@ -62,6 +79,13 @@
         channelsEl.innerHTML = '通道 <b>' + (Number(status.channels) || 0) + '</b> 个';
         assetsEl.textContent = status.writable ? '素材目录可用' : '素材目录需要检查';
         assetsEl.className = 'chip ' + (status.writable ? 'ok' : 'warn');
+        const lan = status.lan || {};
+        if (lan.enabled && Array.isArray(lan.addresses) && lan.addresses.length) {
+          lanChip.hidden = false;
+          lanChip.textContent = '局域网 ' + lan.addresses[0] + ':' + (lan.port || location.port || 17890);
+          lanChip.title = '另一台电脑在托盘右键「同步程序代码…」里填 http://' + lan.addresses[0] + ':' + (lan.port || location.port || 17890);
+          lanChip.className = 'chip ok';
+        }
       }).catch(function () {
         serviceEl.textContent = '本机服务连接失败';
         serviceEl.className = 'chip warn';

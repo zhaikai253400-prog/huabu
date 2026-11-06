@@ -159,6 +159,13 @@
             <span class="canvas-title-text" id="canvas-title-text">画布</span>
           </button>
           <input class="canvas-title-input" id="canvas-title-input" type="text" maxlength="60" autocomplete="off" spellcheck="false" hidden />
+          <!-- 共享工作区：主机点一下就把这块画布开给同一局域网（最多 3 人一起改）。
+               共享中显示「共享中 · 2/3」和在线人的小圆点。 -->
+          <button class="canvas-share" id="canvas-share" type="button" hidden>
+            <span class="canvas-share-dot"></span>
+            <span class="canvas-share-text" id="canvas-share-text">共享</span>
+            <span class="share-avatars" id="share-avatars" hidden></span>
+          </button>
         </div>        <div class="search-panel hidden" id="search-panel">
           <div class="search-head">
             <input id="search-input" type="search" autocomplete="off" placeholder="找卡片：提示词、模型名、类型都行" />
@@ -184,6 +191,7 @@
           <button type="button" class="batch-btn" data-batch="retry" hidden>批量重试 0</button>
           <button type="button" class="batch-btn" data-batch="rename" hidden>批量重命名 0</button>
           <button type="button" class="batch-btn" data-batch="params" hidden>批量参数 0</button>
+          <button type="button" class="batch-btn" data-batch="resize" hidden>按默认尺寸 0</button>
         </div>
         <div class="zoom-box">
           <button id="btn-zoom-out">−</button>
@@ -220,6 +228,9 @@
   <!-- 库出过状况时的浮层告警：固定贴顶、不占画布布局，默认隐藏 -->
   <div class="alert-bar alert-float hidden" id="alert-bar" role="alert"></div>
   <script src="/assets/utils.js"></script>
+  <script src="/assets/canvas-update.js"></script>
+  <!-- 本机钥匙：服务端下发时替换掉占位符。放在 api.js 之前，因为 api.js 加载时就要读它 -->
+  <script>window.__uiToken = '__UI_TOKEN__';</script>
   <script src="/assets/api.js"></script>
   <script src="/assets/payload-rules.js"></script>
   <script src="/assets/task-poll.js"></script>
