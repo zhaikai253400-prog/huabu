@@ -156,6 +156,9 @@ const WORDS = {
     'unknown model',
     'invalid model',
     'model does not exist',
+    'model is not available',
+    'model not available',
+    'not available for the current user',
     '模型不存在',
     '不支持的模型',
     '模型不可用',
@@ -254,7 +257,14 @@ function classify(error, context) {
   }
 
   // 状态码已经说清楚了的，不再看正文
-  if (status === 401 || status === 403) return pick('AUTH');
+  if (status === 401) return pick('AUTH');
+  // 403 有两种意思：密钥被拒，或者「这个模型你的账号用不了」。
+  // 飞拓这类网关对没权限的模型就回 403 + "model is not available"，
+  // 一律当密钥错会让用户去改密钥，白折腾一圈。
+  if (status === 403) {
+    if (byWord(body, 'NO_MODEL')) return pick('NO_MODEL');
+    return pick('AUTH');
+  }
   if (status === 402) return pick('QUOTA');
   if (status === 429) return pick('RATE_LIMIT');
 

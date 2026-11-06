@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { CONFIG_FILE, ROOT, ensureDir } = require('./paths');
+const keybox = require('./keybox');
 
 function defaultConfig() {
   return {
@@ -30,6 +31,12 @@ function defaultConfig() {
     // 素材归档方式：none = 直接放类型文件夹；date = 再按日期分子文件夹；canvas = 再按画布名字分子文件夹
     store: {
       sub: 'none',
+    },
+    // 局域网访问：关着的时候只认 127.0.0.1，和以前一样；
+    // 打开后服务会监听 0.0.0.0，同一局域网的其它电脑用浏览器就能看到同一份画布和素材。
+    // 不开口令：本机自用、可信内网。真要在不安全网络里用，请先关掉这个开关。
+    lan: {
+      enabled: false,
     },
     shortcuts: {
       select: 'v',
@@ -119,6 +126,12 @@ function normalizeUi(ui) {
   return { scale: scale, theme: theme, fontFamily: fontFamily, fontSize: fontSize };
 }
 
+// 局域网开关：只认明确的 true，其它一律当关闭（配置写坏了也不会把服务暴露出去）
+function normalizeLan(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  return { enabled: raw.enabled === true || raw.enabled === 'true' };
+}
+
 function normalizeStore(store) {
   const raw = store && typeof store === 'object' ? store : {};
   const sub = ['none', 'date', 'canvas'].indexOf(String(raw.sub)) >= 0 ? String(raw.sub) : 'none';
@@ -167,14 +180,19 @@ function normalizeSubmitCompress(value) {
   return { enabled: !off };
 }
 
+// 读配置：磁盘上是密文的密钥字段，在这里换回明文再交给上层。
+// 解密失败的字段保持密文原样（不抹成空串）——保存时会原样写回，用户换回原环境还能用。
 function load() {
   const fallback = defaultConfig();
   try {
     if (!fs.existsSync(CONFIG_FILE)) return fallback;
     const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-    const merged = merge(fallback, JSON.parse(raw));
+    const parsed = JSON.parse(raw);
+    const decrypted = keybox.decryptConfig(parsed);
+    const merged = merge(fallback, decrypted);
     merged.ui = normalizeUi(merged.ui);
     merged.store = normalizeStore(merged.store);
+    merged.lan = normalizeLan(merged.lan);
     merged.shortcuts = normalizeShortcuts(merged.shortcuts);
     merged.submitCompress = normalizeSubmitCompress(merged.submitCompress);
     merged.tailPrompts = normalizeTailPrompts(merged.tailPrompts);
@@ -185,18 +203,66 @@ function load() {
   }
 }
 
+// 写配置：先把密钥字段加密成密文，再原子替换文件。
+// 明文永远不落盘 —— 加密失败时直接抛错，让调用方把原因告诉用户，
+// 而不是「悄悄地还是写了明文」，那种失败最难发现。
 function save(config) {
   ensureDir(path.dirname(CONFIG_FILE));
+  const sealed = keybox.encryptChannels(config && config.channels);
+  if (sealed.failed) {
+    // 两种失败看起来都是 failed>0，但该让用户做的事完全不同：
+    //   · locked>0 —— 盘上还有解不开的旧密文、secret.key 丢了；恢复文件就对，别去动密钥；
+    //   · 其余      —— 新密钥没加密成功；多半是 DPAPI 辅助程序不在或权限不对。
+    const why = sealed.locked
+      ? '有 ' + sealed.locked + ' 处密钥还是上次的密文，但 data\\secret.key 不见了。' +
+        '为了不把已保存的密钥永久作废，这次没有保存。请先找回 secret.key（或从备份恢复 data 目录）。'
+      : '请检查 server\\keybox-helper.exe 是否还在，或查看日志里的 [密钥保护] 提示。';
+    throw new Error('平台密钥没能加密（' + sealed.failed + ' 处），这次没有保存。' + why);
+  }
+  const onDisk = Object.assign({}, config, { channels: sealed.list });
+  if (sealed.sealed > 0) onDisk.secretBox = { version: 1, algo: 'aes-256-gcm', keyWrap: 'dpapi-user' };
+  const body = JSON.stringify(onDisk, null, 2);
+
+  // 写后自检：把这份 JSON 读回来解一遍，逐条比对本该存进去的密钥。
+  // 为什么非做不可 —— 主密钥换了 / 加密逻辑改错了，唯一的表现就是「配置存了、
+  // 下次启动密钥全空」；那时代码已经跑完、日志也看不出异常，用户只会发现生成失败。
+  // 在替换正式文件之前拦下来，旧文件还在，密钥不会丢。
+  assertRoundTrip(body, config);
+
   const tmp = CONFIG_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf8');
+  fs.writeFileSync(tmp, body, 'utf8');
   fs.renameSync(tmp, CONFIG_FILE);
   return config;
 }
 
+// 拿即将写盘的内容走一遍「解析 -> 解密」，和内存里的密钥逐条对齐。
+function assertRoundTrip(body, config) {
+  const expected = keybox.collectSecrets(config);
+  if (!expected.length) return;
+  let back;
+  try {
+    back = keybox.decryptConfig(JSON.parse(body));
+  } catch (error) {
+    throw new Error('配置写盘前自检失败（解析不了刚生成的 JSON）：' + error.message);
+  }
+  const got = new Map(keybox.collectSecrets(back));
+  const broken = expected.filter(([where, value]) => got.get(where) !== value);
+  if (broken.length) {
+    throw new Error(
+      '配置写盘前自检失败：' + broken.length + ' 处密钥回读不出来（' + broken[0][0] + ' 等）。' +
+      '常见原因是主密钥文件 data\\secret.key 与当前用户不匹配，这次没有保存。'
+    );
+  }
+}
+// 老版本留下的明文密钥：下次保存就会自动变成密文，这里只负责告诉用户还剩几处。
+function plaintextCount(config) {
+  return keybox.countPlaintext(config);
+}
 module.exports = {
   defaultConfig,
   normalizeUi,
   normalizeStore,
+  normalizeLan,
   normalizeShortcuts,
   normalizeSubmitCompress,
   normalizeTailPrompts,
@@ -207,4 +273,5 @@ module.exports = {
   DEFAULT_SHORTCUTS,
   load,
   save,
+  plaintextCount,
 };

@@ -22,12 +22,20 @@ const logfile = require('./logfile');
 const backup = require('./backup');
 const thumbs = require('./thumbs');
 const pickFolderDialog = require('./pick-folder');
+const guard = require('./guard');
+const keybox = require('./keybox');
+const codesync = require('./codesync');
+const share = require('./share');
 
 // --background：托盘在后台拉起服务时用，不弹浏览器、也不留在任务栏
 const BACKGROUND = process.argv.includes('--background');
 const QUIET = BACKGROUND || process.argv.includes('--no-browser');
 const ADMIN_TOKEN_FILE = path.join(paths.DATA_DIR, 'admin-token.txt');
+const UI_TOKEN_FILE = path.join(paths.DATA_DIR, 'ui-token.txt');
+// adminToken：只认「接口通道设置」窗口，能读写平台密钥
+// uiToken   ：页面令牌，画布页 / 门户页 / 启动器都有，但碰不到 /api/channels*
 let adminToken = '';
+let uiToken = '';
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -72,6 +80,59 @@ function log(message) {
   } catch {
     /* 日志写不了不影响主流程 */
   }
+}
+
+// 把老版本留在 data\config.json 里的明文密钥改成密文。
+//
+// 顺序刻意是「先备份、再写、再核对」：
+//   1. 原文件拷到 _archive/config-plaintext-<时间>.json，出问题能照着恢复；
+//   2. configStore.save() 内部会做写后回读自检，不一致就抛错、不动正式文件；
+//   3. 只有真的改了才写日志，避免每次启动都刷一行「迁移完成」。
+function migratePlaintextKeys() {
+  const still = paths.CONFIG_FILE;
+  if (!fs.existsSync(still)) return 0;
+  // 注意：不能拿内存里的 config 去数 —— 它已经被 decryptConfig 还原成明文了，
+  // 那样每次启动都会误判「还有明文」，于是反复备份、反复重写配置。
+  // 只有磁盘原文里的 enc:v1: 前缀才是判断依据。
+  let count = 0;
+  try {
+    count = configStore.plaintextCount(JSON.parse(fs.readFileSync(still, 'utf8')));
+  } catch {
+    return 0;
+  }
+  if (!count) return 0;
+  try {
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[:T]/g, '-')
+      .replace(/\..*$/, '');
+    const archiveDir = path.join(paths.ROOT, '_archive');
+    paths.ensureDir(archiveDir);
+    // 备份文件里是明文密钥，所以尽量收紧权限；Windows 上靠 DPAPI 已经不适用（这是普通 JSON），
+    // 至少要让它别随着程序目录一起被随手打包外发 —— 日志里也会提醒用户。
+    const archive = path.join(archiveDir, 'config-plaintext-' + stamp + '.json');
+    fs.copyFileSync(still, archive);
+    configStore.save(config);
+    log('平台密钥已改为加密保存（' + count + ' 处），迁移前的明文备份在 _archive\\' + path.basename(archive));
+    log('确认一切正常后，可以删掉那份明文备份。');
+    return count;
+  } catch (error) {
+    log('平台密钥自动迁移没成功：' + error.message);
+    log('配置仍按原样可用；下次保存时会再试一次。');
+    return 0;
+  }
+}
+// 所有响应统一带上的安全头。
+// 为什么放在入口处用 setHeader：页面、接口、素材、缩略图各走各的 writeHead，
+// 逐个补一遍迟早漏掉一个；放在分派之前，连 400/403 这些早退响应也能覆盖。
+//   · nosniff：素材目录里可能有用户放进来的任意扩展名文件，别让浏览器猜成脚本
+//   · no-referrer：日志下载把钥匙放在查询串里，跳转时不能顺着 Referer 泄出去
+//   · frame-ancestors/base-uri/object-src：本机页面不该被别的站点套框或劫持 <base>
+function applySecurityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'none'; object-src 'none'");
 }
 
 function sendJson(res, code, payload) {
@@ -135,7 +196,7 @@ function readRaw(req, limit) {
 
 function serveStatic(res, filePath) {
   const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(paths.WEB_DIR)) return sendText(res, 403, '不允许访问该路径');
+  if (!guard.isInsideDir(paths.WEB_DIR, resolved)) return sendText(res, 403, '不允许访问该路径');
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
     return sendText(res, 404, '找不到页面：' + path.basename(resolved));
   }
@@ -149,15 +210,37 @@ function serveStatic(res, filePath) {
   fs.createReadStream(resolved).pipe(res);
 }
 
-// 接口通道设置页只在启动时注入本机钥匙；画布页和普通静态文件拿不到它。
-function serveHtmlWithToken(res, filePath) {
+// 给页面里的 js / css 加上「文件修改时间」作为版本号。
+// 不加的话，改完代码只重启服务、不强刷新，浏览器很可能还拿着旧的 canvas.js，
+// 看起来就像「改了没生效」。加上参数后，文件一变 URL 就变，浏览器必须重新下载。
+function stampAssetUrls(html) {
+  return html.replace(/\/assets\/([\w.\-]+\.(?:js|css))/g, (whole, name) => {
+    try {
+      const file = path.join(paths.WEB_DIR, 'assets', name);
+      const stamp = Math.round(fs.statSync(file).mtimeMs);
+      return '/assets/' + name + '?v=' + stamp;
+    } catch {
+      return whole;
+    }
+  });
+}
+// 页面令牌注入：每张页面只拿到自己该有的那把钥匙。
+//   · 接口通道设置页 -> __LOCAL_TOKEN__（管理钥匙，能读写平台密钥）
+//   · 门户 / 画布 / 启动器 -> __UI_TOKEN__（页面钥匙，调不动通道接口）
+// 普通静态脚本、素材、缩略图一律不注入，画布页源码里也就没有密钥。
+function serveHtmlWithTokens(res, filePath, withAdmin, fromLan) {
   const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(paths.WEB_DIR)) return sendText(res, 403, '不允许访问该路径');
+  if (!guard.isInsideDir(paths.WEB_DIR, resolved)) return sendText(res, 403, '不允许访问该路径');
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
     return sendText(res, 404, '找不到页面：' + path.basename(resolved));
   }
-  const html = fs.readFileSync(resolved, 'utf8').replace(/__LOCAL_TOKEN__/g, adminToken);
-  const body = Buffer.from(html, 'utf8');
+  const html = fs
+    .readFileSync(resolved, 'utf8')
+    // 局域网访客拿空串：他们的请求根本不走钥匙（见 tokenNeedOf 的 none 级），
+    // 注入真钥匙只会多一处泄露面。
+    .replace(/__LOCAL_TOKEN__/g, withAdmin && !fromLan ? adminToken : '')
+    .replace(/__UI_TOKEN__/g, withAdmin ? adminToken : fromLan ? '' : uiToken);
+  const body = Buffer.from(stampAssetUrls(html), 'utf8');
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Length': body.length,
@@ -167,10 +250,19 @@ function serveHtmlWithToken(res, filePath) {
 }
 
 // 导出素材的落地目录：默认在桌面的「画布导出」里，找不到桌面就退回程序目录
+// 只认「用户刚在弹出的系统窗口里选过的那个目录」：也就是 config.exportDir。
+// 请求体里的 destDir 一律以它为准，不再按字符串随便建目录——
+// 否则任何能发请求的东西都能让服务往 C:\Windows\System32 里写文件。
 function exportDestDir(asked) {
+  const chosen = String(config.exportDir || '').trim();
   const custom = String(asked || '').trim();
   if (custom) {
     const abs = path.isAbsolute(custom) ? custom : path.resolve(paths.ROOT, custom);
+    // 必须是用户自己点选过的目录，客户端传什么就写什么的时代到此为止
+    if (!chosen || path.resolve(chosen) !== path.resolve(abs)) {
+      log('导出目录被替换成未授权的路径，已拒绝：' + abs);
+      return null;
+    }
     try {
       fs.mkdirSync(abs, { recursive: true });
       return abs;
@@ -267,7 +359,14 @@ function statusPayload() {
     shortcuts: config.shortcuts,
     submitCompress: config.submitCompress,
     tailPrompts: config.tailPrompts,
+    // 局域网访问：开关 + 可供另一台电脑直接输入的地址（只列真实网卡，不含回环 / 自动地址）
+    lan: {
+      enabled: Boolean(config.lan && config.lan.enabled),
+      addresses: guard.lanAddresses(),
+      port: activePort,
+    },
     checks: selfCheck(tools),
+    keyProtection: keybox.state(),
     channels: config.channels.length,
     startedAt: startedAt,
   };
@@ -297,6 +396,26 @@ function selfCheck(tools) {
     detail: all.length ? withKey + ' / ' + all.length + ' 个通道已填密钥' : '还没有配置任何通道',
   });
   list.push({ key: 'port', label: '服务端口', ok: Boolean(activePort), detail: 'http://127.0.0.1:' + activePort });
+  const lanOn = Boolean(config.lan && config.lan.enabled);
+  const lanIps = guard.lanAddresses();
+  list.push({
+    key: 'lan',
+    label: '局域网访问',
+    ok: lanOn ? lanIps.length > 0 : true,
+    detail: lanOn
+      ? (lanIps.length
+        ? '已打开：' + lanIps.map((ip) => 'http://' + ip + ':' + activePort).join('、')
+        : '已打开，但这台电脑没有可用的局域网地址（网线 / Wi-Fi 没连上）')
+      : '关闭（只有本机能打开）',
+  });
+  // 密钥保护一旦失灵，表面上一切正常、只有生成时才 401，所以必须在自检里显式列出来
+  const seal = keybox.state();
+  list.push({
+    key: 'keyProtect',
+    label: '密钥加密',
+    ok: seal.enabled && !seal.error,
+    detail: seal.error ? seal.error : '已启用（磁盘上只存密文，解封钥匙与当前 Windows 用户绑定）',
+  });
   return list;
 }
 
@@ -337,14 +456,8 @@ function modelsPayload() {
 async function handleApi(req, res, pathname, query) {
   const method = req.method.toUpperCase();
 
-  // 接口通道的读写、测试、拉模型只允许本机的「接口通道设置」窗口调用：
-  // 画布页拿不到钥匙，也就拿不到密钥。
-  if (pathname.indexOf('/api/channels') === 0) {
-    const given = String(req.headers['x-local-token'] || '');
-    if (!adminToken || given !== adminToken) {
-      return sendJson(res, 401, { error: '通道设置只在本机的「接口通道设置」窗口里做，请从启动器重新打开那个窗口' });
-    }
-  }
+  // 接口通道的读写、测试、拉模型只允许本机的「接口通道设置」窗口调用。
+  // 这道判断已经提前在 requestHandler 的守卫里做过（admin 级），这里不再重复。
 
   if (pathname === '/api/status' && method === 'GET') {
     return sendJson(res, 200, statusPayload());
@@ -377,6 +490,50 @@ async function handleApi(req, res, pathname, query) {
     log('从托盘收到退出指令，服务正在关闭');
     if (shutdownServer) setTimeout(shutdownServer, 120);
     return;
+  }
+
+  // ---- 程序代码同步 ----
+  // 主机侧：只读清单 + 按需取单个文件。两个都不需要钥匙（另一台电脑没有），
+  // 但路径必须先过 codesync 的白名单，越界直接 403。
+  if (pathname === '/api/codesync/manifest' && method === 'GET') {
+    return sendJson(res, 200, codesync.manifest());
+  }
+  if (pathname === '/api/codesync/file' && method === 'GET') {
+    const rel = String(query.get('path') || '');
+    const abs = codesync.resolveCodePath(rel);
+    if (!abs || !codesync.isCodeFile(rel)) {
+      return sendJson(res, 403, { error: '这个路径不在允许同步的范围内：' + rel });
+    }
+    const stat = fs.statSync(abs);
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': stat.size,
+      'Cache-Control': 'no-store',
+    });
+    fs.createReadStream(abs).pipe(res);
+    return undefined;
+  }
+  // 本机侧：拿另一台电脑的清单做对比（只读，不写盘）
+  if (pathname === '/api/codesync/plan' && method === 'GET') {
+    try {
+      const report = await codesync.plan(String(query.get('host') || ''));
+      return sendJson(res, 200, report);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+  // 本机侧：真正拉取并落盘（覆盖前先把老文件备份进 data\codesync-backup）
+  if (pathname === '/api/codesync/pull' && method === 'POST') {
+    const body = await readBody(req, 1024 * 1024);
+    try {
+      const report = await codesync.pull(String((body && body.host) || ''));
+      log('程序代码同步完成：新增 ' + report.added.length + '，更新 ' + report.updated.length +
+        '，失败 ' + report.failed.length);
+      return sendJson(res, 200, report);
+    } catch (error) {
+      log('程序代码同步失败：' + error.message);
+      return sendJson(res, 400, { error: error.message });
+    }
   }
 
   if (pathname === '/api/models' && method === 'GET') {
@@ -481,6 +638,14 @@ async function handleApi(req, res, pathname, query) {
       config.tailPrompts = configStore.normalizeTailPrompts(body.tailPrompts);
       changed.push('尾部提示词');
       log('尾部提示词已更新：' + config.tailPrompts.presets.length + ' 套，默认' + (config.tailPrompts.enabled ? '启用' : '关闭'));
+    }
+    if (body.lan !== undefined) {
+      const before = Boolean(config.lan && config.lan.enabled);
+      config.lan = configStore.normalizeLan(body.lan);
+      if (config.lan.enabled !== before) {
+        changed.push('局域网访问');
+        log('局域网访问已' + (config.lan.enabled ? '打开' : '关闭') + '，需要重启服务才会生效');
+      }
     }
     if (body.image && typeof body.image === 'object') {
       config.image = Object.assign({}, config.image, body.image);
@@ -962,8 +1127,118 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 405, { error: '不支持的操作' });
   }
 
+  // ---- 共享工作区 ----
+  // 一块画布 shared=1 就对局域网开放；不开的时候，局域网能做的事和以前一模一样。
+  if (pathname === '/api/share/list' && method === 'GET') {
+    return sendJson(res, 200, { canvases: store.listSharedCanvases(), limit: share.MAX_SESSIONS });
+  }
+
+  // 开 / 关共享只在本机做：这是「把门打开」的动作，不能让门里的人自己扩权
+  const shareToggle = pathname.match(/^\/api\/canvases\/([^/]+)\/share$/);
+  if (shareToggle) {
+    if (method !== 'POST') return sendJson(res, 405, { error: '不支持的操作' });
+    const id = decodeURIComponent(shareToggle[1]);
+    const body = await readBody(req);
+    const result = body && body.on ? store.enableShare(id) : store.disableShare(id);
+    if (!result) return sendJson(res, 404, { error: '画布不存在' });
+    if (!body || !body.on) {
+      const kicked = share.closeCanvas(id, 'bye', { reason: '这块画布已关闭共享' });
+      log('已关闭共享：' + result.name + (kicked ? '（断开 ' + kicked + ' 人）' : ''));
+    } else {
+      log('已开启共享：' + result.name + '（局域网可进，最多 ' + share.MAX_SESSIONS + ' 人）');
+    }
+    return sendJson(res, 200, {
+      canvas: store.getCanvas(id),
+      online: share.countOnline(id),
+      limit: share.MAX_SESSIONS,
+    });
+  }
+
+  // 进共享画布：拉一次全量状态（后续都走增量）
+  const shareState = pathname.match(/^\/api\/share\/([^/]+)\/state$/);
+  if (shareState && method === 'GET') {
+    const id = decodeURIComponent(shareState[1]);
+    if (!store.isShared(id)) return sendJson(res, 403, { error: '这块画布没有开启共享' });
+    const state = store.getState(id);
+    if (!state) return sendJson(res, 404, { error: '画布不存在' });
+    state.online = share.countOnline(id);
+    state.limit = share.MAX_SESSIONS;
+    state.local = !req.__fromLan;
+    return sendJson(res, 200, state);
+  }
+
+  // 增量保存：只写「我改过的那几张」。别人改的卡片不受影响，这是共编的地基。
+  const sharePatch = pathname.match(/^\/api\/share\/([^/]+)\/patch$/);
+  if (sharePatch && method === 'POST') {
+    const id = decodeURIComponent(sharePatch[1]);
+    if (!store.isShared(id)) return sendJson(res, 403, { error: '这块画布没有开启共享' });
+    const body = await readBody(req);
+    const who = share.sessionOf(id, body && body.sessionId);
+    // 会话可以已经超时掉了（页面挂后台很久），这时不拒收，只记成「一位访客」
+    const name = (who && who.name) || '一位协作者';
+    const result = store.applyPatch(id, body || {});
+    if (!result) return sendJson(res, 404, { error: '画布不存在' });
+    const changed = result.applied.upserted || result.applied.deleted || result.applied.edges;
+    if (changed || result.conflicts.length) {
+      share.broadcast(id, 'change', {
+        rev: result.rev,
+        by: name,
+        sessionId: String((body && body.sessionId) || ''),
+        // clientId 是页面自己生成的随机串：发起方据此认出「这是我发的」，
+        // 不依赖 SSE 会话有没有建好（刚打开页面就动手时还没建好）
+        clientId: String((body && body.clientId) || ''),
+        applied: result.applied,
+        conflicts: result.conflicts,
+        updatedAt: result.savedAt || Date.now(),
+      });
+    }
+    if (changed) log('共享保存：' + name + ' 改了 ' + result.applied.upserted + ' 张、删了 ' + result.applied.deleted + ' 张');
+    return sendJson(res, 200, result);
+  }
+
+  // 在线名单（不进 SSE 也能问一句）
+  const sharePresence = pathname.match(/^\/api\/share\/([^/]+)\/presence$/);
+  if (sharePresence && method === 'GET') {
+    const id = decodeURIComponent(sharePresence[1]);
+    if (!store.isShared(id)) return sendJson(res, 403, { error: '这块画布没有开启共享' });
+    return sendJson(res, 200, {
+      sessions: share.listSessions(id),
+      count: share.countOnline(id),
+      limit: share.MAX_SESSIONS,
+    });
+  }
+
+  // 实时通道：SSE。别人的改动、谁进来了谁走了，都从这里推过来。
+  const shareEvents = pathname.match(/^\/api\/share\/([^/]+)\/events$/);
+  if (shareEvents && method === 'GET') {
+    const id = decodeURIComponent(shareEvents[1]);
+    if (!store.isShared(id)) {
+      const why = '这块画布没有开启共享';
+      if (pathname.indexOf('/api/') === 0) return sendJson(res, 403, { error: why });
+      return sendText(res, 403, why);
+    }
+    if (!store.getCanvas(id)) return sendJson(res, 404, { error: '画布不存在' });
+    const joined = share.join(id, req, res, {
+      local: req.__fromLan !== true,
+      clientId: String(query.get('client') || ''),
+    });
+    if (!joined.ok) return sendJson(res, joined.code, { error: joined.error });
+    log('共享会话接入：' + joined.session.name + '（在线 ' + share.countOnline(id) + '/' + share.MAX_SESSIONS + '）');
+    return undefined;
+  }
+
   if (pathname === '/api/canvases') {
-    if (method === 'GET') return sendJson(res, 200, { canvases: store.listCanvases() });
+    if (method === 'GET') {
+      // 局域网来的只列「开着共享」的那几块：别把主机所有画布的名字摆给协作者看
+      if (req.__fromLan) {
+        const shared = store.listSharedCanvases().map((one) => {
+          const full = store.getCanvas(one.id);
+          return full || one;
+        });
+        return sendJson(res, 200, { canvases: shared, sharedOnly: true });
+      }
+      return sendJson(res, 200, { canvases: store.listCanvases() });
+    }
     if (method === 'POST') {
       const body = await readBody(req);
       const name = String(body.name || '').trim();
@@ -980,10 +1255,30 @@ async function handleApi(req, res, pathname, query) {
     const body = await readBody(req);
     if (!body || !Array.isArray(body.nodes)) return sendJson(res, 400, { error: '这个文件不是画布备份，里面没有卡片数据' });
     const imported = store.importCanvas(body);
+    // 局域网协作者导进来的画布要直接标成共享：不标的话，他自己刷新一下就看不见了
+    if (req.__fromLan) store.enableShare(imported.canvas.id);
     // 刚导进来的画布立刻留一份长期备份：以后就算改乱了，也还有「刚导入时」这一版
     backup.maybeBackup(imported.canvas.id, true);
     log('导入画布：' + imported.canvas.name + '（' + imported.nodeCount + ' 个卡片）');
     return sendJson(res, 200, imported);
+  }
+
+  // 只回「这块画布现在到第几版」，不带 nodes / edges。
+  // 画布页手动点「检查更新」时用它比对版本号：整份 state 有几百 KB，
+  // 而这里只有几十字节，比对一次几乎不花钱。
+  const metaMatch = pathname.match(/^\/api\/canvases\/([^/]+)\/meta$/);
+  if (metaMatch) {
+    if (method !== 'GET') return sendJson(res, 405, { error: '不支持的操作' });
+    const id = decodeURIComponent(metaMatch[1]);
+    const canvas = store.getCanvas(id);
+    if (!canvas) return sendJson(res, 404, { error: '画布不存在' });
+    return sendJson(res, 200, {
+      id: canvas.id,
+      name: canvas.name,
+      rev: canvas.rev,
+      updatedAt: canvas.updatedAt,
+      nodeCount: canvas.nodeCount,
+    });
   }
 
   const exportMatch = pathname.match(/^\/api\/canvases\/([^/]+)\/export$/);
@@ -1096,6 +1391,10 @@ async function handleApi(req, res, pathname, query) {
       if (before) backup.forceSnapshot(id, before, '删除前');
       const ok = store.deleteCanvas(id);
       if (!ok) return sendJson(res, 404, { error: '画布不存在' });
+      // 共享状态跟着画布一起消失：别留下一块「开着共享但打不开」的画布，
+      // 也别让已经连上的人对着一块不存在的画布继续推改动
+      store.clearShareOf(id);
+      share.closeCanvas(id, 'bye', { reason: '这块画布已被删除' });
       log('删除画布（回收站与历史版本目录各留了一份）');
       return sendJson(res, 200, { ok: true });
     }
@@ -1105,9 +1404,180 @@ async function handleApi(req, res, pathname, query) {
   return sendJson(res, 404, { error: '接口不存在：' + pathname });
 }
 
+// 一个路径需要哪一级钥匙。
+//   none  —— 页面、静态资源、素材、缩略图：只查 Host / Origin
+//   ui    —— 普通接口：页面钥匙就够
+//   admin —— 平台密钥与退出服务：只认管理钥匙
+function tokenNeedOf(pathname, fromLan) {
+  if (pathname.indexOf('/api/') !== 0) return 'none';
+  // 这两个是「服务在不在」的探针：托盘和单实例检测都在用，
+  // 内容只有路径与计数、没有任何密钥，所以不要求钥匙（Host/Origin 仍然查）。
+  if (pathname === '/api/status' || pathname === '/api/health') return 'none';
+  // 程序代码同步：另一台电脑手里没有本机钥匙，而且它要的就是「程序」，不是数据。
+  // 只放开这两个只读接口，且内容受白名单限制（见 server/codesync.js）。
+  if (isLanShareablePath(pathname)) return 'none';
+  // 共享协作：局域网那台电脑同样拿不到本机钥匙（钥匙只注进本机打开的页面），
+  // 所以这些路径必须走 none —— 它们的安全边界是「Host 是本机网卡 + Origin 同源」，
+  // 加上「有一块画布正开着共享」。其余路径照旧要求钥匙，等于进不来。
+  if (fromLan && lanCollabAllowed(pathname)) return 'none';
+  if (pathname.indexOf('/api/channels') === 0) return 'admin';
+  if (pathname.indexOf('/api/local/') === 0) return 'admin';
+  return 'ui';
+}
+
+// 局域网只为一件事服务：让另一台电脑拉取「程序代码」。
+// 只有这两个只读接口对外开放，别的全部拦下 —— 画布、素材库、生成任务
+// 都是各台电脑自己的，不跨机同步（这也是「画布和素材库不要同步」的落地点）。
+function isLanShareablePath(pathname) {
+  return pathname === '/api/codesync/manifest' || pathname === '/api/codesync/file';
+}
+
+// 共享协作放行的范围。注意顺序：本机专属（平台密钥 / 退出 / 改配置 / 选目录 /
+// 程序代码同步本机侧）一律先剔掉，再按前缀放行 —— 前缀匹配最容易被「多放一条」坑到。
+function isCollabPath(pathname) {
+  if (isLocalOnlyPath(pathname)) return false;
+  // 这几条虽然不带密钥，但会改本机状态或弹本机窗口，协作者不该碰
+  if (pathname === '/api/settings') return false;
+  if (pathname === '/api/health/ack') return false;
+  if (pathname.indexOf('/api/log') === 0) return false;
+  if (pathname === '/api/export/pick-dir') return false;
+  // 开 / 关共享是主机的权力：共享里再能开共享，等于谁都能把门开得更大
+  if (/^\/api\/canvases\/[^/]+\/share$/.test(pathname)) return false;
+
+  // 页面与静态资源：协作者要能打开画布页、看到图片缩略图
+  if (pathname === '/' || pathname === '/index.html') return true;
+  if (pathname === '/canvas' || pathname === '/canvas.html') return true;
+  if (pathname === '/favicon.ico') return true;
+  if (pathname.indexOf('/assets/') === 0) return true;
+  if (pathname.indexOf('/media/') === 0) return true;
+  if (pathname.indexOf('/thumb/') === 0) return true;
+
+  // 接口：画布、素材库、生成、任务、定时组、共享本身
+  if (pathname.indexOf('/api/') !== 0) return false;
+  if (pathname === '/api/status' || pathname === '/api/health') return true;
+  if (pathname === '/api/models' || pathname === '/api/channel-status') return true;
+  if (pathname.indexOf('/api/library') === 0) return true;
+  if (pathname === '/api/assets/import') return true;
+  if (pathname === '/api/export/assets') return true;
+  if (pathname === '/api/preflight' || pathname === '/api/generate') return true;
+  if (pathname === '/api/tailframe') return true;
+  if (pathname.indexOf('/api/tasks') === 0) return true;
+  if (pathname.indexOf('/api/schedules') === 0) return true;
+  if (pathname.indexOf('/api/canvases') === 0) return true;
+  if (pathname.indexOf('/api/share') === 0) return true;
+  return false;
+}
+
+// 局域网这条路放不放行：程序代码同步的两个人人可用的只读接口，
+// 或者「有一块画布正开着共享」时的协作白名单。
+// 「有共享画布」这一条很关键：没开共享的时候，局域网行为和以前完全一样。
+function lanCollabAllowed(pathname) {
+  if (isLanShareablePath(pathname)) return true;
+  if (!isCollabPath(pathname)) return false;
+  try {
+    return store.hasShared();
+  } catch {
+    return false;
+  }
+}
+
+// 局域网能碰哪些画布：只有开着共享的那几块。
+// 返回空串表示放行，否则返回给用户看的原因。
+//
+// 「按 id 操作某块画布」的路径统一是 /api/canvases/<id>/...，
+// 这里把 id 取出来问一句 store.isShared。新建（POST /api/canvases）和
+// 导入（/api/canvases/import）不针对具体画布，不在拦截范围内：
+// 导入进来的画布会直接标成共享，否则协作者导完自己也看不见。
+function lanCanvasScopeDenied(pathname, method) {
+  const match = /^\/api\/canvases\/([^/]+)(?:\/|$)/.exec(pathname);
+  if (!match) return '';
+  const id = (() => {
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return match[1];
+    }
+  })();
+  // import 是「新建一块」，不是操作某一块；它自己的 id 段是字面量 import
+  if (id === 'import') return '';
+  if (store.isShared(id)) return '';
+  return '这块画布没有开启共享，协作者不能操作它';
+}
+
+// 只能在本机打开的路径：平台密钥、托盘控制、进程级操作、以及会弹系统窗口的操作。
+// 局域网请求现在连这些路径都到不了（上面那道总闸先拦了），这里保留给未来的本机判断用。
+function isLocalOnlyPath(pathname) {
+  if (pathname === '/channels' || pathname === '/channels.html') return true;
+  if (pathname.indexOf('/api/channels') === 0) return true;
+  if (pathname.indexOf('/api/local/') === 0) return true;
+  if (pathname === '/codesync' || pathname === '/codesync.html') return true;
+  if (pathname.indexOf('/api/codesync/plan') === 0) return true;
+  if (pathname.indexOf('/api/codesync/pull') === 0) return true;
+  // 这个接口会在这台电脑上弹出「选择文件夹」的系统窗口。
+  // 从另一台电脑点，窗口会弹在这边却没人看得见，只会让人以为卡住了。
+  if (pathname === '/api/export/pick-dir') return true;
+  return false;
+}
+
 function requestHandler(req, res) {
+  applySecurityHeaders(res);
   const parsed = new URL(req.url, 'http://127.0.0.1');
-  const pathname = decodeURIComponent(parsed.pathname);
+  let pathname = '/';
+  try {
+    pathname = decodeURIComponent(parsed.pathname);
+  } catch {
+    return sendText(res, 400, '地址格式不正确');
+  }
+
+  // 这条请求是不是从局域网那台电脑来的。要单独算一次：tokenNeedOf 需要它，
+  // 但 guard.check 才刚做 Host 校验。判断规则和 guard 里完全一致，不另立一套。
+  const lanEnabled = Boolean(config && config.lan && config.lan.enabled);
+  const fromLan =
+    lanEnabled && !guard.isLocalHost(req.headers.host) && guard.isLanHost(req.headers.host);
+  // 后面 SSE 建会话时要知道「这是主机自己」还是「访客」，供在线名单显示「主机 / 访客 1」
+  req.__fromLan = fromLan;
+
+  // 先过守卫：Host 必须指向本机、带了 Origin 就必须同源、接口还要有钥匙。
+  // 这一步对静态页面同样生效，DNS rebinding 才能一并挡掉。
+  const verdict = guard.check(req, tokenNeedOf(pathname, fromLan), {
+    adminToken: adminToken,
+    uiToken: uiToken,
+    // 局域网开关：打开后额外认「这台电脑自己的网卡地址」，其它地址照旧拒绝
+    lanEnabled: lanEnabled,
+    // 日志下载是浏览器直接导航（window.location.href），带不了自定义请求头，
+    // 所以只有它允许把钥匙放在查询串里。别的接口一律只认请求头——
+    // 钥匙进了 URL 就会留在浏览历史、Referer 里，能少一处是一处。
+    queryToken: req.method === 'GET' && pathname === '/api/log/download'
+      ? parsed.searchParams.get('token')
+      : null,
+  });
+  // 从局域网进来的请求（不是这台电脑自己）只能做一件事：拉取程序代码。
+  // 画布数据、素材库、生成任务、平台密钥一律不跨机 —— 每台电脑各用各的一份。
+  // 这段要放在钥匙校验之前：否则局域网访问 /api/library 会先报 401，
+  // 看起来像「填一把钥匙就能用」，实际上是路径根本不对外开放。
+  if (verdict.local === false && !lanCollabAllowed(pathname)) {
+    log('拦下局域网请求：' + pathname + '（不在共享协作范围内）');
+    const why =
+      '这台电脑没开共享画布，局域网只能用来同步「程序代码」。' +
+      '要在同一块画布上一起改，请主机在画布页点「共享」把这块画布开出来。';
+    if (pathname.indexOf('/api/') === 0) return sendJson(res, 403, { error: why });
+    return sendText(res, 403, why);
+  }
+
+  if (!verdict.ok) {
+    if (pathname.indexOf('/api/') === 0) return sendJson(res, verdict.code, { error: verdict.error });
+    return sendText(res, verdict.code, verdict.error);
+  }
+
+  // 共享放行的是「协作」这一整类接口，但协作者只能碰「开着共享的那块画布」。
+  // 少了这一道，局域网就能删掉主机上任意一块没共享的画布 —— 那等于把整库交出去。
+  if (fromLan && pathname.indexOf('/api/') === 0) {
+    const denied = lanCanvasScopeDenied(pathname, req.method.toUpperCase()) || '';
+    if (denied) {
+      log('拦下局域网越权：' + pathname);
+      return sendJson(res, 403, { error: denied });
+    }
+  }
 
   if (pathname.startsWith('/api/')) {
     handleApi(req, res, pathname, parsed.searchParams).catch((error) => {
@@ -1118,17 +1588,28 @@ function requestHandler(req, res) {
     return;
   }
 
+  // 页面一律走令牌注入版：门户页 / 画布页 / 启动器拿页面钥匙，通道设置页拿管理钥匙
   if (pathname === '/' || pathname === '/index.html') {
-    return serveStatic(res, path.join(paths.WEB_DIR, 'index.html'));
+    return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'index.html'), false, fromLan);
   }
   if (pathname === '/canvas' || pathname === '/canvas.html') {
-    return serveStatic(res, path.join(paths.WEB_DIR, 'canvas.html'));
+    return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'canvas.html'), false, fromLan);
   }
   if (pathname === '/channels' || pathname === '/channels.html') {
-    return serveHtmlWithToken(res, path.join(paths.WEB_DIR, 'channels.html'));
+    return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'channels.html'), true, fromLan);
+  }
+  // 托盘右键「检查画布更新…」打开的就是这一页：只读版本号，不改任何画布。
+  // 用页面钥匙就够了（它只调 /api/canvases 这种普通接口）。
+  if (pathname === '/update' || pathname === '/update.html') {
+    return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'update.html'), false, fromLan);
+  }
+  // 托盘右键「同步程序代码…」打开的就是这一页：只搬 web / server / tools / runtime，
+  // 不碰 data 与 素材（白名单在 server/codesync.js 里）。
+  if (pathname === '/codesync' || pathname === '/codesync.html') {
+    return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'codesync.html'), false, fromLan);
   }
   if (pathname === '/launcher' || pathname === '/launcher.html') {
-    return serveStatic(res, path.join(paths.WEB_DIR, 'launcher.html'));
+    return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'launcher.html'), false, fromLan);
   }
   if (pathname.indexOf('/media/') === 0) {
     return serveMedia(req, res, pathname.slice('/media/'.length));
@@ -1156,6 +1637,14 @@ function banner(port, createdFolders) {
   console.log('  本地无限画布  已启动');
   console.log('==============================================');
   console.log('  网页地址    http://127.0.0.1:' + port);
+  if (config.lan && config.lan.enabled) {
+    const ips = guard.lanAddresses();
+    if (ips.length) {
+      ips.forEach((ip) => console.log('  局域网地址  http://' + ip + ':' + port + '   （另一台电脑用浏览器打开这个）'));
+    } else {
+      console.log('  局域网地址  没找到可用网卡，先确认这台电脑连上了同一个局域网');
+    }
+  }
   console.log('  程序目录    ' + paths.ROOT);
   console.log('  运行环境    ' + process.execPath);
   console.log('  素材目录    ' + config.assetRoot);
@@ -1247,8 +1736,12 @@ function listen(port, attempts) {
     console.log('启动失败：' + error.message);
     process.exit(1);
   });
-  server.listen(port, '127.0.0.1', () => {
+  // 局域网开关打开时监听 0.0.0.0，否则仍然只听回环地址。
+  const bindHost = config.lan && config.lan.enabled ? '0.0.0.0' : '127.0.0.1';
+  server.listen(port, bindHost, () => {
     activePort = port;
+    // 共享在线名单靠心跳续命：不启动的话，20 秒后所有会话都会被当成掉线清掉
+    share.startHeartbeat();
     const url = 'http://127.0.0.1:' + port;
     fs.writeFileSync(
       paths.RUNTIME_FILE,
@@ -1267,11 +1760,18 @@ function listen(port, attempts) {
     } catch {
       /* 忽略 */
     }
+    // 先停止接收新连接，等现有请求处理完再关库：
+    // 反过来先 close 的话，正在保存的请求会撞上已经关掉的连接，白白丢一次保存。
+    // 两条退出路径都会关库，close() 自身幂等，重复调用无副作用。
+    // 先主动断掉所有 SSE：不然 server.close() 会一直等这些长连接
+    share.closeAll();
     server.close(() => {
+      store.close();
       releaseInstanceLock();
       process.exit(0);
     });
     setTimeout(() => {
+      store.close();
       releaseInstanceLock();
       process.exit(0);
     }, 3000);
@@ -1335,8 +1835,13 @@ async function main() {
   if (!acquireInstanceLock()) {
     log('另一个服务正在启动中，这次不再重复启动');
     process.exit(0);
-  }  channels.setLogger(log);
+  }
+  channels.setLogger(log);
   config = configStore.load();
+  // 老版本把平台密钥明文写在 data\config.json 里。这里做一次静默迁移：
+  // 先把原文件拷一份到 _archive（万一新流程有问题还能手改回去），再按新格式存一遍。
+  // 迁移失败不影响启动 —— 这次就继续用内存里的明文，下次保存再试。
+  migratePlaintextKeys();
   thumbs.setAssetRootResolver(() => config.assetRoot);
   // 素材目录：先看有没有记下「相对程序目录」的位置。
   // 老配置没记过也不要紧，只要原来那个目录本来就在程序文件夹里，这里会自动补上。
@@ -1381,13 +1886,17 @@ async function main() {
   const liveSchedules = scheduler.init(config);
   if (liveSchedules) log('有 ' + liveSchedules + ' 个定时生成组还在跑 / 暂停中，已接回后台调度');
   startedAt = Date.now();
-  // 每次启动换一把临时钥匙：只有本机启动器能读到它，画布页拿不到
+  // 每次启动换两把临时钥匙，都只有本机程序读得到：
+  //   adminToken 给「接口通道设置」窗口与托盘（能读写平台密钥）
+  //   uiToken    给门户 / 画布 / 启动器（能正常用画布，但碰不到密钥）
   adminToken = crypto.randomBytes(24).toString('hex');
+  uiToken = crypto.randomBytes(24).toString('hex');
   try {
     paths.ensureDir(paths.DATA_DIR);
     fs.writeFileSync(ADMIN_TOKEN_FILE, adminToken, 'utf8');
+    fs.writeFileSync(UI_TOKEN_FILE, uiToken, 'utf8');
   } catch (error) {
-    log('写入本机设置钥匙失败：' + error.message);
+    log('写入本机访问钥匙失败：' + error.message);
   }
   listen(Number(config.port) || 17890, 20);
 }

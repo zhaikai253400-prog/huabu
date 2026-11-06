@@ -267,6 +267,34 @@ check('30 天内的 daily 会被保留', () => {
   assert.ok(jsonFiles(dailyDir).indexOf(keepName) >= 0, '10 天前的应保留');
 });
 
+// ---- 7. 同一毫秒内连写两份不能互相覆盖 ----
+console.log('\n[7] 同一毫秒内连写两份不能互相覆盖');
+check('同一毫秒连写两份强制快照，两份都要在', () => {
+  // 删除前 + 回滚前这种连续动作完全可能落在同一毫秒。
+  // 以前只靠毫秒时间戳命名，后一份会把前一份直接覆盖掉（一次留痕白丢）。
+  const a = backup.forceSnapshot(CID, fakeState, 'same-ms');
+  const b = backup.forceSnapshot(CID, fakeState, 'same-ms');
+  assert.ok(a && b, '两次都应返回文件名');
+  assert.notStrictEqual(a, b, '两次写出的文件名不能相同');
+  const all = jsonFiles(dir);
+  assert.ok(all.indexOf(a) >= 0, '第一份应仍在，实际没了: ' + a);
+  assert.ok(all.indexOf(b) >= 0, '第二份应已写出: ' + b);
+});
+
+check('撞名后加序号的文件仍能正常读回来', () => {
+  const name = backup.forceSnapshot(CID, fakeState, 'same-ms');
+  const back = backup.readBackup(CID, name);
+  assert.ok(back, '应能读回');
+  assert.strictEqual(back.nodes.length, fakeState.nodes.length);
+});
+
+check('撞名后的标签不带尾部序号', () => {
+  backup.forceSnapshot(CID, fakeState, 'same-ms');
+  const one = backup.listBackups(CID).filter((x) => x.name.indexOf('same-ms') === 0)[0];
+  assert.ok(one, '应找得到 same-ms 快照');
+  assert.ok(!/-\d+$/.test(one.label), '标签不该带序号，实际: ' + one.label);
+});
+
 // ---- 清理 ----
 if (realStore) require.cache[storePath] = realStore;
 fs.rmSync(TMP, { recursive: true, force: true });

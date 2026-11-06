@@ -440,7 +440,9 @@ check('展开的卡片面板里挂上了入口', () => {
 check('右键菜单里也有入口（展开卡片之外的第二条路）', () => {
   const at = canvasSrc.indexOf('function openNodeMenu(');
   assert(at >= 0, '缺少 openNodeMenu');
-  const body = canvasSrc.slice(at, at + 3000);
+  // 按函数边界截取，而不是写死字符数：菜单里加几项不该把这条断言挤坏
+  const nextAt = canvasSrc.indexOf('function openEdgeMenu(', at);
+  const body = canvasSrc.slice(at, nextAt > at ? nextAt : at + 6000);
   assert(body.indexOf('生成来源…') >= 0, '右键菜单里没有「生成来源」');
   assert(body.indexOf('openVersionPanel(node)') >= 0, '菜单项没接上面板');
 });

@@ -49,6 +49,9 @@ function newId(prefix) {
 
 function openDb() {
   db = new DatabaseSync(DB_FILE);
+  // busy_timeout：WAL 下读写虽然能并行，但 checkpoint / 换库这类操作仍可能短暂持锁。
+  // 没有等待时间时，同一瞬间的第二个写入请求会直接抛 SQLITE_BUSY，用户看到的是保存失败。
+  db.exec('PRAGMA busy_timeout = 5000');
   db.exec('PRAGMA journal_mode = WAL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS canvases (
@@ -135,6 +138,10 @@ function openDb() {
   // 老画布从 0 起算，前端一读到就会带上这个号，行为跟新画布一致。
   const canvasColumns = db.prepare('PRAGMA table_info(canvases)').all().map((row) => row.name);
   if (canvasColumns.indexOf('rev') < 0) db.exec('ALTER TABLE canvases ADD COLUMN rev INTEGER NOT NULL DEFAULT 0');
+  // 共享工作区：shared=1 表示这块画布对局域网开放；share_token 是进入它的钥匙。
+  // 停止共享时把 token 换成新的（或清空），旧链接当场失效，不用记「谁拿过链接」。
+  if (canvasColumns.indexOf('shared') < 0) db.exec('ALTER TABLE canvases ADD COLUMN shared INTEGER NOT NULL DEFAULT 0');
+  if (canvasColumns.indexOf('share_token') < 0) db.exec('ALTER TABLE canvases ADD COLUMN share_token TEXT');
   // 顺手清掉已经不存在的那块画布留下的卡片 / 连线记录，别让它们一直躺在库里
   try {
     db.exec('DELETE FROM nodes WHERE canvas_id NOT IN (SELECT id FROM canvases)');
@@ -199,6 +206,8 @@ function rowToCanvas(row, nodeCount) {
     // 版本号：每次整块保存 +1。前端读画布时拿到它，保存时原样带回来，
     // 对不上就说明期间有别人（另一个标签页）改过，服务端会拒收并回最新的
     rev: Number(row.rev || 0),
+    // 这块画布是不是正开着共享（门户页据此显示「共享中」）
+    shared: Number(row.shared || 0) === 1,
     nodeCount: nodeCount === undefined ? 0 : nodeCount,
   };
 }
@@ -490,6 +499,320 @@ function saveState(canvasId, payload, expectedRev) {
     migrated: migratedNodes.length && stampResult.changed
       ? { count: stampResult.changes.stamp, changes: stampResult.changes, summary: summarizeMigration(stampResult.changes) }
       : undefined,
+  };
+}
+
+// ---------- 共享工作区 ----------
+//
+// 共享的语义是「同一块画布，几台电脑一起编辑」，所以数据只有一份，就在主机的 data 里。
+// 这里管三件事：开 / 关共享、列出共享画布、以及「按卡片增量写」。
+
+// 开共享。重复点不会改变任何东西（幂等），省得「关了又开」把正在编辑的人踢掉。
+function enableShare(canvasId) {
+  const canvas = getCanvas(canvasId);
+  if (!canvas) return null;
+  handle().prepare("UPDATE canvases SET shared = 1 WHERE id = ?").run(String(canvasId));
+  return { id: canvasId, name: canvas.name, rev: canvas.rev, shared: true };
+}
+
+function disableShare(canvasId) {
+  const canvas = getCanvas(canvasId);
+  if (!canvas) return null;
+  handle().prepare("UPDATE canvases SET shared = 0 WHERE id = ?").run(String(canvasId));
+  return { id: canvasId, name: canvas.name, rev: canvas.rev, shared: false };
+}
+
+// 有没有任何一块画布正开着共享。局域网协作的总开关就看这一条。
+function hasShared() {
+  const row = handle()
+    .prepare('SELECT 1 AS ok FROM canvases WHERE deleted_at IS NULL AND shared = 1 LIMIT 1')
+    .get();
+  return Boolean(row);
+}
+
+function isShared(canvasId) {
+  const row = handle()
+    .prepare("SELECT shared FROM canvases WHERE id = ? AND deleted_at IS NULL")
+    .get(String(canvasId || ""));
+  return Boolean(row && Number(row.shared) === 1);
+}
+
+// 共享画布清单（不含密钥，本来也没有密钥：进不进得去由局域网和人数上限决定）
+function listSharedCanvases() {
+  return handle()
+    .prepare(
+      "SELECT c.id, c.name, c.rev, c.updated_at, " +
+        "(SELECT COUNT(1) FROM nodes n WHERE n.canvas_id = c.id) AS node_count " +
+        "FROM canvases c WHERE c.deleted_at IS NULL AND c.shared = 1 ORDER BY c.updated_at DESC"
+    )
+    .all()
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      rev: Number(row.rev || 0),
+      updatedAt: Number(row.updated_at) || 0,
+      nodeCount: Number(row.node_count || 0),
+    }));
+}
+
+// 删画布 / 关服务时清掉共享状态，别留下一个「开着但打不开」的共享。
+function clearShareOf(canvasId) {
+  try {
+    handle().prepare("UPDATE canvases SET shared = 0 WHERE id = ?").run(String(canvasId));
+  } catch {
+    /* 库都没了，没什么可清的 */
+  }
+}
+
+// ---------- 按卡片增量写（共享保存用） ----------
+//
+// 为什么不能沿用 saveState：它是「先删光再整块写回」。两个人同时编辑一块画布时，
+// 谁后保存谁就把对方刚写的内容整块盖掉 —— 哪怕两人改的根本不是同一张卡片。
+//
+// 这里改成按卡片写：调用方只报「我改了哪几张」，服务端只动这几张。
+//
+// 冲突判据是「基线比对」，不用版本号也不用哈希：
+//   客户端保存时，每张要写的卡片带一个 base —— 它上一次从服务端同步时看到的这张卡的样子。
+//   服务端拿库里当前的样子和 base 比：
+//     · 一样            → 我读之后没人动过，直接写
+//     · 和我要写的一样  → 对方改成了跟我一样的内容，跳过，不算冲突
+//     · 不一样          → 这张卡片对方刚改过，报冲突，由人来定怎么办
+//   base 为 null / 缺省表示「我认为这张卡还不存在」（新建卡片）。
+//
+// 这样不需要给每张卡片加版本号，也不用维护「谁改过」的账本：
+// 内容本身就是版本 —— 改回原样就等于没改过。
+
+// 稳定序列化：对象键排序后输出。内容一样就一定得到同一个字符串，
+// 不受「谁先写的哪个字段」影响。
+function stableStringify(value) {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+  if (typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    const parts = [];
+    keys.forEach((key) => {
+      const one = value[key];
+      if (one === undefined) return;
+      parts.push(JSON.stringify(key) + ":" + stableStringify(one));
+    });
+    return "{" + parts.join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
+
+// 一张卡片的规范形状：库里的行和前端发来的卡片都收敛成这一种，才比得了
+function canonNode(node) {
+  const data =
+    node && node.data && typeof node.data === "object" && !Array.isArray(node.data) ? node.data : {};
+  return {
+    type: String((node && node.type) || "card"),
+    x: Math.round(Number(node && node.x) || 0),
+    y: Math.round(Number(node && node.y) || 0),
+    w: Math.round(Number(node && node.w) || 0),
+    h: Math.round(Number(node && node.h) || 0),
+    // z（叠放次序）不参与比对，理由见 nodeSignature 上方注释
+    data: data,
+  };
+}
+
+function nodeSignature(node) {
+  return stableStringify(canonNode(node));
+}
+
+function rowToNode(row) {
+  if (!row) return null;
+  let data = {};
+  try {
+    data = row.data ? JSON.parse(row.data) : {};
+  } catch {
+    data = {};
+  }
+  return {
+    id: row.id,
+    type: row.type,
+    x: row.x,
+    y: row.y,
+    w: row.w,
+    h: row.h,
+    z: row.z,
+    data: data,
+    createdAt: row.created_at,
+  };
+}
+
+// 把一张卡片写进去（有就更新，没有就插入）
+function writeNode(database, canvasId, node, stamp) {
+  const id = String(node.id);
+  const exists = database.prepare("SELECT 1 AS ok FROM nodes WHERE id = ?").get(id);
+  const data = JSON.stringify(node.data || {});
+  const type = String(node.type || "card");
+  const x = Math.round(Number(node.x) || 0);
+  const y = Math.round(Number(node.y) || 0);
+  const w = Math.round(Number(node.w) || 0);
+  const h = Math.round(Number(node.h) || 0);
+  const z = Number.isFinite(Number(node.z)) ? Number(node.z) : 0;
+  if (exists) {
+    database
+      .prepare("UPDATE nodes SET canvas_id = ?, type = ?, x = ?, y = ?, w = ?, h = ?, z = ?, data = ?, updated_at = ? WHERE id = ?")
+      .run(canvasId, type, x, y, w, h, z, data, stamp, id);
+    return;
+  }
+  database
+    .prepare("INSERT INTO nodes (id, canvas_id, type, x, y, w, h, z, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(id, canvasId, type, x, y, w, h, z, data, Number(node.createdAt) || stamp, stamp);
+}
+
+// 增量保存。payload：
+//   { upserts: [{ node, base }], deletes: [nodeId],
+//     edgeUpserts: [...], edgeDeletes: [edgeId], viewport }
+//
+// 返回 { rev, applied, conflicts }：conflicts 里的卡片这一轮一个字都没写，
+// 其余卡片照常落库 —— 两个人改不同的卡片就该都成功，这是共享的基本要求。
+function applyPatch(canvasId, payload) {
+  const canvas = getCanvas(canvasId);
+  if (!canvas) return null;
+  const body = payload && typeof payload === "object" ? payload : {};
+  const upserts = Array.isArray(body.upserts) ? body.upserts : [];
+  const deletes = Array.isArray(body.deletes) ? body.deletes : [];
+  const edgeUpserts = Array.isArray(body.edgeUpserts) ? body.edgeUpserts : [];
+  const edgeDeletes = Array.isArray(body.edgeDeletes) ? body.edgeDeletes : [];
+  const stamp = now();
+  const database = handle();
+
+  // 第一遍只做判断、不写库：要写的东西攒齐了一次性进事务
+  const conflicts = [];
+  const writes = [];
+  upserts.forEach((entry) => {
+    if (!entry || !entry.node || !entry.node.id) return;
+    const node = entry.node;
+    const id = String(node.id);
+    const row = database.prepare("SELECT * FROM nodes WHERE id = ?").get(id);
+    // 卡片编号在库里全局唯一；被别的画布占了就直接判冲突，不擅自改号
+    if (row && String(row.canvas_id) !== String(canvasId)) {
+      conflicts.push({ nodeId: id, reason: "other-canvas", server: null });
+      return;
+    }
+    const current = rowToNode(row);
+    const hasBase = Object.prototype.hasOwnProperty.call(entry, "base");
+    const base = hasBase ? entry.base : undefined;
+    if (!current) {
+      // 库里没有：base 说「本来就有」就是被对方删了；否则就是正常新建
+      if (base) {
+        conflicts.push({ nodeId: id, reason: "deleted", server: null });
+        return;
+      }
+      writes.push(node);
+      return;
+    }
+    // 库里已经有：不给我基线（老客户端）就当作强制写，只用在明确的整批操作上
+    if (!hasBase) {
+      writes.push(node);
+      return;
+    }
+    if (base && nodeSignature(current) === nodeSignature(base)) {
+      writes.push(node);
+      return;
+    }
+    if (nodeSignature(current) === nodeSignature(node)) {
+      // 对方已经改成了和我一样的，什么都不用做
+      return;
+    }
+    conflicts.push({ nodeId: id, reason: "changed", server: current });
+  });
+
+  // 删除不判冲突：删一张已经被对方删掉的卡片，结果一样，没必要打扰人
+  const removed = [];
+  deletes.forEach((id) => {
+    const key = String(id || "");
+    if (!key) return;
+    const existed = database
+      .prepare("SELECT 1 AS ok FROM nodes WHERE id = ? AND canvas_id = ?")
+      .get(key, String(canvasId));
+    if (existed) removed.push(key);
+  });
+
+  const touched =
+    writes.length || removed.length || edgeUpserts.length || edgeDeletes.length || body.viewport;
+  if (!touched) {
+    return {
+      rev: canvas.rev,
+      applied: {
+        upserted: 0, deleted: 0, upsertedIds: [], deletedIds: [], edges: 0,
+        upsertedNodes: [], doneEdges: [], removedEdges: [],
+      },
+      conflicts: conflicts,
+    };
+  }
+
+  database.exec("BEGIN");
+  try {
+    writes.forEach((node) => writeNode(database, canvasId, node, stamp));
+    removed.forEach((id) => {
+      database.prepare("DELETE FROM nodes WHERE id = ? AND canvas_id = ?").run(id, String(canvasId));
+      // 卡片没了，挂在它上面的连线也要跟着没，否则会留下指向空卡片的线
+      database
+        .prepare("DELETE FROM edges WHERE canvas_id = ? AND (source_id = ? OR target_id = ?)")
+        .run(String(canvasId), id, id);
+    });
+    edgeUpserts.forEach((edge) => {
+      if (!edge || !edge.id) return;
+      database
+        .prepare("DELETE FROM edges WHERE id = ? AND canvas_id = ?")
+        .run(String(edge.id), String(canvasId));
+      database
+        .prepare(
+          "INSERT INTO edges (id, canvas_id, source_id, target_id, source_port, target_port, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .run(
+          String(edge.id),
+          String(canvasId),
+          String(edge.sourceId || ""),
+          String(edge.targetId || ""),
+          edge.sourcePort ? String(edge.sourcePort) : null,
+          edge.targetPort ? String(edge.targetPort) : null,
+          edge.role ? String(edge.role) : null,
+          stamp
+        );
+    });
+    edgeDeletes.forEach((id) => {
+      database
+        .prepare("DELETE FROM edges WHERE id = ? AND canvas_id = ?")
+        .run(String(id || ""), String(canvasId));
+    });
+    if (body.viewport && Number.isFinite(Number(body.viewport.zoom))) {
+      database
+        .prepare("UPDATE canvases SET viewport = ? WHERE id = ?")
+        .run(JSON.stringify(body.viewport), String(canvasId));
+    }
+    database
+      .prepare("UPDATE canvases SET updated_at = ?, rev = rev + 1 WHERE id = ?")
+      .run(stamp, String(canvasId));
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+
+  const nextRev = Number(
+    (database.prepare("SELECT rev FROM canvases WHERE id = ?").get(String(canvasId)) || {}).rev || 0
+  );
+  return {
+    rev: nextRev,
+    savedAt: stamp,
+    applied: {
+      upserted: writes.length,
+      deleted: removed.length,
+      // 回传具体是哪几张：前端收到别人的改动后要按 id 决定「哪张能覆盖、哪张我正在改」
+      upsertedIds: writes.map((node) => String(node.id)),
+      deletedIds: removed.slice(),
+      edges: edgeUpserts.length + edgeDeletes.length,
+      // 原样回传：共享广播要把「改成了什么样」一并发出去，
+      // 否则对方收到一个 id 还得再拉一次才知道内容
+      upsertedNodes: writes.slice(),
+      doneEdges: edgeUpserts.slice(),
+      removedEdges: edgeDeletes.slice(),
+    },
+    conflicts: conflicts,
   };
 }
 
@@ -943,8 +1266,28 @@ function listResumableTasks() {
   return rows.map((row) => rowToTask(row));
 }
 
+// 退出前把 WAL 里的页并回主库再截断。
+// 不做这一步时，-wal 会随每日写入一直长（见过 4MB 以上），下次启动还要花时间回放；
+// 而且用户备份 data/ 时若只拷 canvas.db，会丢掉还没 checkpoint 的最新改动。
+function close() {
+  if (!db) return;
+  const opened = db;
+  db = null;
+  try {
+    opened.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } catch (error) {
+    console.log('[数据库] 关闭前 checkpoint 跳过：' + error.message);
+  }
+  try {
+    opened.close();
+  } catch (error) {
+    console.log('[数据库] 关闭时出错：' + error.message);
+  }
+}
+
 module.exports = {
   init,
+  close,
   getHealthNotice,
   clearHealthNotice,
   newId,
@@ -956,8 +1299,15 @@ module.exports = {
   deleteCanvas,
   getState,
   saveState,
+  applyPatch,
+  isShared,
+  hasShared,
   scanCanvasMigration,
   patchNodeData,
+  enableShare,
+  disableShare,
+  listSharedCanvases,
+  clearShareOf,
   getNodeData,
   exportCanvas,
   importCanvas,

@@ -405,7 +405,10 @@ function normalizeAuth(input) {
 function normalizeSpec(kind, input) {
   const base = defaultApiSpec(kind);
   const source = input && typeof input === 'object' ? input : {};
-  const contentType = ['json', 'form', 'text', 'none'].indexOf(str(source.contentType)) >= 0 ? str(source.contentType) : base.contentType;
+  const contentType =
+    ['json', 'form', 'text', 'none', 'multipart'].indexOf(str(source.contentType)) >= 0
+      ? str(source.contentType)
+      : base.contentType;
   return {
     path: source.path === undefined ? base.path : str(source.path),
     method: (str(source.method, base.method) || base.method).toUpperCase(),
@@ -714,6 +717,20 @@ function findChannel(config, options) {
   return usable[0] || null;
 }
 
+// 密文没解开时的兜底：宁可报「钥匙打不开」，也不能把 enc:v1:... 当成密钥发出去。
+// 那种失败最糟 —— 平台只会回 401，用户完全看不出是本地加密的问题。
+function assertUsableSecret(value, where) {
+  if (typeof value === 'string' && value.indexOf('enc:v1:') === 0) {
+    throw errorKinds.configError(
+      '通道密钥没能解开，不能就这样发给平台。' +
+      '通常是 data\\secret.key 与当前 Windows 用户对不上（换用户 / 换电脑）；' +
+      '换回原来的环境即可，或在这个通道里重新填一次密钥。' +
+      (where ? '（' + where + '）' : '')
+    );
+  }
+  return value;
+}
+
 function buildUrl(channel, relPath) {
   const base = str(channel.baseUrl).trim().replace(/\/+$/, '');
   let extra = str(relPath).trim();
@@ -725,7 +742,7 @@ function buildUrl(channel, relPath) {
   const query = channel.query && typeof channel.query === 'object' ? channel.query : {};
   Object.keys(query).forEach((key) => {
     if (!key) return;
-    const value = query[key];
+    const value = assertUsableSecret(query[key], 'URL 参数 ' + key);
     if (value === '' || value === null || value === undefined) return;
     parts.push(encodeURIComponent(key) + '=' + encodeURIComponent(str(value)));
   });
@@ -741,10 +758,10 @@ function buildHeaders(channel) {
   const headers = { 'Content-Type': 'application/json' };
   const fixed = channel.headers && typeof channel.headers === 'object' ? channel.headers : {};
   Object.keys(fixed).forEach((key) => {
-    if (key) headers[key] = str(fixed[key]);
+    if (key) headers[key] = str(assertUsableSecret(fixed[key], '请求头 ' + key));
   });
   const auth = channel.auth || {};
-  const key = str(channel.apiKey);
+  const key = str(assertUsableSecret(channel.apiKey, '通道密钥'));
   if (key && auth.style === 'bearer') {
     headers[auth.header || 'Authorization'] = str(auth.prefix) + key;
   } else if (key && auth.style === 'header') {
@@ -886,6 +903,37 @@ function encodeBody(contentType, bodyText) {
   return { body: text, type: 'application/json' };
 }
 
+// multipart 提交：把 JSON 模板的字段逐个摊平，再把本地素材作为文件挂上去。
+// 平台（如飞拓 Seedance）要求参考图走这里，因为它们的 imageUrls 只认公网 HTTPS 地址。
+function multipartBody(bodyText, files) {
+  let parsed = null;
+  try {
+    parsed = String(bodyText || '').trim() ? JSON.parse(bodyText) : {};
+  } catch (error) {
+    throw new Error('multipart 请求体模板不是合法 JSON：' + error.message);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {};
+  const form = new FormData();
+  Object.keys(parsed).forEach((key) => {
+    const value = parsed[key];
+    if (value === undefined || value === null) return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => {
+        if (item === undefined || item === null) return;
+        form.append(key, typeof item === 'object' ? JSON.stringify(item) : String(item));
+      });
+      return;
+    }
+    form.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+  });
+  (files || []).forEach((file) => {
+    if (!file || !file.buffer || !file.buffer.length) return;
+    const mime = file.mime || 'application/octet-stream';
+    form.append(file.field || 'file', new Blob([file.buffer], { type: mime }), file.name || 'file');
+  });
+  return form;
+}
+
 async function callApi(channel, options) {
   const opts = options || {};
   const url = buildUrl(channel, opts.path);
@@ -911,6 +959,10 @@ async function callApi(channel, options) {
   };
   if (!hasBody) {
     delete headers['Content-Type'];
+  } else if (contentType === 'multipart') {
+    // boundary 必须让 fetch 自己生成，不能手写 Content-Type
+    delete headers['Content-Type'];
+    init.body = multipartBody(rawBody, opts.files);
   } else {
     const encoded = encodeBody(contentType, rawBody);
     if (headers['Content-Type'] === 'application/json' || !headers['Content-Type']) {
@@ -1092,7 +1144,7 @@ async function callUpload(channel, spec, item) {
   if (!url) throw errorKinds.configError('这个通道还没填 Base URL');
   const headers = buildHeaders(channel);
   Object.keys(spec.headers || {}).forEach(function (key) {
-    if (key) headers[key] = str(spec.headers[key]);
+    if (key) headers[key] = str(assertUsableSecret(spec.headers[key], '上传请求头 ' + key));
   });
   const timeoutMs = Math.max(10000, (Number(spec.timeoutSec) || 300) * 1000);
   const mime = str(item.mime) || 'application/octet-stream';
@@ -1313,6 +1365,7 @@ async function queryStatus(config, opts) {
 }
 
 module.exports = {
+  multipartBody,
   KINDS,
   defaultUpload,
   defaultRefLimits,

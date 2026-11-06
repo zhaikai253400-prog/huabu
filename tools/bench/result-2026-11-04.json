@@ -1,0 +1,65 @@
+{
+  "at": "2026-11-04T07:21:58.807Z",
+  "platform": "win32 x64",
+  "node": "v24.16.0",
+  "note": "固定 30/100/300 张三档；数值随机器波动，只用于同机对比",
+  "results": [
+    {
+      "count": 30,
+      "renderedNodes": 30,
+      "openReadyMs": 120.9,
+      "openPaintedMs": 165.9,
+      "openWallMs": 148,
+      "domContentLoadedMs": 162.9,
+      "loadMs": null,
+      "frames": {
+        "frameCount": 40,
+        "avgMs": 16.67,
+        "p95Ms": 16.73,
+        "fps": 60
+      },
+      "reparamMs": 7.84,
+      "expandMs": 5.5,
+      "notes": "",
+      "pageErrors": 0
+    },
+    {
+      "count": 100,
+      "renderedNodes": 100,
+      "openReadyMs": 87.5,
+      "openPaintedMs": 175.7,
+      "openWallMs": 186,
+      "domContentLoadedMs": 174.2,
+      "loadMs": 174.7,
+      "frames": {
+        "frameCount": 40,
+        "avgMs": 16.67,
+        "p95Ms": 16.8,
+        "fps": 60
+      },
+      "reparamMs": 3.6,
+      "expandMs": 4.6,
+      "notes": "",
+      "pageErrors": 0
+    },
+    {
+      "count": 300,
+      "renderedNodes": 300,
+      "openReadyMs": 103.8,
+      "openPaintedMs": 312,
+      "openWallMs": 239,
+      "domContentLoadedMs": 309.8,
+      "loadMs": 310.4,
+      "frames": {
+        "frameCount": 40,
+        "avgMs": 19.58,
+        "p95Ms": 33.3,
+        "fps": 51.1
+      },
+      "reparamMs": 9.6,
+      "expandMs": 14.6,
+      "notes": "",
+      "pageErrors": 0
+    }
+  ]
+}

@@ -63,6 +63,7 @@ function eq(got, want, msg) {
   }
 }
 
+const apiSrc = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'api.js'), 'utf8');
 const canvasSrc = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
 
 function pickFunction(name) {
@@ -142,6 +143,9 @@ vm.runInContext(
     'var lastSavedAt = 0;',
     'var lastConflict = null;',
     'var savePanel = null;',
+    // 共享工作区：saveNow 开头有「共享模式改走增量保存」的分支，
+    // 这里跑的是普通模式，给个 false 即可（共享保存另有 share.test.js 守）
+    'var shareMode = false;',
     'var saveRailPinned = false;',
     'var canvasId = "c_test";',
     'var canvasRev = 0;',
@@ -150,6 +154,9 @@ vm.runInContext(
     // ---- 替身 ----
     'function collectNodes() { return [{ id: "n1", type: "image", data: {} }]; }',
     'function stampTouchedCards() {}',
+    // 「检查更新」的本机记录：saveNow 存成功后会记一笔「这台电脑看过第几版」。
+    // 这里只要它存在、不抛异常即可，判据本身在 canvas-meta.test.js 里单测。
+    'function rememberSeenRev() {}',
     'function closeSavePanel() { savePanel = null; }',
     'function toast(text) { log.toast.push(text); }',
     'function setRailDesc(id, desc) { log.railDesc = desc; }',
@@ -514,15 +521,19 @@ check('待保存要说清在排队，冲突待处理时要说清「为什么没�
     assert(at >= 0, '没有 pagehide 兜底');
     const body = canvasSrc.slice(at, at + 900);
     assert(body.indexOf('if (!dirty) return') >= 0, '没有先看是不是还有未保存的改动');
-    assert(body.indexOf('keepalive') >= 0, '没有用 keepalive，页面一走请求就被掐了');
+    assert(body.indexOf('saveCanvasOnLeave') >= 0, '没有真的把最后一次保存发出去');
     assert(/这里刻意不带 rev/.test(body), '说明里没交代为什么可以不带 rev');
   });
 
-  check('关页面兜底失败时静默（页面都要没了，弹提示也没人看）', () => {
-    const at = canvasSrc.indexOf("window.addEventListener('pagehide'");
-    const body = canvasSrc.slice(at, at + 1200);
-    assert(body.indexOf('} catch {') >= 0 || body.indexOf('} catch (' ) >= 0, '没有吞掉这一次失败');
+  check('关页面兜底走 keepalive 且带钥匙（请求收在 api.js 一处）', () => {
+    // pagehide 里已经不再直接写 fetch，改成调 api.saveCanvasOnLeave；
+    // 所以「keepalive 有没有标」「钥匙有没有带」要到 api.js 里验。
+    assert(apiSrc.indexOf('saveCanvasOnLeave') >= 0, 'api.js 里没有 saveCanvasOnLeave');
+    const from = apiSrc.indexOf('saveCanvasOnLeave');
+    const body = apiSrc.slice(from, from + 600);
     assert(body.indexOf('keepalive: true') >= 0, '请求没标 keepalive，页面一走就被掐断');
+    assert(body.indexOf('withToken(') >= 0, '没带本机钥匙，服务端会直接 401');
+    assert(body.indexOf('catch(() => {})') >= 0, '没有吞掉这一次失败（页面都要没了，弹提示也没人看）');
   });
 
   check('切回页面时自动补一次（服务可能刚恢复，不该让用户自己去点）', () => {

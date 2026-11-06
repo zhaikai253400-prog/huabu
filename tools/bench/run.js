@@ -27,12 +27,27 @@ const { spawn } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..', '..');
 const OUT_DIR = __dirname;
 const PORT = 17995;
+// 服务启动后会把本次的访问钥匙写到这里；api() 每次都现读，避免读到上一轮的旧值
+let TOKEN_FILE = '';
+function adminToken() {
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
 const CDP = 'http://127.0.0.1:9354';
 
+// 优先用 Chrome；没有 Chrome 时回退到 Edge（同为 Chromium 内核，CDP 行为一致）。
+// 可用 CANVAS_BENCH_BROWSER 环境变量指定任意 Chromium 浏览器可执行文件。
 const CHROME_CANDIDATES = [
+  process.env.CANVAS_BENCH_BROWSER || '',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
 ];
 
 function sleep(ms) {
@@ -61,7 +76,10 @@ function api(port, method, urlPath, body) {
         port: port,
         path: urlPath,
         method: method,
-        headers: data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {},
+        headers: Object.assign(
+          { 'x-local-token': adminToken() },
+          data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}
+        ),
       },
       (res) => {
         let buf = '';
@@ -189,7 +207,7 @@ function buildState(count, tag) {
 
 function findChrome() {
   for (const one of CHROME_CANDIDATES) {
-    if (one && fs.existsSync(one)) return one;
+    try { if (one && fs.statSync(one).isFile()) return one; } catch { /* 下一项 */ }
   }
   return null;
 }
@@ -375,7 +393,7 @@ async function measureOne(tab, url, count, prefix) {
 
   const chromePath = findChrome();
   if (!chromePath) {
-    console.log('没找到 Chrome，无法跑基准。装了 Chrome 再来。');
+    console.log('没找到 Chrome 或 Edge，无法跑基准。装了 Chromium 内核浏览器再来，或用 CANVAS_BENCH_BROWSER 指定路径。');
     process.exit(1);
   }
 
@@ -388,6 +406,8 @@ async function measureOne(tab, url, count, prefix) {
     fs.cpSync(path.join(ROOT, sub), path.join(appDir, sub), { recursive: true });
   }
   const dataDir = path.join(appDir, 'data');
+  // api() 要读它：守卫要求每个接口请求带钥匙
+  TOKEN_FILE = path.join(dataDir, 'admin-token.txt');
   fs.mkdirSync(dataDir, { recursive: true });
   const assetRoot = path.join(appDir, '素材');
   fs.mkdirSync(assetRoot, { recursive: true });
@@ -437,7 +457,7 @@ async function measureOne(tab, url, count, prefix) {
     await sleep(300);
   }
   if (!cdpReady) {
-    console.log('Chrome 没起来');
+    console.log('浏览器没起来（CDP 端口无响应）');
     chrome.kill(); server.kill();
     process.exit(1);
   }

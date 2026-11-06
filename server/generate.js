@@ -1124,6 +1124,45 @@ function normalizePayload(payload, kind) {
   });
 }
 
+// multipart 提交时，参考素材是通过文件字段上传的，
+// 请求体里那三个「公网地址数组」必须去掉，否则平台会以为你同时传了地址和文件。
+const MEDIA_URL_KEYS = ['imageUrls', 'videoUrls', 'audioUrls', 'image_urls', 'video_urls', 'audio_urls'];
+
+function stripMediaUrlFields(bodyText) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return bodyText;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return bodyText;
+  let changed = false;
+  MEDIA_URL_KEYS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(parsed, key)) {
+      delete parsed[key];
+      changed = true;
+    }
+  });
+  return changed ? JSON.stringify(parsed, null, 2) : bodyText;
+}
+
+// 参考素材 -> multipart 文件字段（images / videos / audios，多个同名字段重复）
+function refFilesOf(refs) {
+  const out = [];
+  (refs || []).forEach((item, index) => {
+    if (!item || !item.buffer || !item.buffer.length) return;
+    const field = item.kind === 'video' ? 'videos' : item.kind === 'audio' ? 'audios' : 'images';
+    const stem = String(item.name || 'ref' + (index + 1)).replace(/\.[A-Za-z0-9]{1,5}$/, '');
+    out.push({
+      field: field,
+      buffer: item.buffer,
+      mime: item.mime || 'application/octet-stream',
+      name: stem + (item.ext || ''),
+    });
+  });
+  return out;
+}
+
 async function runKind(config, kind, payload, ctx) {
   const progress = (ctx && ctx.progress) || function () {};
   const input = normalizePayload(payload, kind);
@@ -1183,6 +1222,16 @@ async function runKind(config, kind, payload, ctx) {
       throw errorKinds.configError('通道「' + channel.name + '」的请求体模板不是合法 JSON：' + error.message);
     }
   }
+  // multipart 通道：本地参考素材直接当文件发，不再走公网地址
+  const isMultipart = spec.contentType === 'multipart';
+  let submitFiles = [];
+  if (isMultipart) {
+    bodyText = stripMediaUrlFields(bodyText);
+    submitFiles = refFilesOf(refs);
+    if (refs.length && !submitFiles.length) {
+      throw errorKinds.configError('这个通道要用 multipart 上传参考素材，但素材内容没读出来');
+    }
+  }
   progress({ stage: '正在请求 ' + (channel.name || '接口') });
   // 请求头里也允许写占位符（常见的是每次请求换一个幂等键）
   const extraHeaders = {};
@@ -1195,6 +1244,7 @@ async function runKind(config, kind, payload, ctx) {
     contentType: spec.contentType,
     extraHeaders: extraHeaders,
     bodyText: bodyText,
+    files: submitFiles,
     timeoutSec: spec.timeoutSec,
     signal: ctx && ctx.signal,
     where: 'submit',
@@ -1447,6 +1497,8 @@ async function extractLastFrame(config, source, label, sub) {
 }
 
 module.exports = {
+  stripMediaUrlFields,
+  refFilesOf,
 
   applyFaceProcessing,
   faceWanted,

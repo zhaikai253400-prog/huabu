@@ -172,7 +172,7 @@ const sandbox = {
 vm.createContext(sandbox);
 
 // 记录「区块构建函数被调用了几次」，用来验证哪个区块真的被重建了
-const calls = { media: 0, status: 0, title: 0, panel: 0, index: 0, hover: 0 };
+const calls = { media: 0, status: 0, title: 0, strip: 0, panel: 0, index: 0, hover: 0 };
 
 vm.runInContext(
   [
@@ -202,8 +202,9 @@ vm.runInContext(
     'function paintStatusBox() {}',
     'function taskStateText(data) { return data.running ? "在跑" : data.error || ""; }',
     'function buildTitleTag(node, data) { buildCalls.title += 1; return el("node-title-tag"); }',
+    'function buildTitleStrip(node, data) { buildCalls.strip += 1; var s = el("node-headstrip"); s.appendChild(buildIndexBadge(node)); s.appendChild(buildTitleTag(node, data)); return s; }',
     'function buildIndexBadge(node) { buildCalls.index += 1; var b = el("node-index"); return b; }',
-    'function buildPanel(node, data, preset, host) { buildCalls.panel += 1; return el("node-panel"); }',
+    'function buildPanel(node, data, preset, host) { buildCalls.panel += 1; var p = el("node-panel"); if (globalThis.__panelHook) globalThis.__panelHook(p); return p; }',
     'function placePanel() {}',
     'function refreshHoverBar() { buildCalls.hover += 1; }',
     'function sizeOf(node) { return { w: node.w || 100, h: node.h || 100 }; }',
@@ -230,23 +231,32 @@ vm.runInContext(
     '  var wrapper = el("node");',
     '  wrapper.dataset = { id: node.id, type: node.type };',
     '  wrapper.appendChild(buildMedia(node, node.data, presetOf(node.type)));',
-    '  wrapper.appendChild(buildIndexBadge(node));',
-    '  wrapper.appendChild(buildTitleTag(node, node.data));',
-    '  wrapper.appendChild(buildPanel(node, node.data, presetOf(node.type), wrapper));',
+    '  wrapper.appendChild(buildTitleStrip(node, node.data));',
+    // 与生产一致：只有展开的那张才建面板，其余卡片不背 35 个隐藏子元素
+    '  if (node.id === expandedId) wrapper.appendChild(buildPanel(node, node.data, presetOf(node.type), wrapper));',
     '  return wrapper;',
     '}',
     // 把生产代码里的两个函数抠进来（它们引用的名字在沙箱里都有替身）
     pickFunction('directChildOf'),
+    pickFunction('ensurePanel'),
     pickFunction('replaceMediaPart'),
     pickFunction('replaceStatusPart'),
     pickFunction('replaceTitlePart'),
+    'var promptCaretMuteUntil = new WeakMap();',
+    pickFunction('mutePromptCaretFollow'),
+    pickFunction('promptScrollSnapshot'),
+    pickFunction('restorePromptScrollSnapshot'),
     pickFunction('replacePanelPart'),
+    pickFunction('paintRunButton'),
+    pickFunction('focusPrompt'),
     pickFunction('refreshNodeParts'),
     pickFunction('refreshNode'),
     // 生产代码里 elements 是模块内的 Map，沙箱里换成两个访问函数来模拟
     'globalThis.__refreshNodeParts = refreshNodeParts;',
     'globalThis.__refreshNode = refreshNode;',
     'globalThis.__directChildOf = directChildOf;',
+    'globalThis.__ensurePanel = ensurePanel;',
+    'globalThis.__buildNode = buildNode;',
   ].join('\n'),
   // pickFunction 出来的代码里用了 elements.get / elements.set，喂一个 Map 进去
   Object.assign(sandbox, {
@@ -259,9 +269,30 @@ vm.runInContext(
 sandbox.elements = sandbox.__elements;
 // replacePanelPart 会看 document.activeElement 判断「是不是正在打字」
 sandbox.document = { activeElement: null };
-sandbox.window = { getSelection: () => ({ removeAllRanges() {}, addRange() {} }) };
-sandbox.document.createRange = () => ({ selectNodeContents() {}, collapse() {} });
+// 一个能反映「当前到底选没选中东西」的选区替身：
+// collapsed 为 true 时 toString() 必须是空串，测试就靠这个判定「没有全选」。
+sandbox.__selection = { ranges: [], removeAllRanges() { this.ranges = []; }, addRange(r) { this.ranges = [r]; }, get rangeCount() { return this.ranges.length; }, getRangeAt(i) { return this.ranges[i]; }, toString() { const r = this.ranges[0]; return r && !r.collapsed ? String(r.text || '') : ''; } };
+sandbox.window = {
+  getSelection: () => sandbox.__selection,
+  // 还原提示词滚动位置时会排一帧再贴一次，沙箱里同步执行即可
+  requestAnimationFrame: (fn) => { fn(); return 0; },
+};
+sandbox.document.createRange = () => {
+  const range = {
+    collapsed: false,
+    text: '',
+    startContainer: null,
+    startOffset: 0,
+    selectNodeContents(el) { this.startContainer = el; this.text = el.textContent || ''; this.collapsed = false; },
+    setStart(el, offset) { this.startContainer = el; this.startOffset = offset; this.collapsed = false; },
+    collapse(toEnd) { this.collapsed = true; this.text = ''; this.__toEnd = Boolean(toEnd); },
+  };
+  return range;
+};
 // mentionEl / mentionNode / mentionBox 这些模块级变量在沙箱里也要有
+// 共享模式的两个模块级开关：refreshNode 里会读它们
+// （applyingRemote：正在装远端内容，不回写 DOM；remoteStale 标记挂在元素 dataset 上）
+sandbox.applyingRemote = false;
 sandbox.mentionEl = null;
 sandbox.mentionNode = null;
 sandbox.mentionBox = null;
@@ -278,8 +309,11 @@ function mount(node) {
   return built;
 }
 // 上面那种把 node 序列化进沙箱的办法会丢引用，这里改成把节点挂到沙箱上再调用
-function buildAndMount(node) {
+function buildAndMount(node, options) {
   sandbox.__node = node;
+  // 既有测试都假设「面板已经在」：默认把这张卡当成展开态来建。
+  // 要测懒建 / 收起态时传 { expanded: false }。
+  sandbox.expandedId = options && options.expanded === false ? null : node.id;
   const built = vm.runInContext('buildNode(__node)', sandbox);
   sandbox.__elements.set(node.id, built);
   // 卡片需要有个父节点，replaceWith 才有意义
@@ -412,6 +446,48 @@ check('卡片不存在时什么都不做，也不抛错', () => {
   assert(true, '没抛错就算过');
 });
 
+console.log('\nE1 · 编辑面板按需构建');
+
+check('未展开的卡片不建面板（300 张卡省掉 35 个子元素/张）', () => {
+  const node = makeNode('n-lazy-1', '/media/lazy1.png');
+  const before = calls.panel;
+  const el = buildAndMount(node, { expanded: false });
+  eq(calls.panel, before, '收起态不该调用 buildPanel');
+  eq(el.querySelector('.node-panel'), null, '收起态不该有 .node-panel');
+});
+
+check('展开时 ensurePanel 现场补建，且只建一次', () => {
+  const node = makeNode('n-lazy-2', '/media/lazy2.png');
+  const el = buildAndMount(node, { expanded: false });
+  const before = calls.panel;
+  const panel = sandbox.__ensurePanel(el, node);
+  assert(panel && panel.classList.contains('node-panel'), '该补出一块面板');
+  eq(calls.panel, before + 1, 'buildPanel 该被调用一次');
+  const again = sandbox.__ensurePanel(el, node);
+  eq(again, panel, '重复调用必须复用同一块面板');
+  eq(calls.panel, before + 1, '复用时不该再建');
+});
+
+check('补建的面板插在端口 / 拉伸把手之前，DOM 顺序与整卡构建一致', () => {
+  const node = makeNode('n-lazy-3', '/media/lazy3.png');
+  const el = buildAndMount(node, { expanded: false });
+  const port = el.appendChild(makeEl('port'));
+  sandbox.__ensurePanel(el, node);
+  const classes = el.children.map((one) => one.className);
+  const panelAt = classes.indexOf('node-panel');
+  const portAt = classes.indexOf('port');
+  assert(panelAt >= 0, '面板该在');
+  assert(portAt >= 0, '端口该在');
+  assert(panelAt < portAt, '面板该排在端口前面，实际 ' + classes.join(' | '));
+});
+
+check('生产 buildNode 也只在展开时建面板', () => {
+  const at = canvasSrc.indexOf('function buildNode(node)');
+  assert(at >= 0, '缺少 buildNode');
+  const body = canvasSrc.slice(at, at + 4000);
+  assert(body.indexOf('if (node.id === expandedId) el.appendChild(buildPanel(') >= 0, '该按 expandedId 条件建面板');
+});
+
 console.log('\nE1 · 布局样式顺手同步');
 
 check('把 parts 刷新时也带上尺寸与生成中标记（这些是轻量的样式更新）', () => {
@@ -530,6 +606,169 @@ check('产出说明（区块划分）写在源码里，后续迁移有据可依'
   const body = canvasSrc.slice(at, at + 1400);
   assert(body.indexOf('media') >= 0 && body.indexOf('status') >= 0 && body.indexOf('panel') >= 0, '说明该列出区块');
   assert(body.indexOf('47 个调用点') >= 0 || body.indexOf('调用点') >= 0, '该说明迁移策略');
+});
+
+
+console.log('\nE2 · 生成按钮跟着任务状态走（失败后不能停在「取消生成」）');
+
+// 卡片里挂一个真的按钮，模拟 buildActions 建出来的那颗
+function mountWithRunButton(node, running) {
+  const el = buildAndMount(node);
+  const run = makeEl('primary btn-run');
+  run.tagName = 'BUTTON';
+  run.disabled = false;
+  run.textContent = running ? '取消生成' : '生成';
+  if (running) run.classList.add('cancel');
+  el.appendChild(run);
+  return { el: el, run: run };
+}
+
+check('任务失败后只刷状态区，按钮也要回到「生成」', () => {
+  const node = makeNode('n-btn-1', '/media/x.png');
+  node.data.running = true;
+  const host = mountWithRunButton(node, true);
+  eq(host.run.textContent, '取消生成', '前置条件：正在跑时按钮是取消态');
+  node.data.running = false;
+  node.data.error = '通道密钥不对';
+  sandbox.__refreshNode(node, ['status']);
+  eq(host.run.textContent, '生成', '失败后按钮必须换回「生成」');
+  eq(host.run.classList.contains('cancel'), false, '取消态的样式要摘掉');
+  eq(host.run.disabled, false, '失败后按钮要能再点');
+});
+
+check('任务跑完 / 被取消后按钮也回到「生成」', () => {
+  const node = makeNode('n-btn-2', '/media/y.png');
+  node.data.running = true;
+  const host = mountWithRunButton(node, true);
+  node.data.running = false;
+  sandbox.__refreshNode(node, ['status']);
+  eq(host.run.textContent, '生成', '跑完或取消后按钮该是「生成」');
+});
+
+check('准备中按钮显示「准备中…」且暂时不可点', () => {
+  const node = makeNode('n-btn-3', '/media/z.png');
+  const host = mountWithRunButton(node, false);
+  node.data.preparing = '正在检查参考素材…';
+  sandbox.__refreshNode(node, ['status']);
+  eq(host.run.textContent, '准备中…', '准备中该显示进度文案');
+  eq(host.run.disabled, true, '准备中不该被重复点击');
+  node.data.preparing = '';
+  sandbox.__refreshNode(node, ['status']);
+  eq(host.run.textContent, '生成', '准备结束要回到「生成」');
+  eq(host.run.disabled, false, '准备结束后可以再点');
+});
+
+console.log('\nE3 · 面板重绘要保住提示词滚动位置（连入卡片时不跳回顶部）');
+
+// 造一个「长提示词框」：滚到 120px，可滚范围 800px
+function withPromptScroll(el, top, scrollHeight, clientHeight) {
+  const box = makeEl('node-prompt');
+  box.scrollTop = top;
+  box.scrollHeight = scrollHeight;
+  box.clientHeight = clientHeight;
+  el.appendChild(box);
+  return box;
+}
+
+check('只换面板时，新提示词框接着停在原来的位置', () => {
+  const node = makeNode('n-scroll-1', '/media/s.png');
+  const el = buildAndMount(node);
+  // 提示词框在面板里（生产结构就是这样）
+  const oldBox = withPromptScroll(el.querySelector('.node-panel'), 120, 1000, 200);
+  // 新面板里也是同一份长提示词（同样的内容高度）
+  sandbox.__panelHook = (panel) => {
+    const fresh = makeEl('node-prompt');
+    fresh.scrollHeight = 1000;
+    fresh.clientHeight = 200;
+    fresh.scrollTop = 0;
+    panel.appendChild(fresh);
+    sandbox.__lastBox = fresh;
+  };
+  sandbox.__refreshNode(node, ['panel']);
+  sandbox.__panelHook = null;
+  const newBox = el.querySelector('.node-panel').querySelector('.node-prompt');
+  assert(newBox !== oldBox, '面板该换成新的提示词框');
+  assert(oldBox !== newBox, '旧提示词框该被换掉');
+  eq(newBox.scrollTop, 120, '连入卡片后面板重绘，不该跳回顶部');
+});
+
+check('滚动快照按像素还原；框高变了再按比例', () => {
+  const host = makeEl('node-host');
+  const box = makeEl('node-prompt');
+  box.scrollTop = 300;
+  box.scrollHeight = 1000;
+  box.clientHeight = 200;
+  host.appendChild(box);
+  const snap = vm.runInContext('promptScrollSnapshot', sandbox)(host);
+  eq(snap.top, 300, '快照要记下当前像素位置');
+  eq(snap.max, 800, '快照要记下可滚范围');
+
+  // 同样的框：按像素原样贴回
+  box.scrollTop = 0;
+  vm.runInContext('restorePromptScrollSnapshot', sandbox)(host, snap);
+  eq(box.scrollTop, 300, '框高没变时按像素还原');
+
+  // 框变高（可滚范围 400）：按比例 -> 300/800*400 = 150
+  box.scrollHeight = 600;
+  box.scrollTop = 0;
+  vm.runInContext('restorePromptScrollSnapshot', sandbox)(host, snap);
+  eq(Math.round(box.scrollTop), 150, '框高变了按比例还原，别跳到框外');
+});
+
+console.log('\nE4 · 展开提示词只能放光标，绝不能整段选中');
+
+// 造一张展开的卡片：卡片里有 .node-prompt，内容是一段长提示词
+function mountPromptCard(id, text) {
+  const node = makeNode(id, '/media/p.png');
+  const el = makeEl('node');
+  el.dataset = { id: node.id, type: node.type };
+  const panel = makeEl('node-panel');
+  const box = makeEl('node-prompt');
+  box.textContent = text;
+  box.scrollTop = 0;
+  box.scrollHeight = 1000;
+  box.clientHeight = 200;
+  box.focused = 0;
+  box.focus = function () { this.focused += 1; };
+  panel.appendChild(box);
+  el.appendChild(panel);
+  sandbox.__elements.set(node.id, el);
+  sandbox.__node = node;
+  return { node, el, box };
+}
+
+check('点「展开」后没有被选中的文字（手一抖不会全删）', () => {
+  const { node, box } = mountPromptCard('n-focus-1', '一只橘猫坐在窗台上，午后的光从左边照进来');
+  sandbox.__selection.ranges = [];
+  vm.runInContext('focusPrompt', sandbox)(node);
+  eq(box.focused, 1, '提示词框应该拿到焦点');
+  eq(sandbox.__selection.toString(), '', '展开后不能有任何被选中的文字');
+  eq(sandbox.__selection.getRangeAt(0).collapsed, true, '光标必须是折叠状态');
+  eq(sandbox.__selection.getRangeAt(0).__toEnd, false, 'collapse(false) = 折叠到末尾，接着往下写');
+});
+
+check('用户自己选了一段：展开时原样保留，不被抢走', () => {
+  const { node, box } = mountPromptCard('n-focus-2', '前半段后半段');
+  box.textContent = '前半段后半段';
+  sandbox.__selection.ranges = [];
+  vm.runInContext('focusPrompt', sandbox)(node);
+  // 用户手动选了中间一段
+  const custom = { collapsed: false, text: '半段后', startContainer: box, startOffset: 1 };
+  sandbox.__selection.ranges = [custom];
+  vm.runInContext('focusPrompt', sandbox)(node);
+  eq(sandbox.__selection.getRangeAt(0), custom, '已经在框内的选区不该被重置');
+  eq(box.focused, 2, '依然要把焦点给它');
+});
+
+check('展开时用户正在看的那一段不能被顶走', () => {
+  const { node, box } = mountPromptCard('n-focus-3', '很长很长的提示词');
+  box.scrollTop = 260;
+  sandbox.__selection.ranges = [];
+  vm.runInContext('focusPrompt', sandbox)(node, { keepScroll: true });
+  // 快照在 focus 之前取，focus 引起的「光标跟随」会把框滚到末尾，
+  // 必须再贴回 260，否则展开一下就看到最后一行了。
+  eq(box.scrollTop, 260, '展开前后滚动位置要一样');
+  eq(sandbox.__selection.toString(), '', '还原滚动也不能顺手全选');
 });
 
 console.log('\n' + '─'.repeat(52));

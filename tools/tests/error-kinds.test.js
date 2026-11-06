@@ -42,6 +42,12 @@ function kindOf(error, context) {
 group('1 状态码能说明问题时，不看正文');
 check('401 → AUTH', kindOf(apiError(401, 'whatever')) === 'AUTH');
 check('403 → AUTH', kindOf(apiError(403, 'forbidden')) === 'AUTH');
+// 403 也可能是「这个模型你的账号用不了」，别让用户跑去改密钥
+check('403 + forbidden → AUTH', kindOf(apiError(403, 'forbidden')) === 'AUTH');
+check(
+  '403 + model is not available for the current user → NO_MODEL',
+  kindOf(apiError(403, '{"error":"This video model is not available for the current user."}')) === 'NO_MODEL'
+);
 check('402 → QUOTA', kindOf(apiError(402, 'payment required')) === 'QUOTA');
 check('429 → RATE_LIMIT', kindOf(apiError(429, 'slow down')) === 'RATE_LIMIT');
 check('500 → NETWORK（会自动重试）', kindOf(apiError(500, 'oops')) === 'NETWORK');

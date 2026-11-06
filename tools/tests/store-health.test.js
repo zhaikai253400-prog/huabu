@@ -144,6 +144,31 @@ console.log('\n[5] 主库坏但 WAL 完整时不重建（数据可恢复，不�
   });
 }
 
+console.log('\n[6] 关库时把 WAL 落回主库并截断');
+{
+  const box = makeSandbox('close');
+  const store = freshStore();
+  store.init();
+  store.createCanvas('WAL 落盘测试');
+  const walFile = path.join(box.dir, 'canvas.db-wal');
+  // 刚 init 时必有 WAL（建表就在 WAL 里），这里先确认前提成立
+  check('写入后 WAL 存在', () => assert.ok(fs.existsSync(walFile), '期望有 canvas.db-wal'));
+  store.close();
+  check('close 之后 WAL 不再留大文件', () => {
+    const size = fs.existsSync(walFile) ? fs.statSync(walFile).size : 0;
+    assert.ok(size < 4096, 'WAL 应被截断，实际 ' + size + ' 字节');
+  });
+  check('数据已经并进主库（另起一个连接只读主库也能读到）', () => {
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(box.dbFile, { readOnly: true });
+    const rows = raw.prepare('SELECT name FROM canvases').all();
+    raw.close();
+    assert.strictEqual(rows.length, 1, '主库里应有刚建的那块画布');
+    assert.strictEqual(rows[0].name, 'WAL 落盘测试');
+  });
+  check('重复 close 不抛错（两条退出路径都会调到）', () => store.close());
+}
+
 console.log('\n' + '='.repeat(46));
 console.log('通过 ' + passed + ' 项，失败 ' + failed + ' 项');
 console.log('='.repeat(46));

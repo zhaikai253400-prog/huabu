@@ -34,10 +34,24 @@ function stampName() {
 }
 
 // 同一秒内可能连着写两份（比如批量前刚存完又回滚），只精确到秒会互相覆盖，
-// 所以再补 3 位毫秒，保证同一秒内也不会撞名。
+// 所以再补 3 位毫秒。
 function stampNameMs() {
   const d = new Date();
   return stampName() + '-' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+// 毫秒也不够：连续两次同步调用（删除前 + 回滚前）完全可能落在同一毫秒，
+// 那样后一份会把前一份直接覆盖掉，等于白白丢了一次留痕。
+// 所以真正落盘前再查一次重名，撞上就往后加 -2、-3……
+function uniqueName(dir, base) {
+  const stem = base.replace(/\.json$/, '');
+  let name = stem + '.json';
+  let n = 1;
+  while (fs.existsSync(path.join(dir, name))) {
+    n += 1;
+    name = stem + '-' + n + '.json';
+  }
+  return name;
 }
 
 function dayName(date) {
@@ -73,13 +87,27 @@ function listDaily(canvasId) {
   return listNames(dailyDirOf(canvasId));
 }
 
-// 短期只留最近 MAX_BACKUPS 份，多的从最旧的开始丢
+// 短期只留最近 MAX_BACKUPS 份，多的从最旧的开始丢。
+// 必须按修改时间排，不能按文件名：
+// 中文标签的快照（删除前 / 回滚前 / 批量前）排在纯日期名后面，
+// 按名排会把它们当成「最新」永远不删，反而把新写的普通备份当成最旧的先删掉。
 function prune(canvasId) {
-  const files = list(canvasId);
+  const dir = dirOf(canvasId);
+  const files = list(canvasId).map((name) => {
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(path.join(dir, name)).mtimeMs;
+    } catch {
+      mtime = 0;
+    }
+    return { name: name, mtime: mtime };
+  });
+  if (files.length <= MAX_BACKUPS) return;
+  files.sort((a, b) => a.mtime - b.mtime || (a.name < b.name ? -1 : 1));
   while (files.length > MAX_BACKUPS) {
     const oldest = files.shift();
     try {
-      fs.unlinkSync(path.join(dirOf(canvasId), oldest));
+      fs.unlinkSync(path.join(dir, oldest.name));
     } catch {
       /* 删不掉就算了 */
     }
@@ -158,7 +186,7 @@ function maybeBackup(canvasId, force) {
 
   let name = null;
   try {
-    name = writeSnapshot(canvasId, state, dirOf(canvasId), stampNameMs() + '.json');
+    name = writeSnapshot(canvasId, state, dirOf(canvasId), uniqueName(dirOf(canvasId), stampNameMs()));
   } catch {
     return null;
   }
@@ -174,7 +202,7 @@ function maybeBackup(canvasId, force) {
 function forceSnapshot(canvasId, state, label) {
   if (!state) return null;
   const prefix = String(label || '').replace(/[\\/:*?"<>|\s]+/g, '').slice(0, 20) || 'pre-action';
-  const name = prefix + '-' + stampNameMs() + '.json';
+  const name = uniqueName(dirOf(canvasId), prefix + '-' + stampNameMs());
   try {
     writeSnapshot(canvasId, state, dirOf(canvasId), name);
   } catch {
@@ -201,7 +229,7 @@ function describe(dir, name, kind) {
   } else {
     // 形如 2026-11-03_00-34-58-489 或 批量前-2026-11-03_00-34-58-489：
     // 把后半段的时间从 00-34-58 改成 00:34:58，读起来舒服些
-    label = base.replace(/_/, ' ').replace(/-(\d\d)-(\d\d)(?:-\d{3})?$/, ':$1:$2');
+    label = base.replace(/_/, ' ').replace(/-(\d\d)-(\d\d)(?:-\d{3})?(?:-\d+)?$/, ':$1:$2');
   }
   return {
     name: name,

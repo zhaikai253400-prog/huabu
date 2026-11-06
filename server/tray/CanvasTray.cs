@@ -56,8 +56,11 @@ namespace CanvasTray
         readonly System.Windows.Forms.Timer poll;
         readonly ToolStripMenuItem openItem;
         readonly ToolStripMenuItem channelsItem;
+        readonly ToolStripMenuItem updateItem;
+        readonly ToolStripMenuItem codesyncItem;
         readonly ToolStripMenuItem statusItem;
         readonly ToolStripMenuItem restartItem;
+        readonly ToolStripMenuItem officeItem;
         int lastPort;
         bool sawRunning;
 
@@ -77,9 +80,30 @@ namespace CanvasTray
             openItem.Click += (s, e) => OpenPath("/");
             menu.Items.Add(openItem);
 
+            // 「检查画布更新」放在打开画布下面：它是画布相关的事，但只是偶尔用一次，
+            // 所以放托盘里，不占画布界面。点开才查，平时完全不存在。
+            updateItem = new ToolStripMenuItem("检查画布更新…");
+            updateItem.Click += (s, e) => OpenPath("/update", true);
+            menu.Items.Add(updateItem);
+
+            // 「同步程序代码…」：另一台电脑上点这个，从主机拉取最新的程序文件。
+            // 只搬 web/server/tools/runtime 这些程序本身，画布库和素材库各存各的，永不传输。
+            // 和「检查画布更新」一样不常用，所以只放在托盘里。
+            codesyncItem = new ToolStripMenuItem("同步程序代码…");
+            codesyncItem.Click += (s, e) => OpenPath("/codesync", true);
+            menu.Items.Add(codesyncItem);
+
             channelsItem = new ToolStripMenuItem("接口通道设置");
             channelsItem.Click += (s, e) => OpenPath("/channels", true);
             menu.Items.Add(channelsItem);
+
+            // Agent Office：派活给 Codex / DeepSeek，以及"分镜 → 资产图 → 视频"流水线。
+            // 放在画布入口旁边是有意的 —— 这两件事本来就是一前一后：
+            // 在办公室派活生产，素材落到画布上，人再回画布看/改。
+            officeItem = new ToolStripMenuItem("Agent Office 派活");
+            officeItem.Click += (s, e) => OpenOffice();
+            menu.Items.Add(officeItem);
+
             menu.Items.Add(new ToolStripSeparator());
 
             restartItem = new ToolStripMenuItem("重启服务");
@@ -149,6 +173,7 @@ namespace CanvasTray
                     Ui(() =>
                     {
                         Apply(info);
+                        ApplyOffice(OfficeUp());
                         icon.BalloonTipTitle = "本地无限画布已在后台运行";
                         icon.BalloonTipText = "双击这个图标随时打开画布；右键可以退出服务。";
                         icon.ShowBalloonTip(4000);
@@ -165,7 +190,8 @@ namespace CanvasTray
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 var info = Probe();
-                Ui(() => Apply(info));
+                bool office = OfficeUp();
+                Ui(() => { Apply(info); ApplyOffice(office); });
             });
         }
 
@@ -179,6 +205,8 @@ namespace CanvasTray
                     icon.Text = "本地无限画布 · 服务已停止";
                     statusItem.Text = "服务已停止";
                     openItem.Enabled = false;
+                    updateItem.Enabled = false;
+                    codesyncItem.Enabled = false;
                     channelsItem.Enabled = false;
                     restartItem.Enabled = true;
                 }
@@ -189,8 +217,19 @@ namespace CanvasTray
             icon.Text = "本地无限画布 · 运行中，双击打开";
             statusItem.Text = "运行中 · 127.0.0.1:" + info.Port;
             openItem.Enabled = true;
+            updateItem.Enabled = true;
+            codesyncItem.Enabled = true;
             channelsItem.Enabled = true;
             restartItem.Enabled = true;
+        }
+
+        // Office 的可用性单独探查：它是另一个进程、另一个端口。
+        // 画布在跑不代表 Office 在跑，所以不能共用一份状态。
+        void ApplyOffice(bool up)
+        {
+            if (officeItem == null) return;
+            officeItem.Enabled = true;   // 不在跑也能点 —— 点了会把它拉起来
+            officeItem.Text = up ? "Agent Office 派活 · 运行中" : "Agent Office 派活";
         }
 
         void Ui(Action action)
@@ -199,6 +238,122 @@ namespace CanvasTray
         }
 
         void OpenPath(string path) { OpenPath(path, false); }
+
+        // ---- Agent Office ----
+        //
+        // 独立于画布服务：Office 是另一个程序（本仓库之外），有自己的端口。
+        // 找不到它时给出可操作的提示，而不是静默什么都不发生 ——
+        // 点了菜单没反应是最让人困惑的失败方式。
+        const int OfficePort = 8848;
+
+        static string OfficeDir()
+        {
+            // 默认路径放在环境变量里可覆盖，换机器不用改这份代码。
+            string env = Environment.GetEnvironmentVariable("AGENT_OFFICE_DIR");
+            if (!string.IsNullOrEmpty(env) && Directory.Exists(env)) return env;
+
+            string fallback = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                "deepseek-harness", "default-workspace", "agent-office");
+            return fallback;
+        }
+
+        static bool OfficeUp()
+        {
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create(
+                    "http://127.0.0.1:" + OfficePort + "/api/health");
+                req.Timeout = 1200;
+                req.ReadWriteTimeout = 1200;
+                using (var res = (HttpWebResponse)req.GetResponse())
+                using (var reader = new StreamReader(res.GetResponseStream(), Encoding.UTF8))
+                {
+                    string body = reader.ReadToEnd();
+                    // 核对身份：8848 上可能是别的程序，别把它当 Office 打开
+                    return body.IndexOf("\"pipeline_running\"", StringComparison.Ordinal) >= 0
+                        || body.IndexOf("\"subscribers\"", StringComparison.Ordinal) >= 0;
+                }
+            }
+            catch { return false; }
+        }
+
+        void OpenOffice()
+        {
+            if (!OfficeUp() && !StartOffice())
+            {
+                MessageBox.Show(
+                    "没找到 Agent Office，也没能把它启动起来。\n\n"
+                    + "期望的目录：\n" + OfficeDir() + "\n\n"
+                    + "如果它装在别处，设一个环境变量 AGENT_OFFICE_DIR 指向那个目录即可。",
+                    "Agent Office", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // 服务刚起来要几秒，等它响应再开页面，否则开出来是错误页
+            for (int i = 0; i < 25; i++)
+            {
+                if (OfficeUp()) break;
+                Thread.Sleep(300);
+            }
+
+            string url = "http://127.0.0.1:" + OfficePort + "/";
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "msedge.exe",
+                    Arguments = "--app=" + url + " --window-size=1280,920",
+                    UseShellExecute = true
+                });
+            }
+            catch
+            {
+                try { Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true }); }
+                catch { }
+            }
+        }
+
+        bool StartOffice()
+        {
+            string dir = OfficeDir();
+            if (!Directory.Exists(dir)) return false;
+
+            // 优先用 office.bat —— 它会自己挑 Python 并做版本检查
+            string bat = Path.Combine(dir, "office.bat");
+            try
+            {
+                if (File.Exists(bat))
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = bat,
+                        Arguments = "--serve",
+                        WorkingDirectory = dir,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WindowStyle = ProcessWindowStyle.Hidden
+                    });
+                    return true;
+                }
+
+                string py = Path.Combine(dir, "python.exe");
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = File.Exists(py) ? py : "python",
+                    Arguments = "-m office --serve",
+                    WorkingDirectory = dir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                });
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         void OpenPath(string path, bool appWindow)
         {
