@@ -256,6 +256,9 @@ function markNodeRunning(canvasId, nodeId, running, extra) {
 const CARD_HISTORY_LIMIT = 20;
 
 // 生成版本历史：新结果排最前，同地址不重复；当前版本也留在历史里，切回去才回得来。
+//
+// 注意不存 submittedPrompt：它是 mainPrompt 再拼一段尾部提示词，能精确还原
+// （见 migrate.js 的 composedPromptOf）。每版都存一份，是整份历史里最大的一笔重复。
 function historyEntryOf(result, meta) {
   const info = meta && typeof meta === 'object' ? meta : {};
   return {
@@ -265,7 +268,7 @@ function historyEntryOf(result, meta) {
     tailPresetId: String(info.tailPresetId || ''),
     tailPresetName: String(info.tailPresetName || ''),
     tailText: String(info.tailText || ''),
-    submittedPrompt: String(info.submittedPrompt || ''),
+    tailAppended: Boolean(info.tailAppended),
     model: String(info.model || ''),
     params: info.params && typeof info.params === 'object' ? info.params : {},
     at: Number(info.at) || now(),
@@ -322,10 +325,10 @@ function applyResultToCard(canvasId, nodeId, task, item) {
       history,
       historyEntryOf(nextResult, {
         mainPrompt: submission.mainPrompt,
-        submittedPrompt: submission.submittedPrompt,
         tailPresetId: submission.tailPresetId,
         tailPresetName: submission.tailPresetName,
         tailText: submission.tailText,
+        tailAppended: Boolean(submission.tailAppended),
         model: nextResult.model,
         params: submission.params,
         at: Number(task.updatedAt) || now(),
@@ -341,7 +344,7 @@ function applyResultToCard(canvasId, nodeId, task, item) {
       history: history,
       lastSubmission: {
         mainPrompt: String(submission.mainPrompt || ''),
-        submittedPrompt: String(submission.submittedPrompt || ''),
+        // 同上：submittedPrompt 不落盘，读的时候按 mainPrompt + 尾部提示词现算
         tailPresetId: String(submission.tailPresetId || ''),
         tailPresetName: String(submission.tailPresetName || ''),
         tailText: String(submission.tailText || ''),
@@ -567,7 +570,9 @@ function submitItem(run, item, node) {
     item.finishedAt = 0;
     item.submission = {
       mainPrompt: submission.mainPrompt,
-      submittedPrompt: submission.apiPrompt,
+      // 不存 submittedPrompt：它能由 mainPrompt + 尾部提示词精确还原
+      // （见 migrate.js 的 composedPromptOf）。items_json 整份进 schedule_runs 表，
+      // 存一份就是同一段提示词的又一次复制。
       tailPresetId: submission.tailPresetId || '',
       tailPresetName: submission.tailPresetName || '',
       tailText: submission.tailText || '',
@@ -586,7 +591,7 @@ function submitItem(run, item, node) {
         model: model || '',
         params: Object.assign({}, params, {
           mainPrompt: submission.mainPrompt,
-          submittedPrompt: submission.apiPrompt,
+          // 不存 submittedPrompt：能由 mainPrompt + 尾部提示词精确还原
           tailPresetId: submission.tailPresetId || '',
           tailPresetName: submission.tailPresetName || '',
           tailText: submission.tailText || '',

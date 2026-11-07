@@ -1717,14 +1717,72 @@
   // 否则「正在检查参考素材」这类中间状态会被写进画布，下次打开就一直转圈
   const TRANSIENT_KEYS = ['checking', 'preparing'];
 
+  // 提交快照的字段顺序：先给用户看的部分，其次才是可能很长的提示词。
+  // 它们的顺序在下面两处必须一致，所以写在一处共用。
+  const SUBMISSION_META_KEYS = [
+    'model', 'params', 'tailPresetId', 'tailPresetName', 'tailText', 'tailAppended',
+    'refs', 'refCount', 'at', 'mainPrompt', 'submittedPrompt',
+  ];
+
+  // submittedPrompt 由 mainPrompt + 尾部提示词现算，不落盘。
+  //
+  // 为什么要这么做：一张卡上同时存着 mainPrompt 与 submittedPrompt，而后者
+  // 就是前者再拼一段固定尾部文字。提示词动辄几千字，于是同一段文字在一张卡上
+  // 被复制了 6 份（lastSubmission 2 份 + history 每版 2 份）。实测 1471KB 的
+  // 节点数据里有 550KB（37%）是这种重复，54 卡的画布每次保存要写 1.29MB。
+  //
+  // 删掉是**精确可逆**的：只要 mainPrompt 与 tailAppended 还在，就能一字不差地
+  // 还原。唯一要小心的是 tailAppended 标志本身可能是旧的（历史版本里没记它），
+  // 所以迁移时会拿存下来的值把标志校正一遍（见 server/migrate.js 的 v1→v2）。
+  function submissionMetaPacked(meta) {
+    if (!meta || typeof meta !== 'object') return meta;
+    const out = {};
+    SUBMISSION_META_KEYS.forEach((key) => {
+      if (key === 'submittedPrompt') return;
+      if (Object.prototype.hasOwnProperty.call(meta, key)) out[key] = meta[key];
+    });
+    return out;
+  }
+
+  // 按 mainPrompt + tailAppended 重算「真正提交出去的提示词」。
+  // 与 generate.composeSubmission 拼尾部用的是同一个规则（两个换行 + 尾部文字）。
+  function composedPromptOf(meta) {
+    if (!meta || typeof meta !== 'object') return '';
+    const main = String(meta.mainPrompt || '');
+    if (!main) return '';
+    if (!meta.tailAppended) return main;
+    const tail = String(meta.tailText || '');
+    return tail ? main + '\n\n' + tail : main;
+  }
+
   function persistedData(data) {
     if (!data || typeof data !== 'object') return {};
     let copy = null;
+    const fork = () => {
+      if (!copy) copy = { ...data };
+      return copy;
+    };
     TRANSIENT_KEYS.forEach((key) => {
       if (!Object.prototype.hasOwnProperty.call(data, key)) return;
-      if (!copy) copy = { ...data };
-      delete copy[key];
+      delete fork()[key];
     });
+    // 提交快照里的 submittedPrompt 不落盘（现算即可，见上面的说明）
+    ['lastSubmission', 'pendingSubmission'].forEach((key) => {
+      const meta = data[key];
+      if (!meta || typeof meta !== 'object') return;
+      if (!Object.prototype.hasOwnProperty.call(meta, 'submittedPrompt')) return;
+      fork()[key] = submissionMetaPacked(meta);
+    });
+    if (Array.isArray(data.history) && data.history.length) {
+      let touched = false;
+      const packed = data.history.map((entry) => {
+        if (!entry || typeof entry !== 'object') return entry;
+        if (!Object.prototype.hasOwnProperty.call(entry, 'submittedPrompt')) return entry;
+        touched = true;
+        return submissionMetaPacked(entry);
+      });
+      if (touched) fork().history = packed;
+    }
     return copy || data;
   }
 
@@ -4109,13 +4167,21 @@
     const raw = source && typeof source === 'object' ? source : {};
     const base = fallback && typeof fallback === 'object' ? fallback : {};
     const refs = Array.isArray(raw.refs) ? raw.refs : Array.isArray(base.refs) ? base.refs : [];
+    const mainPrompt = String(raw.mainPrompt || base.mainPrompt || '');
+    const tailText = String(raw.tailText || base.tailText || '');
+    const tailAppended = Boolean(raw.tailAppended || base.tailAppended);
+    // submittedPrompt 现在不落盘了（见 persistedData）：这里优先用现算的结果。
+    // 老数据里存着的那份也认，但顺序放在后面 —— 现算的才是与 tailAppended 一致的。
+    const composed = mainPrompt && tailAppended && tailText ? mainPrompt + '\n\n' + tailText : mainPrompt;
     return {
-      mainPrompt: String(raw.mainPrompt || base.mainPrompt || ''),
-      submittedPrompt: String(raw.submittedPrompt || raw.apiPrompt || base.submittedPrompt || ''),
+      mainPrompt: mainPrompt,
+      submittedPrompt: String(
+        composed || raw.submittedPrompt || raw.apiPrompt || base.submittedPrompt || ''
+      ),
       tailPresetId: String(raw.tailPresetId || base.tailPresetId || ''),
       tailPresetName: String(raw.tailPresetName || base.tailPresetName || ''),
-      tailText: String(raw.tailText || base.tailText || ''),
-      tailAppended: Boolean(raw.tailAppended || base.tailAppended),
+      tailText: tailText,
+      tailAppended: tailAppended,
       model: String(raw.model || base.model || ''),
       // 本次提交冻结的参考素材清单（只留名字/类型/角色/地址，不含字节）
       refs: refs.map((item) => ({
@@ -16808,7 +16874,9 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
   // 权威定义在 server/migrate.js 的 CURRENT_VER —— 那里负责写库前的迁移，
   // 这里负责「打开老画布时先按新样子显示，并把它标记成已升级」。
   // 两边必须是同一个数：tools/tests/data-version.test.js 会断言这一点。
-  const DATA_VER = 1;
+  //
+  // v2：提交快照里的 submittedPrompt 不再落盘（能由 mainPrompt + 尾部提示词现算）。
+  const DATA_VER = 2;
 
   // 卡片内部「装着别的卡片编号」的那几张表的形状版本号：组合的 members、
   // 快速视频的 quickRefs、定时组的 order/perCard/snapshots。
@@ -16857,7 +16925,63 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     if (Number(data.v) !== DATA_VER) {
       next = { ...next, data: { ...(next.data || {}), v: DATA_VER } };
     }
+    // 提交快照里的 submittedPrompt 收掉（能由 mainPrompt + 尾部提示词现算）。
+    //
+    // 这里**不受版本号管辖**，与清理老 prompt 字段同一套理由：前端读到卡片的
+    // 瞬间就会盖上新版本号，盖章与清理之间只隔几行，一旦顺序变了，
+    // 一个「已经是 v2、但身上还挂着 submittedPrompt」的节点就永远清不掉。
+    // 而那种节点一定会出现 —— 比如同一份数据被新旧两个标签页先后读过。
+    next = packSubmissionPrompts(next);
     return next;
+  }
+
+  // 把一个节点里所有提交快照的 submittedPrompt 收掉。没有可收的就原样返回
+  // （连对象引用都不换，免得引发多余的存盘）。
+  function packSubmissionPrompts(node) {
+    const data = node && node.data && typeof node.data === 'object' ? node.data : null;
+    if (!data) return node;
+    let touched = false;
+    const nextData = { ...data };
+    ['lastSubmission', 'pendingSubmission'].forEach((key) => {
+      const meta = data[key];
+      if (!meta || typeof meta !== 'object') return;
+      if (!Object.prototype.hasOwnProperty.call(meta, 'submittedPrompt')) return;
+      nextData[key] = repackedSubmissionMeta(meta);
+      touched = true;
+    });
+    if (Array.isArray(data.history) && data.history.length) {
+      let histTouched = false;
+      const packed = data.history.map((entry) => {
+        if (!entry || typeof entry !== 'object') return entry;
+        if (!Object.prototype.hasOwnProperty.call(entry, 'submittedPrompt')) return entry;
+        histTouched = true;
+        return repackedSubmissionMeta(entry);
+      });
+      if (histTouched) {
+        nextData.history = packed;
+        touched = true;
+      }
+    }
+    return touched ? { ...node, data: nextData } : node;
+  }
+
+  // 一条提交快照：按存下来的 submittedPrompt 校正 tailAppended，然后把它删掉。
+  //
+  // 与服务端 packSubmissionMeta 同一套规矩，尤其「两种拼法都对不上就一个字都不动」
+  // 这一条 —— 那是防止把提交记录改失真。
+  function repackedSubmissionMeta(meta) {
+    const out = { ...meta };
+    const sub = String(out.submittedPrompt || '');
+    const main = String(out.mainPrompt || '');
+    const tail = String(out.tailText || '');
+    const withTail = main && tail ? main + '\n\n' + tail : '';
+    let actual = null;
+    if (main && sub === main) actual = false;
+    else if (withTail && sub === withTail) actual = true;
+    if (actual === null) return out; // 重算不出来：原样保留，不冒险
+    out.tailAppended = actual;
+    delete out.submittedPrompt;
+    return out;
   }
 
   // 老画布的定时组升级成「大容器」：组框套住原来的成员，并按网格重新摆好

@@ -27,7 +27,7 @@
 // 所以拿着迁移前的备份就能原样退回去。
 
 // 当前数据版本。加一次不兼容的改动就 +1，并在 MIGRATIONS 里补一条。
-const CURRENT_VER = 1;
+const CURRENT_VER = 2;
 
 // 关于「画布级版本号」的取舍：
 //
@@ -66,6 +66,62 @@ const RENAMED_FIELDS = [
   ['prompt', 'text'],
 ];
 
+// 提交快照里那两个可能很长的提示词字段，以及「真正提交出去的提示词」的拼法。
+// 与 web/assets/canvas.js 的 composedPromptOf()、generate.composeSubmission()
+// 用的是同一条规则（两个换行 + 尾部文字）。三处必须一致。
+const SUBMISSION_FIELDS = ['lastSubmission', 'pendingSubmission'];
+
+function composedPromptOf(meta) {
+  const main = String((meta && meta.mainPrompt) || '');
+  if (!main) return '';
+  if (!(meta && meta.tailAppended)) return main;
+  const tail = String(meta.tailText || '');
+  return tail ? main + '\n\n' + tail : main;
+}
+
+// 拿「存下来的 submittedPrompt」反推 tailAppended 到底是不是 true。
+//
+// 为什么需要这一步：老数据里 history 的每一版压根没记 tailAppended，
+// 而 lastSubmission 里那个标志也可能是旧的（当时还没这个字段）。
+// 不校正就直接按标志重算，会把「其实拼过尾部提示词」的那一版算成没拼，
+// 用户点开版本明细看到的提交内容就与当时真实发出去的不一样。
+//
+// 返回 null 表示「两种拼法都对不上」——这时不动它，交给调用方原样保留。
+function trueTailAppendedOf(meta) {
+  const sub = String((meta && meta.submittedPrompt) || '');
+  if (!sub) return null;
+  const main = String((meta && meta.mainPrompt) || '');
+  if (!main) return null;
+  if (sub === main) return false;
+  const tail = String((meta && meta.tailText) || '');
+  if (tail && sub === main + '\n\n' + tail) return true;
+  return null;
+}
+
+// 处理一个提交快照：校正 tailAppended，并在能精确重算时删掉 submittedPrompt。
+// 返回 true 表示动过。
+function packSubmissionMeta(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  const hasSub = Object.prototype.hasOwnProperty.call(meta, 'submittedPrompt');
+  if (!hasSub) return false;
+  const actual = trueTailAppendedOf(meta);
+  if (actual === null) {
+    // 重算不出来：一个字都不动，宁可多存一份也不能让提交记录失真
+    return false;
+  }
+  let changed = false;
+  // 标志缺了也要显式写上：一是让导出的数据自解释（与 0→1 那条的理由一样），
+  // 二是「读取侧按这个标志现算」，写出来就不会依赖「undefined 当 false」这种约定。
+  const hasFlag = Object.prototype.hasOwnProperty.call(meta, 'tailAppended');
+  if (!hasFlag || Boolean(meta.tailAppended) !== actual) {
+    meta.tailAppended = actual;
+    changed = true;
+  }
+  // 只有「能精确重算」时才删 —— 上面的 actual 非 null 就是这个保证
+  delete meta.submittedPrompt;
+  return true;
+}
+
 // 迁移步骤表：key 是「升级前的版本号」，值是把它升到 key+1 的函数。
 // 函数返回 true 表示这一遍确实动了数据。
 //
@@ -96,7 +152,41 @@ const MIGRATIONS = {
     });
     return changed;
   },
+
+  // 1 → 2：提交快照里的 submittedPrompt 不再落盘，tailAppended 按实际值校正。
+  //
+  // 这里只登记「这一步发生过」；真正的清理由 cleanSubmissionPrompts 无条件负责。
+  // 为什么不放在这里做：理由与 cleanLegacyFields 完全一样 —— 前端读到卡片的瞬间
+  // 就会盖上当前版本号（见 canvas.js 的 migrateNode），盖章和清理之间只隔几行代码，
+  // 一旦顺序变了，一个「已经是 v2、但身上还挂着 submittedPrompt」的节点就永远
+  // 清不干净。这种节点是真实存在的。所以清理由无条件那一遍兜底。
+  1: function upToTwo() {
+    // 清理已在 cleanSubmissionPrompts 里做完，这里没有额外动作。
+    return false;
+  },
 };
+
+// 把提交快照里的 submittedPrompt 收掉。**无条件执行，不受版本号管辖**。
+//
+// 与 cleanLegacyFields 同一套理由：版本号挡不住「前端已经盖了新号、
+// 但老字段还挂着」这种状态，而那种状态一定会出现。
+// 代价只是每个快照几次 hasOwnProperty，比「想清楚顺序」便宜得多。
+//
+// 返回 true 表示动过数据。
+function cleanSubmissionPrompts(node) {
+  const data = node && node.data && typeof node.data === 'object' ? node.data : null;
+  if (!data) return false;
+  let changed = false;
+  SUBMISSION_FIELDS.forEach((key) => {
+    if (packSubmissionMeta(data[key])) changed = true;
+  });
+  if (Array.isArray(data.history)) {
+    data.history.forEach((entry) => {
+      if (packSubmissionMeta(entry)) changed = true;
+    });
+  }
+  return changed;
+}
 
 // 一份数据的版本号。没写过的按 0 算 —— 老数据本来就没这个字段。
 function versionOf(node) {
@@ -124,6 +214,9 @@ function migrateNodeData(node) {
   if (!node || typeof node !== 'object') return false;
   if (!node.data || typeof node.data !== 'object' || Array.isArray(node.data)) node.data = {};
   let changed = cleanLegacyFields(node);
+  // 与废字段清理同理：不受版本号管辖，每次扫一遍。
+  // 否则「已经盖了 v2、但 submittedPrompt 还挂着」的节点永远清不掉。
+  if (cleanSubmissionPrompts(node)) changed = true;
   const from = versionOf(node);
   if (from >= CURRENT_VER) return changed;
   for (let v = from; v < CURRENT_VER; v += 1) {
@@ -184,8 +277,13 @@ module.exports = {
   LEGACY_TYPES,
   RENAMED_FIELDS,
   MIGRATIONS,
+  SUBMISSION_FIELDS,
   versionOf,
   cleanLegacyFields,
+  cleanSubmissionPrompts,
+  composedPromptOf,
+  trueTailAppendedOf,
+  packSubmissionMeta,
   migrateNodeData,
   migrateCanvasData,
 };

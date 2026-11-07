@@ -1029,6 +1029,11 @@ function patchNodeData(canvasId, nodeId, patch) {
   }
   if (!data || typeof data !== 'object' || Array.isArray(data)) data = {};
   Object.assign(data, patch);
+  // 这条路径绕过了 saveState 的迁移漏斗，但它写进去的 lastSubmission / history
+  // 正是带 submittedPrompt 的那种快照（见 scheduler.js 的 applyResultToCard）。
+  // 不在这里过一道，定时组生成出来的结果就会重新把那一大段重复写回库里，
+  // 「省 37%」只在手写保存时成立、自动生成时又漏回去。
+  migrate.migrateNodeData({ id: String(nodeId || ''), type: '', data: data });
   const stamp = now();
   handle()
     .prepare('UPDATE nodes SET data = ?, updated_at = ? WHERE id = ? AND canvas_id = ?')

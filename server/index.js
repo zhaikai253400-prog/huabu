@@ -1038,7 +1038,9 @@ async function handleApi(req, res, pathname, query) {
           resolution: body.resolution,
           mode: body.mode,
           mainPrompt: submission.mainPrompt,
-          submittedPrompt: submission.apiPrompt,
+          // 不存 submittedPrompt：它就是 mainPrompt 再拼一段尾部提示词，
+          // 由下面三个字段能精确还原（见 web/assets/canvas.js 的
+          // composedPromptOf）。存一份是整份任务记录里最大的一笔重复。
           tailPresetId: submission.tailPresetId || '',
           tailPresetName: submission.tailPresetName || '',
           tailText: submission.tailText || '',
