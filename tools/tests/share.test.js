@@ -563,6 +563,121 @@ const LAN_IP = (function () {
         host: lanHost,
       });
       check('关掉共享后，局域网又进不来了', () => eq(closed.status, 403));
+
+      // ---- SSE 长连接（共享协作的实时通道）----
+      //
+      // 这一节是补一个真实盲区：项目原先没有任何 SSE 测试，而
+      // `requestHandler` 后来为了「按画布授权」改成了 async，并在外面包了一层
+      // `Promise.resolve(...).catch(...)`。**长连接最怕处理器提前结束或把流收掉** ——
+      // 一旦包装层在 promise resolve 之后顺手 res.end()，协作就变成「连不上」，
+      // 而且不报错、只是实时同步不工作。所以这里必须真开一条流盯着。
+      const openSse = (canvasIdToWatch, client) => new Promise((resolve, reject) => {
+        const r = http.request(
+          {
+            host: '127.0.0.1', port: port,
+            path: '/api/share/' + canvasIdToWatch + '/events?client=' + encodeURIComponent(client),
+            method: 'GET',
+            headers: Object.assign({ Accept: 'text/event-stream' }, LOCAL),
+          },
+          (res) => {
+            const state = { status: res.statusCode, headers: res.headers, events: [], ended: false, error: null };
+            res.setEncoding('utf8');
+            let buf = '';
+            res.on('data', (chunk) => {
+              buf += chunk;
+              let idx;
+              while ((idx = buf.indexOf('\n\n')) >= 0) {
+                const raw = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+                let name = 'message';
+                const dataLines = [];
+                raw.split('\n').forEach((line) => {
+                  if (line.indexOf('event:') === 0) name = line.slice(6).trim();
+                  else if (line.indexOf('data:') === 0) dataLines.push(line.slice(5).trim());
+                });
+                state.events.push({ name: name, data: dataLines.join('\n') });
+              }
+            });
+            res.on('end', () => { state.ended = true; });
+            res.on('error', (e) => { state.error = String((e && e.message) || e); });
+            state.close = () => { try { r.destroy(); } catch { /* 已断 */ } };
+            resolve(state);
+          }
+        );
+        r.on('error', reject);
+        r.end();
+      });
+
+      const sseCanvas = await request(port, {
+        path: '/api/canvases',
+        method: 'POST',
+        host: LOCAL.host,
+        headers: LOCAL,
+        body: JSON.stringify({ name: 'SSE 验收' }),
+      });
+      const sseId = JSON.parse(sseCanvas.body).canvas.id;
+      await request(port, {
+        path: '/api/canvases/' + sseId + '/share',
+        method: 'POST',
+        host: LOCAL.host,
+        headers: LOCAL,
+        body: JSON.stringify({ on: true }),
+      });
+
+      const stream = await openSse(sseId, 'sse_1');
+      check('SSE 握手 200', () => eq(stream.status, 200));
+      check('SSE 的 Content-Type 是 text/event-stream', () => {
+        assert(String(stream.headers['content-type'] || '').indexOf('text/event-stream') >= 0,
+          '实际 ' + stream.headers['content-type']);
+      });
+      check('SSE 不带 Content-Length（长连接的必要特征）', () => {
+        eq(stream.headers['content-length'], undefined);
+      });
+
+      await new Promise((r) => setTimeout(r, 600));
+      check('收到 hello（说明流真的在用，不是只建了连接）', () => {
+        assert(stream.events.some((e) => e.name === 'hello'),
+          '已收事件：' + JSON.stringify(stream.events.map((e) => e.name)));
+      });
+
+      // 关键：过一会儿流必须还开着。包装层若把 promise 收尾当成「请求结束」，
+      // 这里就会看到 ended=true。
+      await new Promise((r) => setTimeout(r, 2000));
+      check('**2 秒后流仍然没有被关闭**（async 包装最可能弄坏的地方）', () => {
+        eq(stream.ended, false);
+        eq(stream.error, null);
+      });
+
+      // 广播链路：另一个人改动，要推到这个流上
+      await request(port, {
+        path: '/api/share/' + sseId + '/patch',
+        method: 'POST',
+        host: LOCAL.host,
+        headers: LOCAL,
+        body: JSON.stringify({
+          clientId: 'sse_2',
+          upserts: [{
+            node: card('n_sse_1', { x: 10, y: 20, data: { text: '来自另一个协作者', v: 3 } }),
+            base: null,
+          }],
+        }),
+      });
+      await new Promise((r) => setTimeout(r, 900));
+      check('**别人的改动推到了已连上的流（change 事件）**', () => {
+        assert(stream.events.some((e) => e.name === 'change'),
+          '已收事件：' + JSON.stringify(stream.events.map((e) => e.name)));
+      });
+
+      stream.close();
+      await new Promise((r) => setTimeout(r, 700));
+      const presence = await request(port, {
+        path: '/api/share/' + sseId + '/presence',
+        host: LOCAL.host,
+        headers: LOCAL,
+      });
+      check('断开后在线人数落回 0（不留幽灵占位）', () => {
+        eq(JSON.parse(presence.body).count, 0);
+      });
     } finally {
       await stopChild(child);
     }
