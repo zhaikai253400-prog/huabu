@@ -1747,7 +1747,9 @@
     if (!meta || typeof meta !== 'object') return meta;
     if (!Object.prototype.hasOwnProperty.call(meta, 'submittedPrompt')) return meta;
     const sub = String(meta.submittedPrompt || '');
-    // 空串不含任何信息，直接删（重算结果只会更准）
+    // 空串一个信息都没有（它意味着「当时没记下提交内容」，不是「提交内容为空」）：
+    // 直接删掉，读取侧会按 mainPrompt + 尾部提示词给出最接近的值。
+    // 判据与后端 packSubmissionMeta 逐条对齐。
     if (!sub) {
       const blank = { ...meta };
       delete blank.submittedPrompt;
@@ -4181,15 +4183,18 @@
     const refs = Array.isArray(raw.refs) ? raw.refs : Array.isArray(base.refs) ? base.refs : [];
     const mainPrompt = String(raw.mainPrompt || base.mainPrompt || '');
     const tailText = String(raw.tailText || base.tailText || '');
+    // 存下来的那份是「当初真正发出去的内容」，是**真相**，优先级必须最高。
+    // 不能用现算值盖过它 —— 现算依赖 tailAppended，而老数据里那个标志可能是过时的
+    // false（history 里甚至压根没这个字段）。实测真实库 89 个快照里有 22 个是这种情况：
+    // 按现算优先读出来会短掉恰好一整段尾部提示词（例：2340 字 → 2003 字），
+    // 用户在版本明细里看到的就是残缺的提交内容。
+    // 所以顺序是：存下来的 → 现算 → pendingSubmission/apiPrompt 兜底。
+    const stored = String(raw.submittedPrompt || raw.apiPrompt || base.submittedPrompt || '');
     const tailAppended = Boolean(raw.tailAppended || base.tailAppended);
-    // submittedPrompt 现在不落盘了（见 persistedData）：这里优先用现算的结果。
-    // 老数据里存着的那份也认，但顺序放在后面 —— 现算的才是与 tailAppended 一致的。
     const composed = mainPrompt && tailAppended && tailText ? mainPrompt + '\n\n' + tailText : mainPrompt;
     return {
       mainPrompt: mainPrompt,
-      submittedPrompt: String(
-        composed || raw.submittedPrompt || raw.apiPrompt || base.submittedPrompt || ''
-      ),
+      submittedPrompt: String(stored || composed || ''),
       tailPresetId: String(raw.tailPresetId || base.tailPresetId || ''),
       tailPresetName: String(raw.tailPresetName || base.tailPresetName || ''),
       tailText: tailText,

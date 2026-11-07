@@ -104,6 +104,13 @@ function packSubmissionMeta(meta) {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
   const hasSub = Object.prototype.hasOwnProperty.call(meta, 'submittedPrompt');
   if (!hasSub) return false;
+  // 空串一个信息都没有（它意味着「当时没记下提交内容」，不是「提交内容为空」）：
+  // 直接删掉，读取侧会按 mainPrompt + 尾部提示词给出最接近的值。
+  // 留着它反而会让读取侧以为「存过一份，以它为准」。
+  if (!String(meta.submittedPrompt || '')) {
+    delete meta.submittedPrompt;
+    return true;
+  }
   const actual = trueTailAppendedOf(meta);
   if (actual === null) {
     // 重算不出来：一个字都不动，宁可多存一份也不能让提交记录失真

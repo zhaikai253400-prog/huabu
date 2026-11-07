@@ -527,6 +527,111 @@ check('对拍失败时不是「两边一致地错」：与最终文档里写的�
   assert(canvasSrc.indexOf("'\\n\\n'") >= 0, 'canvas.js 里找不到「两个换行」的拼法');
 });
 
+console.log('\nS11 · 读取优先级：存下来的那份是真相，不能被现算盖过');
+
+check('有 submittedPrompt 时必须原样返回，不许用现算覆盖', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  const fn = /function submissionMetaOf\(source, fallback\) \{([\s\S]*?)\n  \}/.exec(src);
+  assert(fn, '抽不出 submissionMetaOf 函数体');
+  const b = fn[1];
+  // 存下来的那份必须排在现算之前
+  const storedAt = b.indexOf('raw.submittedPrompt');
+  const composedAt = b.indexOf('composed');
+  assert(storedAt >= 0, '没有读 raw.submittedPrompt');
+  assert(composedAt >= 0, '没有现算兜底');
+  assert(storedAt < composedAt,
+    '现算排在了「存下来的值」前面：标志过时的时候会用残缺内容盖掉真相');
+});
+
+// 用真实函数跑，证明上面的源码约束不是空话
+const feMetaOf = new Function(
+  'function submissionMetaOf(source, fallback) {' + (function () {
+    const m = /function submissionMetaOf\(source, fallback\) \{([\s\S]*?)\n  \}/.exec(
+      fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8'));
+    return m[1];
+  })() + '\n  }\nreturn submissionMetaOf;'
+)();
+
+check('标志过时（false 但内容确实拼了尾部）：读出来仍是完整内容', () => {
+  const meta = { mainPrompt: '主', tailText: '尾', tailAppended: false, submittedPrompt: '主\n\n尾' };
+  const got = feMetaOf(meta, {}).submittedPrompt;
+  assert.strictEqual(got, '主\n\n尾',
+    '这里是本项改动引入过的真缺陷：真实库 89 个快照里有 22 个标志过时，' +
+    '按现算优先会短掉恰好一整段尾部提示词');
+});
+
+check('没有任何 submittedPrompt 的新数据：靠现算给出', () => {
+  const got = feMetaOf({ mainPrompt: '主', tailText: '尾', tailAppended: true }, {}).submittedPrompt;
+  assert.strictEqual(got, '主\n\n尾');
+  const noTail = feMetaOf({ mainPrompt: '主', tailText: '尾', tailAppended: false }, {}).submittedPrompt;
+  assert.strictEqual(noTail, '主');
+});
+
+check('清理 → 再读，必须等于原内容（11 组边界）', () => {
+  const snap = (over) => Object.assign({ mainPrompt: '主', tailText: '尾', tailAppended: true, submittedPrompt: '主\n\n尾' }, over || {});
+  const cases = [
+    ['追加了尾部', snap()],
+    ['没追加', snap({ tailAppended: false, submittedPrompt: '主' })],
+    ['对不上应原样保留', snap({ submittedPrompt: '完全对不上' })],
+    ['mainPrompt 为空', { mainPrompt: '', tailText: 'T', submittedPrompt: 'A' }],
+    ['标志过时', snap({ tailAppended: false })],
+    ['tailText 为空且值为 main', { mainPrompt: 'A', tailText: '', tailAppended: true, submittedPrompt: 'A' }],
+    ['tailText 为空且值为 main+双换行', { mainPrompt: 'A', tailText: '', tailAppended: true, submittedPrompt: 'A\n\n' }],
+    ['main 含换行', { mainPrompt: '行1\n行2', tailText: 'T', tailAppended: true, submittedPrompt: '行1\n行2\n\nT' }],
+    ['超长', { mainPrompt: 'x'.repeat(30000), tailText: 'y'.repeat(10000), tailAppended: true, submittedPrompt: 'x'.repeat(30000) + '\n\n' + 'y'.repeat(10000) }],
+  ];
+  cases.forEach(([name, meta]) => {
+    const want = String(meta.submittedPrompt);
+    const cleaned = JSON.parse(JSON.stringify(meta));
+    migrate.packSubmissionMeta(cleaned);
+    const got = feMetaOf(cleaned, {}).submittedPrompt;
+    assert.strictEqual(got, want, '「' + name + '」读回不一致');
+  });
+});
+
+check('空串另作一档：删掉它是刻意的，读回时按现算给最接近的值', () => {
+  // 空串意味着「当时没记下提交内容」，不是「提交内容为空」——
+  // 留着它会让读取侧以为「存过一份、以它为准」，反而盖住现算。
+  const meta = { mainPrompt: '主', tailText: '尾', tailAppended: true, submittedPrompt: '' };
+  const cleaned = JSON.parse(JSON.stringify(meta));
+  migrate.packSubmissionMeta(cleaned);
+  assert.strictEqual('submittedPrompt' in cleaned, false, '空串该被删掉');
+  const got = feMetaOf(cleaned, {}).submittedPrompt;
+  assert.strictEqual(got, '主\n\n尾', '删掉之后应当由现算给出，而不是空');
+});
+
+console.log('\nS12 · 前后端清理判据必须逐条对齐');
+
+check('空串：两边都删掉（判据一致）', () => {
+  const meta = { mainPrompt: '主', tailText: '尾', tailAppended: true, submittedPrompt: '' };
+  // 后端
+  const beNode = JSON.parse(JSON.stringify(meta));
+  migrate.packSubmissionMeta(beNode);
+  // 前端
+  const feFn = new Function(
+    'function stripSubmissionPrompt(meta) {' + (function () {
+      const m = /function stripSubmissionPrompt\(meta\) \{([\s\S]*?)\n  \}/.exec(
+        fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8'));
+      return m[1];
+    })() + '\n  }\nreturn stripSubmissionPrompt;'
+  )();
+  const feOut = feFn(JSON.parse(JSON.stringify(meta)));
+  assert.strictEqual('submittedPrompt' in beNode, false, '后端该删掉空串');
+  assert.strictEqual('submittedPrompt' in feOut, false, '前端该删掉空串');
+});
+
+check('两边对空串的处置必须一致（源码级：都有空串分支）', () => {
+  const be = fs.readFileSync(path.join(ROOT, 'server', 'migrate.js'), 'utf8');
+  const fe = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  const beFn = /function packSubmissionMeta\(meta\) \{([\s\S]*?)\n\}/.exec(be);
+  const feFn = /function stripSubmissionPrompt\(meta\) \{([\s\S]*?)\n  \}/.exec(fe);
+  assert(beFn && feFn, '抽不出实现');
+  assert(/if \(!String\(meta\.submittedPrompt \|\| ''\)\)/.test(beFn[1]),
+    '后端没有空串分支');
+  assert(/if \(!sub\)\s*\{/.test(feFn[1]),
+    '前端没有空串分支 —— 两边判据不等，会走出不同结果');
+});
+
 console.log('\n' + '─'.repeat(52));
 if (failed) {
   console.log('通过 ' + passed + ' 项，失败 ' + failed + ' 项');
