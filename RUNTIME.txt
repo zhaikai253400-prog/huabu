@@ -45,7 +45,36 @@
     能输出版本信息即可。
 
 --------------------------------------------------------------------
-3. 已纳入版本管理的二进制（体积小，无需单独获取）
+3. .git-tools/  （便携版 Git，随项目携带）
+--------------------------------------------------------------------
+  版本：MinGit 2.56.0（git version 2.56.0.windows.4）
+  体积：约 92MB / 375 个文件
+  位置：.git-tools\cmd\git.exe
+  用途：这台电脑上没有任何 git 时的替代品。
+
+  背景：本机原先找不到任何 git，导致 2026-11-04~11-06 的改动一直没能提交，
+  四个新子系统（share / codesync / keybox / guard）连一次历史都没有。
+  为让「提交」这件事不再依赖环境，把便携版 MinGit 放进项目一起走。
+
+  用法（在项目根目录）
+    .git-tools\cmd\git.exe log --oneline
+    .git-tools\cmd\git.exe status --short
+    .git-tools\cmd\git.exe add -A
+    .git-tools\cmd\git.exe commit -m "说明"
+
+  为什么放在根目录的 .git-tools\ 而不是 tools\
+    tools\ 在 server/codesync.js 的同步白名单（CODE_DIRS）里，
+    放进去会把 92MB 的 git 同步到局域网另一台电脑，
+    也会在 git status 里多出 375 个未跟踪文件。
+    .git-tools\ 已在 .gitignore 中排除，且经实测
+    codesync.isCodeFile('.git-tools/cmd/git.exe') === false。
+
+  重新获取
+    访问 https://github.com/git-for-windows/git/releases
+    下载 MinGit-x.y.z-64-bit.zip（约 38MB），解压后放成 .git-tools\ 即可。
+
+--------------------------------------------------------------------
+4. 已纳入版本管理的二进制（体积小，无需单独获取）
 --------------------------------------------------------------------
   无限画布.exe          约 0.2MB   启动器
   server/tray/CanvasTray.exe       系统托盘程序（由 CanvasTray.cs 编译）
