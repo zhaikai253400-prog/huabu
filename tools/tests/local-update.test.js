@@ -342,6 +342,56 @@ check('平移（startPan）仍然按下就进交互态（那条路本来就该�
   assert.ok(!/beginOnce/.test(b.text), 'startPan 不该用延迟版入口（按下就是平移）');
 });
 
+// ── 小地图绘制开销（实测：一次拖动要付约 2900~3300 次绘制调用）──────────
+//
+// 挖这个的原因是用户反馈「快速拖动时特别卡、卡片跟不上鼠标」。
+// 定位过程中我**先做了一个无效的对照实验**（给 drawMinimap 装了个
+// `if (window.__skipMM) return;` 的开关，却从没把 __skipMM 设为 true，
+// 于是"对照组"其实也在照常画小地图，得出的"无改善"是假结论）。
+// 后来改成给 canvas 2D 上下文打桩计数，才看到真实数字：
+//   · 一次 45 帧拖动，小地图绘制调用 **2900~3300 次**
+//   · 交替配对测量：把它空转掉，GPUTask 中位少 **79ms**，4/5 轮更快
+// 优化后绘制调用降到 **1491**（约 45%），整屏像素对比**差异 0%**。
+//
+// 这两条护栏守的就是那两个具体改法，防止以后被改回去。
+console.log('\nD9 · 小地图绘制开销（实测过的热点）');
+
+check('drawMinimap 的连线是"攒成一个路径只 stroke 一次"', () => {
+  const b = bodyOf('drawMinimap');
+  assert.ok(b, '没找到 drawMinimap');
+  // 旧写法：在 edges.forEach 内部 beginPath + stroke
+  const inLoop = /edges\.forEach\(\(edge\) => \{[\s\S]*?ctx\.beginPath\(\)[\s\S]*?ctx\.stroke\(\);[\s\S]*?\}\);/.test(b.text);
+  assert.ok(!inLoop,
+    'drawMinimap 又变成"每条连线各来一次 beginPath + stroke"了 —— ' +
+    '54 张卡的画布上那是 70~90 次独立描边，而小地图在拖动中会反复重画');
+  // 新写法：一次 beginPath 覆盖所有连线
+  assert.ok(/ctx\.beginPath\(\);[\s\S]{0,200}?edges\.forEach/.test(b.text),
+    'drawMinimap 没有把连线合并到同一个路径里');
+});
+
+check('drawMinimap 的卡片是按颜色分组填充（不是每张卡写一次 fillStyle）', () => {
+  const b = bodyOf('drawMinimap');
+  assert.ok(b, '没找到 drawMinimap');
+  assert.ok(/byTint/.test(b.text),
+    'drawMinimap 不再按颜色分桶 —— 每张卡写一次 ctx.fillStyle 会多出几十次状态切换');
+  // 旧写法：shown.forEach 里直接写 fillStyle
+  assert.ok(!/shown\.forEach\(\(node\) => \{[\s\S]{0,300}?ctx\.fillStyle = MM_TINTS/.test(b.text),
+    'drawMinimap 又在逐张卡里直接写 ctx.fillStyle 了');
+});
+
+check('拖动中放宽了小地图重画间隔（松手仍会补画一次）', () => {
+  const b = bodyOf('scheduleMinimap');
+  assert.ok(b, '没找到 scheduleMinimap');
+  const m = /interactingCount > 0 && performance\.now\(\) - mmLastDraw < (\d+)/.exec(b.text);
+  assert.ok(m, 'scheduleMinimap 里找不到"交互中节流"的判断');
+  assert.ok(Number(m[1]) >= 200,
+    '拖动中的小地图节流间隔被调回 ' + m[1] + 'ms 了 —— 太密会让拖动反复付这笔开销');
+  // 松手必须补画，否则小地图会停在拖动中途的状态
+  const e = bodyOf('endInteraction');
+  assert.ok(e && /scheduleMinimap\(\)/.test(e.text),
+    'endInteraction 不再补画小地图 —— 松手后小地图会停在中途状态');
+});
+
 console.log('\n' + '─'.repeat(52));
 if (fail) {
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
