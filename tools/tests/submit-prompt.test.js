@@ -435,6 +435,98 @@ check('前端从任务拿快照时走现算（submissionMetaFromTask → submiss
   assert(fn[1].indexOf('tailAppended') >= 0, '得把 tailAppended 传下去，否则现算不出来');
 });
 
+console.log('\nS10 · 前后端对拍（两处实现必须真跑出同样的结果）');
+//
+// 前端跑在浏览器里，引不到 server/migrate.js，所以「拼提交提示词」这件事
+// 前后端各写了一份。项目自己的注释写着「保持一致靠测试里的对拍，不靠自觉」——
+// 下面就是把这句话兑现：把前端那份从源码里抽出来在沙箱里跑，
+// 与后端那份喂同一批输入，逐个比结果。
+//
+// 为什么必须是「跑出来比」而不是「看源码像不像」：
+// 上一节 S9 那个缺陷就是两份实现看着都合理、跑起来才不一样。
+
+// 从 canvas.js 里抽出某个顶层函数的体
+function frontBody(name) {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  const m = new RegExp('function ' + name + '\\([^)]*\\) \\{([\\s\\S]*?)\\n  \\}').exec(src);
+  assert(m, '抽不出前端函数 ' + name);
+  return m[1];
+}
+
+const feCompose = new Function(
+  'function composedPromptOf(meta) {' + frontBody('composedPromptOf') + '\n  }\n' +
+  'return composedPromptOf;'
+)();
+
+const COMPOSE_CASES = [
+  ['追加了尾部', { mainPrompt: 'A', tailText: 'T', tailAppended: true }],
+  ['没追加', { mainPrompt: 'A', tailText: 'T', tailAppended: false }],
+  ['尾部为空但标志为真', { mainPrompt: 'A', tailText: '', tailAppended: true }],
+  ['尾部 undefined', { mainPrompt: 'A', tailText: undefined, tailAppended: true }],
+  ['main 为空', { mainPrompt: '', tailText: 'T', tailAppended: true }],
+  ['main undefined', { mainPrompt: undefined, tailText: 'T', tailAppended: true }],
+  ['两个都空', { mainPrompt: '', tailText: '', tailAppended: true }],
+  ['标志 undefined', { mainPrompt: 'A', tailText: 'T' }],
+  ['main 含换行', { mainPrompt: '行1\n行2', tailText: 'T', tailAppended: true }],
+  ['尾部含换行', { mainPrompt: 'A', tailText: '尾1\n尾2', tailAppended: true }],
+  ['中文与 emoji', { mainPrompt: '猫🐱', tailText: '尾✨', tailAppended: true }],
+  ['超长', { mainPrompt: 'x'.repeat(50000), tailText: 'y'.repeat(20000), tailAppended: true }],
+  ['null 输入', null],
+  ['非对象输入', '字符串'],
+  ['数字字段', { mainPrompt: 123, tailText: 456, tailAppended: true }],
+];
+
+check('拼提交提示词：前后端 ' + COMPOSE_CASES.length + ' 组输入结果全等', () => {
+  COMPOSE_CASES.forEach(([name, meta]) => {
+    const be = migrate.composedPromptOf(meta);
+    const fe = feCompose(meta);
+    assert.strictEqual(fe, be, '「' + name + '」不一致：后端=' + JSON.stringify(String(be).slice(0, 40)) +
+      ' 前端=' + JSON.stringify(String(fe).slice(0, 40)));
+  });
+});
+
+// 判 tailAppended 真值：前端那份在 stripSubmissionPrompt 里头，照它的逻辑重跑一遍。
+// 这里**有意从源码文本里抠出判据**，而不是另抄一份 —— 抄一份就失去对拍的意义了。
+const feStrip = new Function(
+  'function stripSubmissionPrompt(meta) {' + frontBody('stripSubmissionPrompt') + '\n  }\n' +
+  'return stripSubmissionPrompt;'
+)();
+
+check('判 tailAppended 真值：前后端 8 组输入结果全等', () => {
+  const cases = [
+    ['sub === main', { mainPrompt: 'A', tailText: 'T', submittedPrompt: 'A' }],
+    ['sub === main+双换行+tail', { mainPrompt: 'A', tailText: 'T', submittedPrompt: 'A\n\nT' }],
+    ['对不上', { mainPrompt: 'A', tailText: 'T', submittedPrompt: 'X' }],
+    ['没有 sub', { mainPrompt: 'A', tailText: 'T' }],
+    ['没有 main', { mainPrompt: '', tailText: 'T', submittedPrompt: 'A' }],
+    ['tail 空且 sub === main', { mainPrompt: 'A', tailText: '', submittedPrompt: 'A' }],
+    ['tail 空且 sub === main+双换行', { mainPrompt: 'A', tailText: '', submittedPrompt: 'A\n\n' }],
+    ['main 含换行', { mainPrompt: '行1\n行2', tailText: 'T', submittedPrompt: '行1\n行2\n\nT' }],
+  ];
+  cases.forEach(([name, meta]) => {
+    const be = migrate.trueTailAppendedOf(meta);
+    // 前端不单独暴露这个判定函数，所以用它的**返回引用**反推：
+    //   · 返回同一个对象 → 没算出真值（原样保留）
+    //   · 返回新对象     → 算出来了，tailAppended 就是判定结果
+    // 用引用判断而不是看字段在不在：字段在不在分不清「没算出来」与「本来就没有」。
+    const input = { ...meta };
+    const out = feStrip(input);
+    const fe = out === input ? null : out.tailAppended;
+    assert.strictEqual(fe, be, '「' + name + '」不一致：后端=' + be + ' 前端=' + fe);
+  });
+});
+
+check('对拍失败时不是「两边一致地错」：与最终文档里写的规则也一致', () => {
+  // 规则写在 generate.composeSubmission 里，用「两个换行」拼。
+  // 这里连同注释一起守住拼法，防止有人改了一边却让两边同时变。
+  const genSrc = fs.readFileSync(path.join(ROOT, 'server', 'generate.js'), 'utf8');
+  assert(genSrc.indexOf("'\\n\\n'") >= 0, 'generate.js 里找不到「两个换行」的拼法');
+  const migSrc = fs.readFileSync(path.join(ROOT, 'server', 'migrate.js'), 'utf8');
+  assert(migSrc.indexOf("'\\n\\n'") >= 0, 'migrate.js 里找不到「两个换行」的拼法');
+  const canvasSrc = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  assert(canvasSrc.indexOf("'\\n\\n'") >= 0, 'canvas.js 里找不到「两个换行」的拼法');
+});
+
 console.log('\n' + '─'.repeat(52));
 if (failed) {
   console.log('通过 ' + passed + ' 项，失败 ' + failed + ' 项');
