@@ -714,6 +714,46 @@
     refreshSelection();
   }
 
+  // 单张卡片的上/下画布：只碰这一张，不走 renderAll。
+  // renderNodes() 会把 worldEl 里所有卡片先全删再全建，几百张卡时每次都要
+  // 重新解码所有 <img>/<video>，用户会看到整片黑闪。删除、粘贴、隐藏、锁定
+  // 这些只影响个别卡片的操作没必要付这个代价。
+  // 层叠顺序不靠 DOM 顺序，而是靠 buildNode 里写死的 style.zIndex（zIndexOf），
+  // 所以 appendChild 到末尾不会盖住别人。
+  function mountNode(node) {
+    if (!node || elements.has(node.id)) return elements.get(node.id) || null;
+    if (isHidden(node)) return null;
+    const el = buildNode(node);
+    elements.set(node.id, el);
+    worldEl.appendChild(el);
+    return el;
+  }
+  function unmountNode(id) {
+    const el = elements.get(id);
+    if (el) el.remove();
+    elements.delete(id);
+  }
+
+  // 锁定标记是卡片上的独立元素（类名只管样式，锁形图标得自己加/删），
+  // 所以只切 class 是不够的，两边一起同步。
+  function buildLockMark() {
+    const lock = document.createElement('div');
+    lock.className = 'node-lock';
+    lock.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4.6" y="10.4" width="14.8" height="9.6" rx="2.2"/><path d="M8.2 10.4V7.6a3.8 3.8 0 017.6 0v2.8"/></svg>';
+    lock.title = '这张卡片已锁定：不能拖动、不能修改，但可以当素材连给别人（Ctrl+L 解锁）';
+    lock.setAttribute('aria-label', '已锁定');
+    return lock;
+  }
+  function syncLockMark(el, node) {
+    if (!el) return;
+    const want = isLocked(node);
+    el.classList.toggle('is-locked', want);
+    const mark = directChildOf(el, 'node-lock');
+    if (want && !mark) el.appendChild(buildLockMark());
+    else if (!want && mark) mark.remove();
+  }
+
   // 只是卡片背后的连线信息变了（比如删掉了另一张卡片）：只换掉编辑面板，
   // 卡片本体和图片 / 视频原样保留，免得媒体重新加载时黑闪一下
   function refreshPanelOnly(node) {
@@ -3097,15 +3137,7 @@
     el.appendChild(buildTitleStrip(node, data));
     // 组里的卡片右上角挂一个橙色序号，一眼看出排第几
     if (!isSchedule(node)) el.appendChild(buildScheduleOrderBadge(node));
-    if (isLocked(node)) {
-      const lock = document.createElement('div');
-      lock.className = 'node-lock';
-      lock.innerHTML =
-        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4.6" y="10.4" width="14.8" height="9.6" rx="2.2"/><path d="M8.2 10.4V7.6a3.8 3.8 0 017.6 0v2.8"/></svg>';
-      lock.title = '这张卡片已锁定：不能拖动、不能修改，但可以当素材连给别人（Ctrl+L 解锁）';
-      lock.setAttribute('aria-label', '已锁定');
-      el.appendChild(lock);
-    }
+    if (isLocked(node)) el.appendChild(buildLockMark());
     if (isSchedule(node)) {
       const scrim = document.createElement('div');
       scrim.className = 'schedule-scrim';
@@ -3297,6 +3329,9 @@
         poster.alt = '';
         poster.draggable = false;
         poster.decoding = 'async';
+        // 和图片卡片（下面的 img.loading）保持一致：视口外的视频封面先别下载。
+        // 少了这一行，几百张视频卡片一打开就要同时去拉封面，首屏明显发顿。
+        poster.loading = 'lazy';
         const posterUrl = thumbUrlOf(result);
         if (posterUrl) {
           poster.src = posterUrl;
@@ -11341,8 +11376,15 @@
     };
     selection.clear();
     copies.forEach((copy) => selection.add(copy.id));
-    renderAll();
+    // 粘贴是「加几张新卡片」：只把这几个新的建出来挂上去，
+    // 不动画布上原有的卡片（renderAll 会让它们全部重新加载一遍图片 / 视频）。
+    copies.forEach((copy) => mountNode(copy));
+    // 新卡片可能插在某个区域里、或成为定时组成员，序号与组样式要跟着重排
+    renderEdges();
+    paintScheduleBadges();
+    paintFilter();
     refreshSelection();
+    scheduleMinimap();
     scheduleSave();
     toast('已粘贴 ' + copies.length + ' 张卡片');
   }
@@ -11373,7 +11415,18 @@
     if (!changed) return 0;
     // 锁上时顺手收起编辑面板，免得留一个改不了的输入框开着
     if (on && expandedId && list.some((node) => node.id === expandedId)) setExpanded(null);
-    renderAll();
+    // 只改被锁/解锁的那几张：锁定态只影响卡片自己的样式与锁形图标。
+    // 以前走 renderAll()，把全画布的卡片连同图片 / 视频全部重建一遍，
+    // 300 张卡时一次能重建 300 个节点（实测），代价与用户按 Ctrl+L 的频繁程度完全不匹配。
+    list.forEach((node) => {
+      const el = elements.get(node.id);
+      if (!el) return;
+      syncLockMark(el, node);
+      // 面板里有依赖锁定态的禁用控件（模型下拉、参数芯片、生成按钮），
+      // 展开着的那张得一起刷新，否则会留下一个还能点的「生成」
+      if (node.id === expandedId) refreshNodeParts(node, ['panel']);
+    });
+    paintFilter();
     refreshSelection();
     scheduleSave();
     return changed;
@@ -11419,7 +11472,23 @@
     if (expandedId && list.some((node) => node.id === expandedId)) expandedId = null;
     selection.clear();
     selectedEdgeId = null;
-    renderAll();
+    // 隐藏就是「从画布上摘掉，但数据和素材都还在」。只摘这几张，
+    // 不走 renderAll()：不然藏三张卡也会把其余几百张的图片 / 视频全部重建、重新解码。
+    list.forEach((node) => {
+      if (!nodeData(node).hidden) return;
+      const el = elements.get(node.id);
+      // 正在这张卡片的输入框里打字：先让它失焦，免得摘掉后光标留在游离节点上
+      if (el && el.contains(document.activeElement) && document.activeElement.blur) document.activeElement.blur();
+      unmountNode(node.id);
+    });
+    // 连着被隐藏卡片的线不用删：updateEdgePaths() 见到 endpoint 是 hidden
+    // 就把那条线 display:none（见它里面 isHidden 那一支），所以只刷一遍连线即可。
+    updateEdgePaths();
+    refreshHiddenBadge();
+    paintLocateBadge();
+    placeAlignBar();
+    scheduleMinimap();
+    paintFilter();
     refreshSelection();
     scheduleSave();
     toast('已隐藏 ' + changed + ' 张卡片：它们还能当素材用，右下角可以随时恢复');
@@ -12411,8 +12480,17 @@
           /* 没捕获成功也不用管 */
         }
       }
-      renderAll();
+      // 区域成员是按 data.zoneId 认的，不按几何位置，所以改大小不会改变成员；
+      // 尺寸也已经在 paint() 里写进 style 了。这里只把这一张区域卡自己重建一遍
+      // （区域卡没有图片 / 视频，重建不会引起媒体重载），再刷连线与徽标。
+      // 以前走 renderAll()，为了改一块区域的大小把全画布卡片都重建了一遍。
+      refreshNode(node);
+      updateEdgePaths();
+      refreshHiddenBadge();
+      paintFilter();
       refreshSelection();
+      scheduleMinimap();
+      placeAlignBar();
       scheduleSave();
     };
 
