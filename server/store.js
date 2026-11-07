@@ -185,6 +185,14 @@ function init() {
   } catch (error) {
     console.log('[数据库] 清理任务里的重复提示词跳过：' + error.message);
   }
+  // 顺带收掉「彻底没有信息价值」的任务记录（画布和卡片都已不存在、也没有任何
+  // 结果/失败/接续信息）。deleteCanvas 是硬删，不会清 tasks，
+  // 所以这块只能靠启动时收 —— 详见 pruneOrphanTasks 上面那段。
+  try {
+    pruneOrphanTasks();
+  } catch (error) {
+    console.log('[数据库] 清理无价值的任务记录跳过：' + error.message);
+  }
   return opened;
 }
 
@@ -1375,9 +1383,88 @@ function interruptStaleTasks() {
   return Number(result.changes || 0);
 }
 
+// 任务记录保留策略。**判据比一开始设想的严得多** —— 因为实测发现
+// "没有 result_path 的失败记录"里装的恰恰是最有用的东西。
+//
+// 先看清事实（真实库 174 条）：
+//   · 112 条：画布还在 → 一律保留（卡片上还要显示生成状态）
+//   · 50 条：画布已删但带 result_path → **保留**。任务面板会为画布已删的记录
+//     显示「这块画布已经删掉了（素材还在 素材 目录里）」，而 result_path 正是
+//     「那次生成的文件存到哪了」。删了用户就再也查不到文件在哪。
+//   · 剩下 12 条：画布已删、无 result_path。乍看是垃圾，但逐条看过内容后
+//     **它们全部带非空的 error / error_json**，例如
+//     「通道密钥不对或已过期」「通道「新视频通道 2」还没填 Base URL」——
+//     这是排查"为什么生成不出来"最有用的线索，还带着用户的原始 prompt。
+//     删掉等于把故障现场抹掉。
+//
+// 所以最终规则收紧到近乎苛刻 —— 只删**确定没有任何信息价值**的：
+//   status 是终态
+//   且 canvas_id / node_id 都已不存在（不可能再被关联）
+//   且 没有 result_path（没有文件位置）
+//   且 没有 error / error_json（没有失败原因）
+//   且 没有 result_json（没有结果数据）
+//   且 没有 resume_json（不可接续）
+//   且 超过 7 天（给刚删掉的画布留一点回旋余地）
+// 实测真实库里**一条都不满足**（可清 0 条）。这是正确的结论，不是没做成：
+// 规则存在的意义是**将来**画布删多了以后自动收住，而不是现在硬凑一个数字。
+//
+// 动手前先留档（与 pruneTaskSubmissionPrompts 同一套规矩）：这是改用户数据，
+// 而它发生在启动时、不经过 saveState，没有别的地方会替它留档。
+// 留档失败就不动数据。
+function pruneOrphanTasks() {
+  const database = handle();
+  // 判据全部下推到 SQL：这张表会随着画布增删一直长，逐行查在启动时是 n 次查询。
+  // 条件与上面注释一一对应，改一处要改两处 —— 所以测试里专门有一条断言守着它们同步。
+  const doomed = database
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE status NOT IN ('queued', 'running', 'pending')
+         AND (result_path IS NULL OR TRIM(result_path) = '')
+         AND (error IS NULL OR TRIM(error) = '')
+         AND (error_json IS NULL OR TRIM(error_json) = '')
+         AND (result_json IS NULL OR TRIM(result_json) = '')
+         AND (resume_json IS NULL OR TRIM(resume_json) = '')
+         AND (canvas_id IS NULL OR TRIM(canvas_id) = '' OR canvas_id NOT IN (SELECT id FROM canvases))
+         AND (node_id IS NULL OR TRIM(node_id) = '' OR node_id NOT IN (SELECT id FROM nodes))
+         AND created_at < ?`
+    )
+    .all(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  if (!doomed.length) return 0;
+
+  // 先留档：整条抄下来（要能原样插回去）。这些记录本来就没有任何内容字段，
+  // 所以整条很小；不像 pruneTaskSubmissionPrompts 那样需要省体积。
+  const file = path.join(DATA_DIR, 'backups', 'tasks-before-orphan-prune.json');
+  try {
+    ensureDir(path.dirname(file));
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        at: Date.now(),
+        reason: '清理彻底没有信息价值的任务记录（画布与卡片都已不存在）',
+        how: '把 rows 里的每条按原字段 INSERT 回 tasks 表即可还原',
+        rows: doomed,
+      }),
+      'utf8'
+    );
+  } catch (error) {
+    console.log('[数据库] 留档失败，这次不动任务记录：' + error.message);
+    return 0;
+  }
+
+  const del = database.prepare('DELETE FROM tasks WHERE id = ?');
+  let done = 0;
+  doomed.forEach((row) => { del.run(row.id); done += 1; });
+  if (done) {
+    console.log(
+      '[数据库] 已清理 ' + done + ' 条无信息价值的任务记录' +
+      '（原样存在 data/backups/tasks-before-orphan-prune.json，可还原）'
+    );
+  }
+  return done;
+}
+
 // 有接续信息的任务：服务重启后可以接着等结果，不当成中断
-function listResumableTasks() {
-  const rows = handle()
+function listResumableTasks() {  const rows = handle()
     .prepare(
       `SELECT * FROM tasks
        WHERE status IN ('queued', 'running') AND resume_json IS NOT NULL AND resume_json != ''
@@ -1440,6 +1527,7 @@ module.exports = {
   listResumableTasks,
   interruptStaleTasks,
   pruneTaskSubmissionPrompts,
+  pruneOrphanTasks,
   getScheduleRun,
   listScheduleRuns,
   upsertScheduleRun,
