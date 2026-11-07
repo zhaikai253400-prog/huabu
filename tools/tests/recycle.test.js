@@ -198,6 +198,52 @@ check('画布页样式里给了提示条按钮与回收站面板', () => {
   });
 });
 
+// 这一组是**真事故换来的**。回收站目录里同时住着 `画布-*`（删画布前导出的安全网），
+// 而 listRecycle 原来会把**每一个目录**都当素材批次列出。实测两个后果：
+//   ① 素材回收站面板被 315 个「画布-2026-…」条目灌满
+//   ② 在那里点「还原」，把画布 .json（含 历史版本/ 子目录）搬进了用户的素材目录
+// 顺带钉住一个**不能被牺牲**的旧行为：认不出名字的批次（如 `db-broken-*`）
+// 仍然要能列出来 —— 我第一版改成"只收 素材- 开头的白名单"，
+// 立刻把上面 D1 那两条打红了，所以这里专门守一下。
+console.log('\nD6 · 画布批次不能混进素材回收站（实测过的真事故）');
+
+check('listRecycle 排除了 `画布-*` 批次', () => {
+  const lib = fs.readFileSync(path.join(ROOT, 'server', 'library.js'), 'utf8');
+  const fn = /function listRecycle\(\) \{([\s\S]*?)\n\}/.exec(lib);
+  assert(fn, '抽不出 listRecycle');
+  assert(/\^画布-/.test(fn[1]),
+    'listRecycle 没有排除 `画布-*` —— 素材回收站会列出画布安全网目录，' +
+    '并且在那里点还原会把画布 .json 倒进素材目录');
+});
+
+check('listRecycle 仍然保留"认不出的批次也要列出来"（黑名单，不是白名单）', () => {
+  const lib = fs.readFileSync(path.join(ROOT, 'server', 'library.js'), 'utf8');
+  const fn = /function listRecycle\(\) \{([\s\S]*?)\n\}/.exec(lib);
+  assert(fn, '抽不出 listRecycle');
+  // 不能写成"只收 素材- 开头" —— 那会把 db-broken-* 一起挡掉（D1 会红）
+  assert(!/if \(!\/\^素材-\/\.test\(entry\.name\)\) return;/.test(fn[1]),
+    'listRecycle 改成只收 `素材-` 白名单了 —— 那会把 db-broken-* 这类批次一起堵掉');
+  // 而且必须明确保留"认不出也列"的兜底（label 那行就是它的痕迹）
+  assert(/label:/.test(fn[1]), 'listRecycle 里没有 label 生成 —— 认不出的批次没兜底了');
+});
+
+check('restoreRecycle 有二次防线：直接调接口也不能还原画布批次', () => {
+  const lib = fs.readFileSync(path.join(ROOT, 'server', 'library.js'), 'utf8');
+  const fn = /function restoreRecycle\(assetRoot, batchId, relPaths\) \{([\s\S]*?)\n\}/.exec(lib);
+  assert(fn, '抽不出 restoreRecycle');
+  assert(/\^画布-/.test(fn[1]),
+    'restoreRecycle 没有挡住 `画布-*` —— 列表虽然不显示了，但接口可以被直接调用，' +
+    '还是能把画布 .json 搬进素材目录');
+});
+
+check('真素材批次与非素材批次都能正常还原（防线不能误伤）', () => {
+  const lib = fs.readFileSync(path.join(ROOT, 'server', 'library.js'), 'utf8');
+  const fn = /function restoreRecycle\(assetRoot, batchId, relPaths\) \{([\s\S]*?)\n\}/.exec(lib);
+  assert(fn, '抽不出 restoreRecycle');
+  assert(!/if \(!\/\^素材-\/\.test\(path\.basename/.test(fn[1]),
+    'restoreRecycle 用了 `素材-` 白名单 —— 那会把 db-broken-* 的还原一起堵掉');
+});
+
 console.log('\n' + '─'.repeat(52));
 console.log(fail === 0 ? '全部通过：' + pass + ' 项' : '通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 console.log('─'.repeat(52) + '\n');

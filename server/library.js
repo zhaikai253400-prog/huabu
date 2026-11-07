@@ -206,6 +206,23 @@ function listRecycle() {
   let bytes = 0;
   entries.forEach((entry) => {
     if (!entry.isDirectory()) return;
+    // 排除**画布**批次。
+    //
+    // 回收站目录里同时住着别的东西，最要紧的是 `画布-*` ——
+    // `store.deleteCanvas` 在真删画布之前会把整块画布导出成
+    // `画布-<时间>/<画布名>.json` 放在这里（那是"删错画布"的安全网）。
+    // 它**不是素材**，却会被下面的通用遍历捡进来，后果有两个（都实测过）：
+    //   ① 素材回收站面板被一堆「画布-2026-…」条目灌满（真实回收站里 315 个）
+    //   ② 在那里点「还原」，会把画布导出的 .json（还带 `历史版本/` 子目录）
+    //      **搬进用户的素材目录**，素材库里就多出这些垃圾文件
+    // 画布备份的恢复走的是另一条路：门户页「导入画布备份」(/api/canvases/import)。
+    //
+    // 为什么是**黑名单**（只排 `画布-`）而不是白名单（只收 `素材-`）：
+    // 这个函数原本会把认不出名字的批次也列出来，**这是有意的**——
+    // 坏库存档 `db-broken-<时间>` 就靠它才能显示给用户（见
+    // tools/tests/recycle.test.js 的「认不出的批次名也能列出来」那条）。
+    // 改成白名单会把那个功能一起堵掉（我第一版就是这么写的，测试立刻报了红）。
+    if (/^画布-/.test(entry.name)) return;
     const dir = path.join(root, entry.name);
     const files = [];
     walkFiles(dir, files);
@@ -250,6 +267,17 @@ function restoreRecycle(assetRoot, batchId, relPaths) {
   }
   if (!fs.existsSync(safeBatch) || !fs.statSync(safeBatch).isDirectory()) {
     return { ok: false, error: '这个回收站批次已经不在磁盘上了' };
+  }
+  // 二次防线：素材回收站**不能还原画布批次**。
+  // listRecycle 已经不再列出 `画布-*` 了，但接口是可以被直接调用的
+  // （前端、脚本、或以后别人写的调用方），所以入口这里也要挡一次 ——
+  // 否则还是能把画布导出的 .json 搬进素材目录。
+  // 画布备份请走 /api/canvases/import。
+  //
+  // 同样用黑名单：`db-broken-*` 这类认不出名字的批次仍按原样允许
+  //（它们本来就是"存一份东西等用户处理"，搬到素材目录不造成误解）。
+  if (/^画布-/.test(path.basename(safeBatch))) {
+    return { ok: false, error: '这不是素材回收站批次。画布备份请用「导入画布备份」恢复。' };
   }
   const wanted = Array.isArray(relPaths) && relPaths.length ? relPaths : null;
   let moved = 0;
