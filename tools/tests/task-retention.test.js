@@ -235,6 +235,49 @@ check('把有用的全留下后，函数安全返回 0', () => {
 store.close();
 try { fs.rmSync(box, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
+console.log('\nT7 · 删除画布时留的安全网不能互相覆盖（实测过的静默丢档）');
+
+// 由来：`deleteCanvas` 会把整块画布导出到回收站当安全网，
+// 原来直接写 `safeFileName(name) + '.json'`，**没有任何防撞**。
+// 于是在这两种情况同时满足时，后一份把前一份**覆盖掉**（实测复现，两份只剩一份）：
+//   ① 同一毫秒内删两块画布（目录名就是毫秒时间戳 → 同一个目录）
+//   ② 两块画布同名（uniqueName 只在建立/改名时挡重名；
+//      真实库里确实有重名 —— 实测「改版验收」两块；历史数据/导入都能绕过）
+// 修法是落盘前找一个不撞的名字（-2、-3 递增）。
+check('uniqueFileNameIn 存在且会在重名时让位', () => {
+  const src = fs.readFileSync(STORE_PATH, 'utf8');
+  assert.ok(/function uniqueFileNameIn\(/.test(src),
+    '缺 uniqueFileNameIn —— 回收站导出会互相覆盖');
+  const fn = /function uniqueFileNameIn\(dir, base\) \{([\s\S]*?)\n\}/.exec(src);
+  assert.ok(fn, '抽不出 uniqueFileNameIn');
+  assert.ok(/fs\.existsSync\(/.test(fn[1]),
+    'uniqueFileNameIn 没检查文件是否已存在，那它挡不住覆盖');
+});
+
+check('deleteCanvas 写回收站时走了防撞（不是直接拼文件名）', () => {
+  const src = fs.readFileSync(STORE_PATH, 'utf8');
+  // 不能用一个 `\{([\s\S]*?)\n\}` 的非贪婪正则抽 deleteCanvas ——
+  // 它里面嵌了 try/catch 与事务，第一个 `\n}` 就截断了（我上一版就是这么失败的）。
+  // 改成按花括号配对抽完整函数体。
+  const lines = src.split('\n');
+  const start = lines.findIndex((l) => l.indexOf('function deleteCanvas(') >= 0);
+  assert.ok(start >= 0, '没找到 deleteCanvas');
+  let depth = 0;
+  let seen = false;
+  let end = start;
+  for (let i = start; i < lines.length; i += 1) {
+    depth += (lines[i].match(/\{/g) || []).length - (lines[i].match(/\}/g) || []).length;
+    if (depth > 0) seen = true;
+    if (seen && depth <= 0) { end = i; break; }
+  }
+  const body = lines.slice(start, end + 1).join('\n');
+  assert.ok(/uniqueFileNameIn\(/.test(body),
+    'deleteCanvas 没用 uniqueFileNameIn —— 同毫秒删同名画布会丢一份安全网');
+  // 不能再出现"直接拼 safeFileName(...) + '.json'"那种不做防撞的写法
+  assert.ok(!/writeFileSync\(path\.join\(dir, safeFileName\([^)]*\)\s*\+\s*'\.json'\)/.test(body),
+    'deleteCanvas 里还有直接拼文件名、不做防撞的 writeFileSync');
+});
+
 console.log('\n' + '─'.repeat(52));
 if (fail) {
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

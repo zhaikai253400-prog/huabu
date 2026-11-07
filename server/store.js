@@ -401,6 +401,30 @@ function localStamp() {
   );
 }
 
+// 在 dir 里找一个不撞的文件名：`base.json` 被占了就试 `base-2.json`、`base-3.json`…
+//
+// 为什么必须有这个：删除画布时会把整块画布导出到回收站当**安全网**
+// （用户能用「导入画布备份」捞回来）。原来直接写 `safeFileName(name) + '.json'`，
+// 没有任何防撞 —— 于是两种情况下**后一份会把前一份覆盖掉，安全网静默丢失**：
+//   ① 同一毫秒内删两块画布（目录名同毫秒 → 同一个目录）
+//   ② 两块画布**同名**（`uniqueName` 只在建立/改名时挡重名，
+//      但真实库里确实有重名 —— 实测「改版验收」就有两块，
+//      历史数据、导入、直接改库都可能绕过它）
+// 两个条件同时满足就会真的丢。实测已复现：两份只剩一份。
+//
+// 注意 backup.js 里已有一个同样功能的 uniqueName，但那个模块 require 了本模块，
+// 这里再 require 回去会成环，所以在本地写一份（逻辑保持一致的风格：-2、-3 递增）。
+function uniqueFileNameIn(dir, base) {
+  const stem = String(base || '画布');
+  let name = stem + '.json';
+  let n = 1;
+  while (fs.existsSync(path.join(dir, name))) {
+    n += 1;
+    name = stem + '-' + n + '.json';
+  }
+  return name;
+}
+
 function deleteCanvas(id) {
   const canvas = getCanvas(id);
   if (!canvas) return false;
@@ -410,7 +434,10 @@ function deleteCanvas(id) {
     const dump = exportCanvas(id);
     const dir = path.join(RECYCLE_DIR, '画布-' + localStamp());
     ensureDir(dir);
-    fs.writeFileSync(path.join(dir, safeFileName(canvas.name) + '.json'), JSON.stringify(dump, null, 2), 'utf8');
+    // 文件名要防撞：同毫秒删除、或两块画布同名时，直接写会**覆盖掉前一份安全网**
+    //（实测复现过：两份只剩一份）。见 uniqueFileNameIn 上面那段说明。
+    const file = uniqueFileNameIn(dir, safeFileName(canvas.name));
+    fs.writeFileSync(path.join(dir, file), JSON.stringify(dump, null, 2), 'utf8');
     recycled = dir;
   } catch (error) {
     console.log('[画布] 删除前备份没写成：' + error.message);
