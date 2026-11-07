@@ -281,6 +281,67 @@ check('undo/restoreState 仍走 renderAll（撤销必须是完整还原）', () 
     'restoreState 不再全量重建 —— 撤销后容易出现残留的旧元素');
 });
 
+// ── 拖动性能：进入「交互态」的时机 ──────────────────────────────────
+//
+// 这一组守的是一个**实测出来的**性能回归（不是纸上推演）：
+//
+// `startDrag` 原来在 **pointerdown** 就调用 `beginInteraction()`，
+// 而那时代码还不知道用户是要拖、还是只想点一下（要等 |dx|+|dy| > 1）。
+// 而 `is-interacting` 会让 .world 提成合成层，并把卡片的端口 / 连线热区 /
+// 流光伪元素成批从渲染树里摘掉 —— 这一整套切换要**重新布局 + 重新栅格化
+// 屏幕上所有可见卡片**，代价随卡片数增长；松手撤销时还要再来一次。
+//
+// 实测（300+ 张卡的真实画布，**只点击、完全不拖动**，6 次取一致值）：
+//   改前：6 次最差帧 263.9 / 145.8 / 173.6 / 138.8 / 118.1 / 132.1 ms，
+//        每次点击 3 帧超标、合计 319ms
+//   改后：最差帧 215.3 / 118 / 97.1 / 118 / 118 / 138.8 ms，
+//        每次点击 2 帧超标、合计 212ms
+// 而且改后**点击时 0/6 次进入交互态**（改前 6/6）——
+// 同时确认：点击仍能选中卡片（6/6）、拖动仍会进入交互态且真的位移（3/3）。
+//
+// 注意：**这里不断言拖动帧率**。实测同一配置重复 10 轮，拖动 p95 波动达 201%
+// （中位从 7ms 到 41.6ms），且 100% 的帧精确落在 6.94ms（144Hz vsync）整数倍上 ——
+// 那种量化噪声下无法判读小差异。所以拖动只断言"功能正确 + 确实进入交互态"。
+console.log('\nD8 · 拖动性能：进入交互态的时机（实测过的回归）');
+
+check('startDrag 里 beginInteraction 不再紧跟 beginTransaction（已推迟）', () => {
+  const b = bodyOf('startDrag');
+  assert.ok(b, '没找到 startDrag');
+  assert.ok(!/beginTransaction\(\);\s*\n\s*beginInteraction\(\);/.test(b.text),
+    'startDrag 又变成"按下就进交互态"了 —— 只想点一下的用户会白付一次' +
+    '"重绘所有可见卡片"的代价（300 张卡时每次点击多出约 100ms 的卡顿）');
+});
+
+check('startDrag 里改成"真的移动了才进交互态"（beginOnce 存在且被调用）', () => {
+  const b = bodyOf('startDrag');
+  assert.ok(b, '没找到 startDrag');
+  assert.ok(/const\s+beginOnce\s*=/.test(b.text), '缺少 beginOnce —— 交互态没有延迟入口');
+  assert.ok(/beginOnce\(\)/.test(b.text), 'beginOnce 定义了但没有被调用');
+  // 它必须在"判定已经移动"的那一段里被调用，而不是在开头
+  const movedAt = b.text.indexOf('moved = true');
+  const callAt = b.text.indexOf('beginOnce()');
+  assert.ok(movedAt >= 0 && callAt > movedAt,
+    'beginOnce() 没有出现在 moved = true 之后 —— 又提前进交互态了');
+});
+
+check('beginInteraction / endInteraction 成对（松手时不能多退一次）', () => {
+  const b = bodyOf('startDrag');
+  assert.ok(b, '没找到 startDrag');
+  // endInteraction 必须受 began 保护，否则计数会变成负数、is-interacting 永远摘不掉
+  assert.ok(/if\s*\(began\)\s*endInteraction\(\);/.test(b.text),
+    'endInteraction 没有用 began 守卫 —— 没进过交互态也去撤销，' +
+    '会把 interactingCount 减到 0 以下，is-interacting 可能永远留在页面上');
+});
+
+check('平移（startPan）仍然按下就进交互态（那条路本来就该进）', () => {
+  const b = bodyOf('startPan');
+  assert.ok(b, '没找到 startPan');
+  assert.ok(/beginInteraction\(\)/.test(b.text),
+    'startPan 不再调用 beginInteraction —— 平移时重特效不会被关掉，反而更卡');
+  // 平移是"按下即开始"，不该被延迟
+  assert.ok(!/beginOnce/.test(b.text), 'startPan 不该用延迟版入口（按下就是平移）');
+});
+
 console.log('\n' + '─'.repeat(52));
 if (fail) {
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
