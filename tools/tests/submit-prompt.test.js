@@ -314,12 +314,60 @@ check('前端 migrateNode 也做无条件清理（与老 prompt 字段同一套�
     'migrateNode 没做无条件清理：前端一读到卡片就盖版本号，之后就再也没人清这个字段了');
 });
 
+console.log('\nS9 · 摘字段时必须「只摘那一个」，不能顺手抹掉别的');
+//
+// 这一节是补一个真实事故的护栏。
+// 第 3 步最初有**两份**「摘 submittedPrompt」的实现：
+//   · 读入侧：先校验、再 delete（正确）
+//   · 保存漏斗侧：按白名单拷一份新对象（错误）
+// history 的每一版除了提交元信息，还带 id 与 result。它们不在白名单里，
+// 于是「保存一次」就把每一版的 id 和图片地址静默抹掉 ——
+// versionEntriesOf() 第一句就是 entry.result.url，直接跳过，
+// 「生成版本历史」整块失效。当前库里 48 条 history 全都带 submittedPrompt，
+// 所以这条路随时会被走到。已合并成唯一实现 stripSubmissionPrompt。
+
+check('保存漏斗只摘 submittedPrompt，id / result 必须留着', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  // 唯一的实现
+  assert(/function stripSubmissionPrompt\(/.test(src), '缺 stripSubmissionPrompt');
+  const impl = /function stripSubmissionPrompt\(meta\) \{([\s\S]*?)\n  \}/.exec(src);
+  assert(impl, '抽不出 stripSubmissionPrompt');
+  assert(/\.\.\.meta/.test(impl[1]) || /Object\.assign/.test(impl[1]),
+    'stripSubmissionPrompt 不是「拷贝原对象再删一个字段」，可能又变成白名单挑字段');
+  assert(/delete out\.submittedPrompt/.test(impl[1]), 'stripSubmissionPrompt 没删 submittedPrompt');
+  // 老的、会丢字段的白名单实现必须彻底消失
+  assert(!/SUBMISSION_META_KEYS/.test(src), '白名单挑字段的写法又回来了');
+  assert(!/function submissionMetaPacked/.test(src), '旧的会丢字段的实现又回来了');
+  assert(!/function repackedSubmissionMeta/.test(src), '重复实现又出现了（两份必然走偏）');
+});
+
+check('保存漏斗与读入迁移共用同一份实现', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  const persisted = /function persistedData\(data\) \{([\s\S]*?)\n  \}/.exec(src);
+  const packer = /function packSubmissionPrompts\(node\) \{([\s\S]*?)\n  \}/.exec(src);
+  assert(persisted && packer, '抽不出这两个函数');
+  assert(persisted[1].indexOf('stripSubmissionPrompt') >= 0, '保存漏斗没走唯一实现');
+  assert(packer[1].indexOf('stripSubmissionPrompt') >= 0, '读入迁移没走唯一实现');
+  const calls = (src.match(/stripSubmissionPrompt\(/g) || []).length;
+  assert(calls >= 4, '调用点少于预期（应有定义 1 处 + 保存 2 处 + 读入 2 处），实际 ' + calls);
+});
+
+check('history 的 id / result 是版本面板的命脉，注释里留了案底', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  assert(/versionEntriesOf/.test(src), '找不到 versionEntriesOf');
+  assert(/id 和图片地址静默抹掉|静默抹掉/.test(src),
+    'stripSubmissionPrompt 附近没有记下这次事故的原因，后来人容易再犯');
+});
+
 check('前端重打包：两种拼法都对不上时保持原样', () => {
   const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
-  const fn = /function repackedSubmissionMeta\(meta\) \{([\s\S]*?)\n  \}/.exec(src);
-  assert(fn, '抽不出 repackedSubmissionMeta 函数体');
-  assert(/actual === null/.test(fn[1]) && /return out/.test(fn[1]),
-    'repackedSubmissionMeta 在重算不出来时没有原样返回');
+  const fn = /function stripSubmissionPrompt\(meta\) \{([\s\S]*?)\n  \}/.exec(src);
+  assert(fn, '抽不出 stripSubmissionPrompt 函数体');
+  assert(/actual === null/.test(fn[1]), '没有「重算不出来」的判定');
+  assert(/return meta/.test(fn[1]),
+    'stripSubmissionPrompt 在重算不出来时没有原样返回（会丢内容）');
+  assert(/return meta/.test(fn[1]) && /const out = \{ \.\.\.meta \}/.test(fn[1]),
+    '结构不对：应当先判、判不了就 return 原对象，判得了才拷贝并删字段');
 });
 
 console.log('\nS8 · tasks 表里那一份也要清（老数据 141 条 / 594KB）');
