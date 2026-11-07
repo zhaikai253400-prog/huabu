@@ -632,6 +632,66 @@ check('两边对空串的处置必须一致（源码级：都有空串分支）'
     '前端没有空串分支 —— 两边判据不等，会走出不同结果');
 });
 
+console.log('\nS13 · 「可回退」承诺：会被清理的节点必须先被扫出来（否则不留档就改数据）');
+
+check('wouldCleanSubmissionMeta 与 packSubmissionMeta 判据一致', () => {
+  const cases = [
+    { mainPrompt: '主', tailText: '尾', tailAppended: true, submittedPrompt: '主\n\n尾' },  // 能重算
+    { mainPrompt: '主', tailText: '尾', tailAppended: false, submittedPrompt: '主' },        // 能重算
+    { mainPrompt: '主', tailText: '尾', submittedPrompt: '完全对不上' },                    // 算不出
+    { mainPrompt: '', tailText: '尾', submittedPrompt: '主' },                              // 算不出
+    { mainPrompt: '主', tailText: '尾', tailAppended: true, submittedPrompt: '' },          // 空串
+    { mainPrompt: '主', tailText: '尾', tailAppended: true },                               // 没有该字段
+  ];
+  cases.forEach((meta, i) => {
+    const predict = migrate.wouldCleanSubmissionMeta(meta);
+    // 真正跑一遍看它到底改没改
+    const actual0 = JSON.parse(JSON.stringify(meta));
+    const actuallyChanged = migrate.packSubmissionMeta(actual0);
+    if (predict !== actuallyChanged) {
+      throw new Error('第 ' + i + ' 例判据不一致：预测=' + predict + ' 实际=' + actuallyChanged +
+        '  ' + JSON.stringify(meta));
+    }
+  });
+});
+
+check('v 已是最新但字段还在 → 也必须被扫出来（这就是那个缺口）', () => {
+  const data = {
+    v: 2, text: '主',
+    lastSubmission: { mainPrompt: '主', tailText: '尾', tailAppended: true, submittedPrompt: '主\n\n尾' },
+  };
+  assert.strictEqual(migrate.wouldCleanSubmissionPrompts(data), true,
+    '版本号已是最新时漏检 —— saveState 会清它却不留档');
+});
+
+check('scanCanvasMigration 的判据包含「要清理的提交快照」', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server', 'store.js'), 'utf8');
+  const fn = /function scanCanvasMigration\(canvasId\) \{([\s\S]*?)\n\}/.exec(src);
+  assert(fn, '抽不出 scanCanvasMigration');
+  assert(fn[1].indexOf('wouldCleanSubmissionPrompts') >= 0,
+    'scan 只看版本号，没看「要清理的提交快照」：会改了数据却不留档');
+  // 两条判据都要在
+  assert(/ver < migrate\.CURRENT_VER/.test(fn[1]), '缺「版本号落伍」这条判据');
+});
+
+check('报告文字不把「只清提交快照」误说成「补齐版本号」', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server', 'store.js'), 'utf8');
+  const fn = /function summarizeMigration\(input\) \{([\s\S]*?)\n\}/.exec(src);
+  assert(fn, '抽不出 summarizeMigration');
+  assert(fn[1].indexOf("reason === 'submissionPrompt'") >= 0,
+    '摘要没区分这两类，日志会误报');
+  assert(fn[1].indexOf('清理了重复的提交提示词') >= 0, '缺这一类的中文说明');
+});
+
+check('不可清理时 scan 仍报 0（不能退化成「每次都白备份」）', () => {
+  assert.strictEqual(
+    migrate.wouldCleanSubmissionPrompts({ v: 2, lastSubmission: { mainPrompt: '主', tailAppended: false } }),
+    false);
+  assert.strictEqual(migrate.wouldCleanSubmissionPrompts({ v: 2 }), false);
+  assert.strictEqual(migrate.wouldCleanSubmissionPrompts(null), false);
+  assert.strictEqual(migrate.wouldCleanSubmissionPrompts([]), false);
+});
+
 console.log('\n' + '─'.repeat(52));
 if (failed) {
   console.log('通过 ' + passed + ' 项，失败 ' + failed + ' 项');

@@ -98,6 +98,40 @@ function trueTailAppendedOf(meta) {
   return null;
 }
 
+// 「这一条提交快照会不会被清理掉」——**只判断、不改动**。
+//
+// 为什么必须有一个不改动的版本：saveState 之前的 scanCanvasMigration
+// 要拿它决定「这次保存会不会动用户数据，要不要先留档」。
+// 判据必须与 packSubmissionMeta 逐条一致，否则就会出现
+// 「改了却没留档」这种最不该发生的情况（可回退承诺直接破掉）。
+function wouldCleanSubmissionMeta(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  if (!Object.prototype.hasOwnProperty.call(meta, 'submittedPrompt')) return false;
+  // 空串：packSubmissionMeta 会直接删掉它
+  if (!String(meta.submittedPrompt || '')) return true;
+  // 能精确重算真值 → 会删；算不出来 → 原样留着（不会改）
+  return trueTailAppendedOf(meta) !== null;
+}
+
+// 这个节点的 data 里有没有「会被清理掉的提交快照」。只判断、不改动。
+function wouldCleanSubmissionPrompts(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  for (const key of SUBMISSION_FIELDS) {
+    if (wouldCleanSubmissionMeta(data[key])) return true;
+  }
+  if (Array.isArray(data.history)) {
+    for (const entry of data.history) {
+      if (wouldCleanSubmissionMeta(entry)) return true;
+    }
+  }
+  return false;
+}
+
+// tasks 表里的那条同源判断（params 就是一条提交快照）
+function wouldCleanTaskParams(params) {
+  return wouldCleanSubmissionMeta(params);
+}
+
 // 处理一个提交快照：校正 tailAppended，并在能精确重算时删掉 submittedPrompt。
 // 返回 true 表示动过。
 function packSubmissionMeta(meta) {
@@ -301,6 +335,9 @@ module.exports = {
   versionOf,
   cleanLegacyFields,
   cleanSubmissionPrompts,
+  wouldCleanSubmissionPrompts,
+  wouldCleanSubmissionMeta,
+  wouldCleanTaskParams,
   packTaskParams,
   composedPromptOf,
   trueTailAppendedOf,

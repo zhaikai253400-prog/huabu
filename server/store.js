@@ -910,10 +910,14 @@ function summarizeMigration(input) {
   if (Array.isArray(info.nodes)) {
     const total = Number(info.count) || info.nodes.length;
     const typeSwaps = info.nodes.filter((one) => one.target).length;
+    // 「版本号已是最新、只是还挂着会被清理的提交快照」那些要单独说，
+    // 否则日志会误报成「补齐了版本号」（它本来就有号）。
+    const subClean = info.nodes.filter((one) => one.reason === 'submissionPrompt').length;
+    const versionBumps = total - typeSwaps - subClean;
     const parts = [];
     if (typeSwaps) parts.push(typeSwaps + ' 张老类型卡片归一到现在的类型');
-    const rest = total - typeSwaps;
-    if (rest > 0) parts.push(rest + ' 张卡片补齐了版本号');
+    if (versionBumps > 0) parts.push(versionBumps + ' 张卡片补齐了版本号');
+    if (subClean > 0) parts.push(subClean + ' 张卡片清理了重复的提交提示词');
     return parts.length ? parts.join('，') : total + ' 张卡片需要升级';
   }
   const parts = [];
@@ -1055,6 +1059,22 @@ function importCanvas(payload) {
 // 而库里还是旧版。真正需要留档的正是「即将被覆盖掉的这一版」，所以必须以库为准。
 //
 // 只读，不改库。
+// 扫一遍「这次保存会不会动用户数据」，供保存路径决定要不要先留档。
+//
+// **两条判据缺一不可**（这里踩过一个坑）：
+//   ① 版本号落伍（ver < CURRENT_VER）—— 会被逐级迁移改到；
+//   ② 身上还挂着「会被清理的提交快照」（wouldCleanSubmissionPrompts）——
+//      这一步的清理是**无条件**的，不受版本号管辖。
+//
+// 一开始这里只有判据①。于是有一个缺口：一个 v 已经是 2、但某个快照还带着
+// 可重算 submittedPrompt 的节点（**混合节点**就会出现这种状态：能重算的版本被
+// 清掉了、算不出的那一版被保留，于是整张卡盖上 v=2 却还剩着字段），
+// saveState 里照样会清掉它，而这里认为「不用升级」→ **不留档就改数据**。
+// 实测这个状态确实可达，只是当时保存是幂等的、恰好没造成损失。
+// 但那是**靠巧合同步**，不是靠设计保证 —— 所以判据②必须补上。
+//
+// 判据②复用 migrate 的 wouldClean* 系列，与真正执行清理的 packSubmissionMeta
+// 共用同一套判定，两处不会各说各话。
 function scanCanvasMigration(canvasId) {
   const rows = handle()
     .prepare('SELECT id, type, data FROM nodes WHERE canvas_id = ?')
@@ -1068,14 +1088,27 @@ function scanCanvasMigration(canvasId) {
       data = {};
     }
     const ver = migrate.versionOf({ id: row.id, type: row.type, data: data });
-    if (ver >= migrate.CURRENT_VER) return;
-    stale.push({
-      id: String(row.id),
-      type: String(row.type),
-      ver: ver,
-      // 老类型有明确新家的记下来，日志里能说清「几张什么卡被换成了什么」
-      target: migrate.LEGACY_TYPES[String(row.type)] || '',
-    });
+    // 判据①：版本号落伍
+    if (ver < migrate.CURRENT_VER) {
+      stale.push({
+        id: String(row.id),
+        type: String(row.type),
+        ver: ver,
+        // 老类型有明确新家的记下来，日志里能说清「几张什么卡被换成了什么」
+        target: migrate.LEGACY_TYPES[String(row.type)] || '',
+      });
+      return;
+    }
+    // 判据②：版本号已是最新，但还挂着会被清理的提交快照
+    if (migrate.wouldCleanSubmissionPrompts(data)) {
+      stale.push({
+        id: String(row.id),
+        type: String(row.type),
+        ver: ver,
+        target: '',
+        reason: 'submissionPrompt',
+      });
+    }
   });
   const found = { count: stale.length, nodes: stale };
   found.summary = summarizeMigration(found);
