@@ -188,6 +188,19 @@ function cleanSubmissionPrompts(node) {
   return changed;
 }
 
+// tasks 表里的 params 也存过一份同样的快照（整份 JSON 落在 tasks.params 里）。
+// 形状与节点的提交快照一样（mainPrompt / tailText / tailAppended / submittedPrompt），
+// 所以复用 packSubmissionMeta。其余参数（sizeKey、ratio……）原样保留。
+//
+// 返回新的 params 对象；没有可省的字段时返回原对象（调用方据此跳过写库）。
+function packTaskParams(params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return params;
+  if (!Object.prototype.hasOwnProperty.call(params, 'submittedPrompt')) return params;
+  const copy = { ...params };
+  if (!packSubmissionMeta(copy)) return params; // 重算不出来：一个字都不动
+  return copy;
+}
+
 // 一份数据的版本号。没写过的按 0 算 —— 老数据本来就没这个字段。
 function versionOf(node) {
   const data = node && node.data && typeof node.data === 'object' ? node.data : null;
@@ -281,6 +294,7 @@ module.exports = {
   versionOf,
   cleanLegacyFields,
   cleanSubmissionPrompts,
+  packTaskParams,
   composedPromptOf,
   trueTailAppendedOf,
   packSubmissionMeta,

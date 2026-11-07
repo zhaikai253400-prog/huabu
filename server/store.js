@@ -154,8 +154,9 @@ function openDb() {
 
 function init() {
   ensureDir(path.dirname(DB_FILE));
+  let opened;
   try {
-    return openDb();
+    opened = openDb();
   } catch (error) {
     console.log('[数据库] 打开失败，重建一个空库：' + error.message);
     try {
@@ -174,8 +175,90 @@ function init() {
       oldDir: oldDir,
       reason: String((error && error.message) || error || '未知原因'),
     };
-    return rebuilt;
+    opened = rebuilt;
   }
+  // 老任务记录里那一份 submittedPrompt 也该收掉（见 migrate.packTaskParams）。
+  // 放在启动时一次做完，而不是等哪条任务被重新写一遍 —— 174 条里 141 条带着它，
+  // 不主动清就永远躺在那儿，占着 594KB。
+  try {
+    pruneTaskSubmissionPrompts();
+  } catch (error) {
+    console.log('[数据库] 清理任务里的重复提示词跳过：' + error.message);
+  }
+  return opened;
+}
+
+// 一次性把 tasks.params 里的 submittedPrompt 收掉。
+//
+// 与节点那边同一套规则：先拿存下来的值校准 tailAppended，能精确重算才删；
+// 两种拼法都对不上的原样保留。已清过的（没有该字段）直接跳过，所以重复跑没有代价。
+// 返回清掉了几条。
+//
+// **动手之前先留一份原样备份**：这是在改用户的数据，而它发生在启动时、
+// 不经过 saveState，没有别的地方会替它留档。项目对「真正改动数据」的规矩是
+// 必须先备份（见 migrate.js 开头那段），这里照办。留档失败就不动数据。
+//
+// 备份只记「被摘掉的那几个字段」，不整份抄 params：
+//   · 整份抄一遍实测 1906KB，而为省下的只有 594KB —— 等于用更大的代价换更小的收益；
+//   · 要能原样退回去，真正需要的只有 submittedPrompt 和校正后的 tailAppended，
+//     其余字段（mainPrompt / 各类参数…）我们根本没动。
+// 文件名固定不带时间戳：这份记录只可能用上一次（清完就没有可清的了），
+// 固定名字让它覆盖而不是越攒越多 —— 这个项目刚清理过 352 个 .bak，不该再添新的。
+function pruneTaskSubmissionPrompts() {
+  const database = handle();
+  const rows = database.prepare('SELECT id, params FROM tasks').all();
+  const pending = [];
+  rows.forEach((row) => {
+    let parsed = null;
+    try {
+      parsed = row.params ? JSON.parse(row.params) : null;
+    } catch {
+      return; // 坏记录不动
+    }
+    const packed = migrate.packTaskParams(parsed);
+    if (packed === parsed) return; // 没可省的（含「重算不出来」那种）
+    pending.push({
+      id: row.id,
+      params: JSON.stringify(packed),
+      removed: String(parsed.submittedPrompt || ''),
+      tailAppended: Boolean(packed.tailAppended),
+    });
+  });
+  if (!pending.length) return 0;
+
+  // 先留档。要用它退回去：把 removed 写回该条的 submittedPrompt 即可
+  // （tailAppended 已经校准过，不必再改）。
+  const file = path.join(DATA_DIR, 'backups', 'tasks-before-prune.json');
+  try {
+    ensureDir(path.dirname(file));
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        at: Date.now(),
+        reason: '清理任务记录里重复的提交提示词',
+        how: '把每条的 removed 写回该 id 对应 params.submittedPrompt 即可还原',
+        rows: pending,
+      }),
+      'utf8'
+    );
+  } catch (error) {
+    console.log('[数据库] 留档失败，这次不动任务记录：' + error.message);
+    return 0;
+  }
+
+  const update = database.prepare('UPDATE tasks SET params = ? WHERE id = ?');
+  let done = 0;
+  pending.forEach((one) => {
+    update.run(one.params, one.id);
+    done += 1;
+  });
+  if (done) {
+    console.log(
+      '[数据库] 已清理 ' + done + ' 条任务记录里的重复提示词' +
+      '（被摘掉的内容存在 data/backups/tasks-before-prune.json，可原样还原）'
+    );
+  }
+  return done;
 }
 
 // 供 /api/health 读取。返回副本，避免调用方改到内部状态。
@@ -1164,7 +1247,7 @@ function insertTask(task) {
       String(task.channel || ''),
       String(task.kind || ''),
       String(task.model || ''),
-      JSON.stringify(task.params || {}),
+      JSON.stringify(migrate.packTaskParams(task.params || {})),
       String(task.prompt || ''),
       String(task.remoteId || ''),
       String(task.status || 'queued'),
@@ -1323,6 +1406,7 @@ module.exports = {
   listTasks,
   listResumableTasks,
   interruptStaleTasks,
+  pruneTaskSubmissionPrompts,
   getScheduleRun,
   listScheduleRuns,
   upsertScheduleRun,

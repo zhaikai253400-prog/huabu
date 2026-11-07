@@ -322,6 +322,71 @@ check('前端重打包：两种拼法都对不上时保持原样', () => {
     'repackedSubmissionMeta 在重算不出来时没有原样返回');
 });
 
+console.log('\nS8 · tasks 表里那一份也要清（老数据 141 条 / 594KB）');
+
+check('packTaskParams：清掉 submittedPrompt，其余参数不动', () => {
+  const params = {
+    sizeKey: '2K', ratio: '16:9', duration: 30,
+    mainPrompt: '主', tailText: '尾', tailAppended: true, submittedPrompt: '主\n\n尾',
+  };
+  const out = migrate.packTaskParams(params);
+  eq('submittedPrompt' in out, false, '没清掉');
+  eq(out.mainPrompt, '主');
+  eq(out.tailText, '尾');
+  eq(out.tailAppended, true);
+  eq(out.sizeKey, '2K', '别的参数被动了');
+  eq(out.ratio, '16:9');
+  eq(out.duration, 30);
+  eq(migrate.composedPromptOf(out), '主\n\n尾', '清完之后现算不出来');
+});
+
+check('packTaskParams：没有该字段时原样返回（引用不变，调用方据此跳过写库）', () => {
+  const params = { mainPrompt: '主', sizeKey: '2K' };
+  eq(migrate.packTaskParams(params), params, '不该产生新对象');
+});
+
+check('packTaskParams：重算不出来时一个字都不动', () => {
+  const params = { mainPrompt: '主', tailText: '尾', submittedPrompt: '对不上', sizeKey: '2K' };
+  eq(migrate.packTaskParams(params), params, '不该动');
+  eq(params.submittedPrompt, '对不上');
+});
+
+check('packTaskParams：非对象 / 数组原样返回', () => {
+  eq(migrate.packTaskParams(null), null);
+  eq(migrate.packTaskParams('x'), 'x');
+  const arr = [1, 2];
+  eq(migrate.packTaskParams(arr), arr);
+});
+
+check('startup 会清老任务记录（不是等它被重写才清）', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server', 'store.js'), 'utf8');
+  const initFn = /function init\(\) \{([\s\S]*?)\n\}/.exec(src);
+  assert(initFn, '抽不出 init 函数体');
+  assert(initFn[1].indexOf('pruneTaskSubmissionPrompts') >= 0,
+    'init 没调清理：老库里那 141 条会一直躺着占 594KB');
+  assert(/function pruneTaskSubmissionPrompts\(\)/.test(src), '缺 pruneTaskSubmissionPrompts');
+  const prune = /function pruneTaskSubmissionPrompts\(\) \{([\s\S]*?)\n\}/.exec(src);
+  assert(prune, '抽不出 pruneTaskSubmissionPrompts 函数体');
+  assert(prune[1].indexOf('packTaskParams') >= 0, 'prune 没用 packTaskParams');
+  // 清理失败不能挡住启动
+  assert(/catch[\s\S]{0,120}清理任务里的重复提示词跳过/.test(src),
+    '启动时清理失败没有兜住，会把整个服务带下去');
+});
+
+check('新写入的任务记录也走同一条清理', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'server', 'store.js'), 'utf8');
+  assert(/JSON\.stringify\(migrate\.packTaskParams\(task\.params/.test(src),
+    'insertTask 没走 packTaskParams：新任务又会带上那一份重复');
+});
+
+check('前端从任务拿快照时走现算（submissionMetaFromTask → submissionMetaOf）', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  const fn = /function submissionMetaFromTask\(task, data\) \{([\s\S]*?)\n  \}/.exec(src);
+  assert(fn, '抽不出 submissionMetaFromTask 函数体');
+  assert(fn[1].indexOf('submissionMetaOf') >= 0, '没走统一的快照构造');
+  assert(fn[1].indexOf('tailAppended') >= 0, '得把 tailAppended 传下去，否则现算不出来');
+});
+
 console.log('\n' + '─'.repeat(52));
 if (failed) {
   console.log('通过 ' + passed + ' 项，失败 ' + failed + ' 项');
