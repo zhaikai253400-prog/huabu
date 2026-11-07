@@ -230,6 +230,51 @@ check('局域网协作是「按画布授权」，不是「共享一开就全放�
     'BODY_SCOPED_PATHS 不该包含 /api/assets/import：它的 canvasId 在查询串，而体可能有几百 MB');
 });
 
+// 这一条是**真事故换来的**：第 2 步上线后实测发现两个功能被堵死了 ——
+//   · /api/share/list      → 协作者列不出共享画布
+//   · /api/canvases/import → 协作者导不了备份
+// 原因是 lanTargetCanvasIds 用正则取路径「第一段」当画布编号，
+// 而这两个端点的第一段是字面量 `list` / `import`：
+// store.isShared('list') 为假 → 403。
+// 第二个尤其说明问题：index.js 里专门写了「局域网协作者导进来的画布要直接标成共享」，
+// 说明这功能是有意开放的，却被"加固"堵掉了。
+check('集合端点不能被当成「某一块画布」而拦掉（/api/share/list、/api/canvases/import）', () => {
+  const indexSrc = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+
+  // 1) 必须有「哪些第一段是固定词」的显式名单
+  const segList = /const COLLECTION_SEGMENTS = new Set\(\[([\s\S]*?)\]\)/.exec(indexSrc);
+  assert(segList, '缺 COLLECTION_SEGMENTS —— 正则会把 list / import 当成画布编号');
+  for (const seg of ['list', 'import']) {
+    assert(segList[1].indexOf("'" + seg + "'") >= 0,
+      'COLLECTION_SEGMENTS 漏了 ' + seg + '，它会被当成画布编号');
+  }
+
+  // 2) 取第一段之后必须真的排掉它们（不能只是定义了名单却不用）
+  const idsFn = /function lanTargetCanvasIds\(pathname, method, body, query\) \{([\s\S]*?)\n\}/.exec(indexSrc);
+  assert(idsFn, '抽不出 lanTargetCanvasIds');
+  const uses = idsFn[1].split('COLLECTION_SEGMENTS').length - 1;
+  assert(uses >= 2,
+    'COLLECTION_SEGMENTS 只用了 ' + uses + ' 次 —— canvases 和 share 两条路径都要排，否则漏一条');
+
+  // 3) 必须有「不落在任何画布上但要为协作者放行」的名单，且接在闸里
+  const allowList = /const LAN_CANVASLESS_ALLOWED = new Set\(\[([\s\S]*?)\]\)/.exec(indexSrc);
+  assert(allowList, '缺 LAN_CANVASLESS_ALLOWED —— 这些端点会掉进"说不清就拒绝"');
+  for (const p of ['/api/share/list', '/api/canvases/import']) {
+    assert(allowList[1].indexOf("'" + p + "'") >= 0,
+      'LAN_CANVASLESS_ALLOWED 漏了 ' + p + '，协作者会被拒');
+  }
+  const denied = /function lanCollabDenied\(pathname, method, body, query\) \{([\s\S]*?)\n\}/.exec(indexSrc);
+  assert(denied && denied[1].indexOf('LAN_CANVASLESS_ALLOWED') >= 0,
+    'LAN_CANVASLESS_ALLOWED 定义了但没接进 lanCollabDenied，等于没放行');
+
+  // 4) 这份放行名单**只能收只读或新建类**，不能收"能改已有画布"的东西 ——
+  //    否则就成了绕过按画布授权的后门。这里钉一个明确的反例。
+  for (const banned of ['/api/library/delete', '/api/library/orphans/clean', '/api/settings', '/api/local/shutdown']) {
+    assert(allowList[1].indexOf(banned) < 0,
+      'LAN_CANVASLESS_ALLOWED 里不该出现 ' + banned + ' —— 那是能改状态/本机的东西，绕过按画布授权了');
+  }
+});
+
 check('素材库对局域网分成「只读放行 / 会动的拒绝」两档', () => {
   const indexSrc = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
   assert(/function lanLibraryReadOnly\(pathname, method\)/.test(indexSrc), '缺 lanLibraryReadOnly');

@@ -1509,6 +1509,11 @@ function lanCollabAllowed(pathname) {
 // 这里把 id 取出来问一句 store.isShared。新建（POST /api/canvases）和
 // 导入（/api/canvases/import）不针对具体画布，不在拦截范围内：
 // 导入进来的画布会直接标成共享，否则协作者导完自己也看不见。
+//
+// 保留它是因为它把「哪些第一段其实是固定词、不是画布编号」写清楚了，
+// 而下面 lanTargetCanvasIds 的正则做不到这个区分 —— 见那里的 COLLECTION_SEGMENTS。
+// （这个函数目前没有被调用；真正生效的是 lanTargetCanvasIds。
+//   留着是为了别丢掉这条知识，两条路径的判断必须一致。）
 function lanCanvasScopeDenied(pathname, method) {
   const match = /^\/api\/canvases\/([^/]+)(?:\/|$)/.exec(pathname);
   if (!match) return '';
@@ -1565,25 +1570,46 @@ function needsBodyForScope(pathname) {
 //
 // 说不清时一律拒绝（见 lanCollabDenied）。宁可让协作者偶尔碰壁，
 // 也不能因为「没解析出画布」就默认放行 —— 那正是原来那个洞。
+// 有些路径看着像「操作某一块画布」，其实第一段是**固定词**、不是画布编号。
+// 不排掉它们，正则就会把 `list` / `import` 当成画布 id，
+// 于是 store.isShared('list') 为假 → 403 —— 把本来该放行的集合端点堵死。
+//
+// 这是我自己在第 2 步引入的回归（实测确认）：
+//   · /api/share/list       → 协作者列不出共享画布
+//   · /api/canvases/import  → 协作者导不了备份
+// 后者尤其明显：index.js:1280 专门写了「局域网协作者导进来的画布要直接标成共享」，
+// 说明这个功能是**有意开放**的，却被我的加固堵掉了。
+// 教训：正则取"第一段"时必须先想清楚「这一段的取值域是什么」。
+//
+// 这两个词在当前路由里不会和真实画布编号冲突（编号一律以 c_ 开头，
+// 见 store.newId('c')），所以按字面量排掉是安全的。
+const COLLECTION_SEGMENTS = new Set(['list', 'import']);
+
 function lanTargetCanvasIds(pathname, method, body, query) {
   // 1) /api/canvases/<id>/... 直接把编号写在路径里
   const inPath = /^\/api\/canvases\/([^/]+)(?:\/|$)/.exec(pathname);
   if (inPath) {
+    let seg = inPath[1];
     try {
-      return [decodeURIComponent(inPath[1])];
+      seg = decodeURIComponent(seg);
     } catch {
-      return [inPath[1]];
+      /* 保持原样 */
     }
+    // 集合端点（/api/canvases/import）不是"操作某一块"，交给后面的通用规则
+    if (!COLLECTION_SEGMENTS.has(seg)) return [seg];
   }
   // 2) /api/share/<id>/...：协作本身的那几条（state / patch / presence / events）。
   //    这些是协作者的主干道，编号同样在路径里。
+  //    但 /api/share/list 是集合端点，第一段是字面量 list，不算画布。
   const inShare = /^\/api\/share\/([^/]+)(?:\/|$)/.exec(pathname);
   if (inShare) {
+    let seg = inShare[1];
     try {
-      return [decodeURIComponent(inShare[1])];
+      seg = decodeURIComponent(seg);
     } catch {
-      return [inShare[1]];
+      /* 保持原样 */
     }
+    if (!COLLECTION_SEGMENTS.has(seg)) return [seg];
   }
   // 3) /api/schedules/<nodeId>[/action]：画布编号藏在定时组那条运行记录里
   const inSchedule = /^\/api\/schedules\/([^/]+)(?:\/|$)/.exec(pathname);
@@ -1623,6 +1649,16 @@ function lanTargetCanvasIds(pathname, method, body, query) {
 //     这几条动的是主机磁盘上的真实文件，而且不分属于哪块画布，
 //     「共享一块画布」不该等于「可以删掉主机整个素材库」。
 const LAN_LIBRARY_READONLY = ['/api/library', '/api/library/orphans'];
+
+// 不落在任何已有画布上、但要为协作者放行的端点。见 lanCollabDenied 里的说明。
+// 只收「只读」或「新建、不动别人东西」的：
+//   · /api/share/list      只读，且只列本来就开着共享的画布
+//   · /api/canvases/import 新建一块并立刻标成共享，不碰任何已有画布
+// 注意别往里加「能改已有画布」的东西 —— 那就绕过了按画布授权这道门。
+const LAN_CANVASLESS_ALLOWED = new Set([
+  '/api/share/list',
+  '/api/canvases/import',
+]);
 function lanLibraryReadOnly(pathname, method) {
   if (method !== 'GET') return false;
   if (LAN_LIBRARY_READONLY.indexOf(pathname) >= 0) return true;
@@ -1638,6 +1674,14 @@ function lanLibraryReadOnly(pathname, method) {
 //     拿不出画布编号、或那块画布没开共享，都拒。
 function lanCollabDenied(pathname, method, body, query) {
   if (lanLibraryReadOnly(pathname, method)) return '';
+  // 有几个端点的路径形状像「操作某一块画布」，其实不是，它们**不落在任何已有画布上**：
+  //   · /api/share/list      —— 列出正开着共享的画布（只读，且只暴露本来就已共享的）
+  //   · /api/canvases/import —— 导入一份备份，**新建**一块画布，不动任何已有画布
+  //     （而且 index.js:1280 明确会把局域网导进来的那块直接标成共享）
+  // 对它们「按画布授权」无从判断（没有画布可判），所以必须显式放行 ——
+  // 否则会掉进"说不清就拒绝"，把这几个合法功能堵死。
+  // 第 2 步我就是漏了这一步，实测把协作的「列共享画布」和「导入备份」都堵掉了。
+  if (LAN_CANVASLESS_ALLOWED.has(pathname)) return '';
   const ids = lanTargetCanvasIds(pathname, method, body, query);
   if (!ids.length) {
     return '这个操作要先指明是哪块画布，请从共享画布页面里发起';
