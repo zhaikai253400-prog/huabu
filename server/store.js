@@ -138,8 +138,16 @@ function openDb() {
   // 老画布从 0 起算，前端一读到就会带上这个号，行为跟新画布一致。
   const canvasColumns = db.prepare('PRAGMA table_info(canvases)').all().map((row) => row.name);
   if (canvasColumns.indexOf('rev') < 0) db.exec('ALTER TABLE canvases ADD COLUMN rev INTEGER NOT NULL DEFAULT 0');
-  // 共享工作区：shared=1 表示这块画布对局域网开放；share_token 是进入它的钥匙。
-  // 停止共享时把 token 换成新的（或清空），旧链接当场失效，不用记「谁拿过链接」。
+  // 共享工作区：shared=1 表示这块画布对局域网开放。
+  // 准入靠的是 shared 这一个标志 + 会话人数上限（share.js 的 MAX_SESSIONS=3），
+  // 没有额外的口令。
+  //
+  // share_token 这一列是**当初规划过、后来没做**的「链接口令」，一直空着：
+  // 全库 0 条非空，整个代码库除了建列这行没有任何地方读它。
+  // 这里保留列（删列要重建 canvases 表，为一块没用的字段冒这个险不值得），
+  // 但把注释改成实话 —— 原来写的是「share_token 是进入它的钥匙，停止共享时把
+  // token 换成新的」，那句话不成立，会让人以为共享有口令保护。
+  // 将来真要做口令，再用这一列。
   if (canvasColumns.indexOf('shared') < 0) db.exec('ALTER TABLE canvases ADD COLUMN shared INTEGER NOT NULL DEFAULT 0');
   if (canvasColumns.indexOf('share_token') < 0) db.exec('ALTER TABLE canvases ADD COLUMN share_token TEXT');
   // 顺手清掉已经不存在的那块画布留下的卡片 / 连线记录，别让它们一直躺在库里
