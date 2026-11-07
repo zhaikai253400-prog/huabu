@@ -197,8 +197,56 @@ check('syncLockMark 同时管类名与图标', () => {
   assert.ok(/buildLockMark|remove\(\)/.test(b.text), 'syncLockMark 没有增删锁形图标');
 });
 
-console.log('\nL5 · 视频封面必须带 lazy（图片卡一直都有，别再漏）');
+console.log('\nL7 · 撤销要真的能撤销：pushHistory() 必须在改数据之前');
 
+// 这里的由来：第 5 步验往返时发现「藏 2 张 → Ctrl+Z」卡片回不来。
+// 根因是 hideSelection() 里 pushHistory() 写在 `data.hidden = true` **之后**，
+// 压进撤销栈的快照已经是"藏好了"的状态，撤销等于把同一状态再应用一遍。
+// 已用三组对照实验证实（baseline 不恢复 / HEAD 不恢复 / 把 pushHistory 提前后恢复），
+// 并确认改动前就存在、不是第 5 步引入的。
+check('hideSelection 先 pushHistory 再改 data.hidden', () => {
+  const b = bodyOf('hideSelection');
+  assert.ok(b, '没找到 hideSelection');
+  const pushAt = b.text.indexOf('pushHistory(');
+  const writeAt = b.text.indexOf('hidden = true');
+  assert.ok(pushAt >= 0, 'hideSelection 里没有 pushHistory()');
+  assert.ok(writeAt >= 0, 'hideSelection 里没有把 hidden 置为 true');
+  assert.ok(pushAt < writeAt,
+    'hideSelection 又在改完数据之后才 pushHistory() —— 撤销栈里存的会是"已经藏好了"的状态，' +
+    '按 Ctrl+Z 不会把卡片恢复回来（这正是之前修掉的那个既有缺陷）');
+});
+
+check('hideSelection 保留「一张都不用变就什么都不做」的语义', () => {
+  const b = bodyOf('hideSelection');
+  // 不能因为重排顺序就丢掉「没有变化不留空撤销步」这条：先筛出待处理的，空就直接返回
+  assert.ok(/pending\s*\.\s*length\s*\)\s*return/.test(b.text) || /if\s*\(!pending\.length\)\s*return/.test(b.text),
+    'hideSelection 没有"没有变化就提前返回"的分支 —— 全选已隐藏的卡片会压进一个空的撤销步骤');
+});
+
+check('其它会改数据的函数也普遍遵循「先拍快照」的顺序', () => {
+  // 抽查几个**已知会拍快照**的函数，防止以后有人在别处把顺序写反。
+  // 名单里这几个都必须有 pushHistory —— 缺了也算错
+  //（我第一版写成 "没有 pushHistory 就跳过"，于是"把 pushHistory 整个删掉"
+  // 这种退化反而测不出来，变异检验 M16 抓到了这个洞）。
+  const probes = ['deleteSelection', 'pasteClipboard', 'createZone', 'removeEdge'];
+  const missing = [];
+  const bad = [];
+  for (const name of probes) {
+    const b = bodyOf(name);
+    if (!b) { missing.push(name + '(函数不存在)'); continue; }
+    const pushAt = b.text.indexOf('pushHistory(');
+    if (pushAt < 0) { missing.push(name); continue; }
+    const m = /(data\.[A-Za-z]+\s*=|nodes\.(push|splice|unshift)|\.hidden\s*=\s*true)/.exec(b.text);
+    if (m && m.index < pushAt) bad.push(name);
+  }
+  assert.deepStrictEqual(missing, [],
+    '这些函数本该 pushHistory() 却没有：' + missing.join(', ') + ' —— 它们的改动将无法撤销');
+  assert.deepStrictEqual(bad, [],
+    '这些函数在改数据之后才 pushHistory()：' + bad.join(', ') +
+    ' —— 顺序反了会让撤销退回到"已经改完"的状态，等于撤销无效');
+});
+
+console.log('\nL5 · 视频封面必须带 lazy（图片卡一直都有，别再漏）');
 check("视频封面设置了 loading='lazy'", () => {
   assert.ok(/poster\.loading\s*=\s*'lazy'/.test(SRC),
     "视频封面没有 loading='lazy' —— 几百张视频卡一打开就会同时去拉封面");

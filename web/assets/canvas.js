@@ -11460,15 +11460,20 @@
       .map((id) => byId(id))
       .filter(Boolean);
     if (!list.length) return;
-    let changed = 0;
-    list.forEach((node) => {
-      const data = nodeData(node);
-      if (data.hidden) return;
-      data.hidden = true;
-      changed += 1;
-    });
-    if (!changed) return;
+    // 先把「哪些真的会变」挑出来，再拍快照，最后才改数据。
+    // 顺序很要紧：pushHistory() 拍的是**当下**的 nodes/edges。
+    // 原来先 `data.hidden = true` 再 pushHistory()，等于把「已经藏好了」的状态
+    // 压进了撤销栈 —— 于是按 Ctrl+Z 只是把同一个状态再应用一遍，画面上没反应，
+    // 「藏起来就撤不回去了」。这个顺序问题改动前就有（已用两组对照实验证实），
+    // 不是第 5 步引入的；顺手在这里修掉，因为正是这个函数。
+    // 同时保留原来的语义：一张都不需要变就什么都不做，不留空的撤销步。
+    const pending = list.filter((node) => !nodeData(node).hidden);
+    if (!pending.length) return;
     pushHistory();
+    pending.forEach((node) => {
+      nodeData(node).hidden = true;
+    });
+    const changed = pending.length;
     if (expandedId && list.some((node) => node.id === expandedId)) expandedId = null;
     selection.clear();
     selectedEdgeId = null;
