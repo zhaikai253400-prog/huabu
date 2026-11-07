@@ -163,8 +163,9 @@ check('通道页与会话级接口被列为「只限本机」', () => {
   assert(/function isLocalOnlyPath\(pathname\)/.test(indexSrc), '缺 isLocalOnlyPath');
   assert(indexSrc.indexOf("pathname === '/channels' || pathname === '/channels.html'") >= 0, '通道页没拦住');
   assert(indexSrc.indexOf("pathname.indexOf('/api/channels') === 0") >= 0, '通道接口没拦住');
-  // 钩子换了：现在局域网是「只放行程序代码白名单」的白名单式拦截，
-  // 比黑名单更保守（漏一条路径也进不来）。两种钩子都应该被认。
+  // 钩子换了：局域网是「白名单式的整体拦截 + 按画布授权」。
+  // 前者管「哪些路径类目根本不对外」，后者管「具体是哪块画布」。
+  // 三种钩子都应该被认，只要它接在守卫结果上。
   assert(
     /verdict\.local === false && !lanCollabAllowed\(pathname\)/.test(indexSrc) ||
       /verdict\.local === false && !isLanShareablePath\(pathname\)/.test(indexSrc) ||
@@ -186,8 +187,8 @@ check('局域网只开放「程序代码」两个只读接口，画布与素材�
     assert(body.indexOf(bad) < 0, '局域网竟然放行了 ' + bad);
   }
   // 总闸：非白名单路径在 verdict.local === false 时一律 403。
-  // 共享协作把「放行」扩成了一道单独的闸 lanCollabAllowed：它内部先问
-  // isLanShareablePath，再问「有没有画布开着共享」。没开共享时行为与以前一致。
+  // 共享协作再加一道 lanCollabAllowed：它内部先问 isLanShareablePath，
+  // 再问「有没有画布开着共享」。没开共享时行为与以前一致。
   assert(/verdict\.local === false && !lanCollabAllowed\(pathname\)/.test(indexSrc),
     '局域网总闸没接上，画布和素材会被别的电脑读到');
   const collab = /function lanCollabAllowed\(pathname\) \{([\s\S]*?)\n\}/.exec(indexSrc);
@@ -195,6 +196,63 @@ check('局域网只开放「程序代码」两个只读接口，画布与素材�
   assert(collab[1].indexOf('isLanShareablePath(pathname)') >= 0, 'lanCollabAllowed 丢了程序代码白名单');
   assert(collab[1].indexOf('hasShared()') >= 0,
     'lanCollabAllowed 没把「有没有共享画布」当成开关，等于共享一开就全放行或永远不放行');
+});
+
+check('局域网协作是「按画布授权」，不是「共享一开就全放行」', () => {
+  const indexSrc = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+  // 1) 必须有一道「这次请求落在哪块画布上」的解析
+  assert(/function lanTargetCanvasIds\(/.test(indexSrc), '缺 lanTargetCanvasIds：没人去问请求落在哪块画布');
+  // 2) 必须有一道按画布判的闸，且判据是 store.isShared
+  assert(/function lanCollabDenied\(/.test(indexSrc), '缺 lanCollabDenied');
+  const denied = /function lanCollabDenied\(pathname, method, body, query\) \{([\s\S]*?)\n\}/.exec(indexSrc);
+  assert(denied, '抽不出 lanCollabDenied 函数体');
+  assert(denied[1].indexOf('isShared') >= 0, 'lanCollabDenied 没按「这块画布开着共享」来判');
+  // 3) 判权限必须真的接在请求处理里
+  assert(/lanCollabDenied\(pathname, method, scopeBody, parsed\.searchParams\)/.test(indexSrc),
+    '按画布授权那道闸没接进 requestHandler');
+  // 4) 拿不出画布编号时必须拒，不能默认放行
+  assert(denied[1].indexOf('这个操作要先指明是哪块画布') >= 0,
+    'lanCollabDenied 在「说不清是哪块画布」时没有拒绝 —— 这正是原来的洞');
+  // 5) 生成类接口要能从请求体里取到 canvasId，所以必须先读体
+  assert(/function needsBodyForScope\(/.test(indexSrc), '缺 needsBodyForScope');
+  const scopeFn = /function needsBodyForScope\(pathname\) \{([\s\S]*?)\n\}/.exec(indexSrc);
+  assert(scopeFn, '抽不出 needsBodyForScope 函数体');
+  // 那三条路径列在模块级常量 BODY_SCOPED_PATHS 里，所以要连常量一起看
+  const scopedList = /const BODY_SCOPED_PATHS = \[([\s\S]*?)\]/.exec(indexSrc);
+  assert(scopedList, '抽不出 BODY_SCOPED_PATHS');
+  assert(scopeFn[1].indexOf('BODY_SCOPED_PATHS') >= 0,
+    'needsBodyForScope 没引用 BODY_SCOPED_PATHS');
+  for (const need of ['/api/generate', '/api/preflight', '/api/tailframe']) {
+    assert(scopedList[1].indexOf(need) >= 0,
+      'BODY_SCOPED_PATHS 漏了 ' + need + '（它的 canvasId 只在请求体里）');
+  }
+  assert(scopedList[1].indexOf('/api/assets/import') < 0,
+    'BODY_SCOPED_PATHS 不该包含 /api/assets/import：它的 canvasId 在查询串，而体可能有几百 MB');
+});
+
+check('素材库对局域网分成「只读放行 / 会动的拒绝」两档', () => {
+  const indexSrc = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+  assert(/function lanLibraryReadOnly\(pathname, method\)/.test(indexSrc), '缺 lanLibraryReadOnly');
+  const fn = /function lanLibraryReadOnly\(pathname, method\) \{([\s\S]*?)\n\}/.exec(indexSrc);
+  assert(fn, '抽不出 lanLibraryReadOnly 函数体');
+  // 非 GET 一律不给：删素材、清孤儿、回收站还原都是 POST
+  assert(/method !== 'GET'/.test(fn[1]), 'lanLibraryReadOnly 没有把非 GET 拦掉');
+  // 删素材 / 清孤儿这两条绝不能进只读白名单
+  assert(fn[1].indexOf('/api/library/delete') < 0, 'lanLibraryReadOnly 竟然放行了删素材');
+  assert(fn[1].indexOf('/api/library/orphans/clean') < 0, 'lanLibraryReadOnly 竟然放行了清孤儿');
+});
+
+check('请求体可重复读取（局域网判权限先读，路由里还要再读）', () => {
+  const indexSrc = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+  assert(/function readBodyText\(/.test(indexSrc), '缺 readBodyText');
+  // 缓存必须挂在 req 上，否则第二次读到的是空体 → 生成接口会静默收到 {}
+  assert(/req\.__bodyText = text/.test(indexSrc), 'readBodyText 没把结果缓存到 req 上');
+  assert(/readBodyText\(req, limit\)\.then/.test(indexSrc), 'readBody 没走缓存那条路');
+  assert(/function readRaw\(/.test(indexSrc) && /req\.__bodyBuffer = buffer/.test(indexSrc),
+    'readRaw 没做缓存');
+  // async 处理器的 rejection 必须有人接住，否则请求会挂住不回
+  assert(/Promise\.resolve\(requestHandler\(req, res\)\)\.catch/.test(indexSrc),
+    'requestHandler 变成 async 后没包 catch，异步异常会让请求挂住');
 });
 
 console.log('\nG1d · 局域网监听与配置');

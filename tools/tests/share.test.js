@@ -429,7 +429,35 @@ const LAN_IP = (function () {
       eq(on.status, 200, '开共享');
 
       const afterLib = await request(port, { path: '/api/library?limit=5', host: lanHost });
-      check('开了共享后，局域网能打开素材库', () => eq(afterLib.status, 200));
+      check('开了共享后，局域网能浏览素材库（只读）', () => eq(afterLib.status, 200));
+
+      // 素材库的「会动」接口一律不给：共享一块画布 ≠ 能让别人删掉主机整个素材库
+      const lanDelete = await request(port, {
+        path: '/api/library/delete',
+        method: 'POST',
+        host: lanHost,
+        headers: { Host: lanHost, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ relPaths: ['图片/随便一个.png'] }),
+      });
+      check('局域网不能删主机素材（403）', () => eq(lanDelete.status, 403));
+
+      const lanClean = await request(port, {
+        path: '/api/library/orphans/clean',
+        method: 'POST',
+        host: lanHost,
+        headers: { Host: lanHost, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      check('局域网不能清主机孤儿素材（403）', () => eq(lanClean.status, 403));
+
+      const lanRestore = await request(port, {
+        path: '/api/library/recycle',
+        method: 'POST',
+        host: lanHost,
+        headers: { Host: lanHost, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batchId: 'x', items: [] }),
+      });
+      check('局域网不能从主机回收站还原素材（403）', () => eq(lanRestore.status, 403));
 
       const afterState = await request(port, {
         path: '/api/share/' + canvasId + '/state',
@@ -441,6 +469,48 @@ const LAN_IP = (function () {
         eq(data.limit, 3);
         assert(Number.isFinite(data.online), 'online 该是数字');
         eq(data.local, false, '局域网访客的 local 应为 false');
+      });
+
+      // 生成类接口：不报画布 → 拒；报一块「没共享」的画布 → 拒；报共享那块 → 放行到业务层。
+      // 这几条正是「共享一开就全放行」那个洞的回归护栏。
+      const genNoCanvas = await request(port, {
+        path: '/api/generate',
+        method: 'POST',
+        host: lanHost,
+        headers: { Host: lanHost, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'image', model: 'm', prompt: 'x' }),
+      });
+      check('局域网不报画布就调生成 → 403', () => eq(genNoCanvas.status, 403));
+
+      const genOther = await request(port, {
+        path: '/api/generate',
+        method: 'POST',
+        host: lanHost,
+        headers: { Host: lanHost, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'image', model: 'm', prompt: 'x', canvasId: 'c_不存在' }),
+      });
+      check('局域网拿「没共享」的画布调生成 → 403', () => eq(genOther.status, 403));
+
+      // 正面：报的正是共享那块 → 应当过闸进到业务层。
+      // 这个测试服务没配任何通道，所以业务层会回 400（还没有能生成的通道）。
+      // 关键区别是「403 = 被权限拦下」vs「400 = 权限过了、业务上不成立」。
+      const genShared = await request(port, {
+        path: '/api/generate',
+        method: 'POST',
+        host: lanHost,
+        headers: { Host: lanHost, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'image', model: 'm', prompt: 'x', canvasId: canvasId }),
+      });
+      check('局域网对「共享那块画布」能过权限闸（不再 403）', () => {
+        assert(genShared.status !== 403, '不该被权限拦下，实际 ' + genShared.status);
+      });
+      // 顺带确认请求体没被判权限那一步吃掉：业务层必须真的读到了 body
+      check('判权限先读体之后，业务层仍能读到完整 body', () => {
+        const data = JSON.parse(genShared.body);
+        assert(
+          String(data.error || '').indexOf('通道') >= 0,
+          '业务层没读到 body（画布编号丢了？），拿到的是：' + genShared.body.slice(0, 120)
+        );
       });
 
       const patch = await request(port, {

@@ -149,7 +149,14 @@ function sendText(res, code, text, type) {
   res.end(text);
 }
 
-function readBody(req, limit) {
+// 读请求体的原始文本，读到就缓存在 req 上。
+//
+// 为什么要缓存：局域网请求要先看请求体里的 canvasId，才知道「这块画布有没有
+// 开共享」，不给协作者碰没共享的画布。而 HTTP 请求体是流、只能读一次 ——
+// 前面判权限时读掉了，后面路由里再 readBody 就会永远等不到数据。
+// 缓存之后两边拿到的是同一份，判权限与业务逻辑不会互相踩。
+function readBodyText(req, limit) {
+  if (typeof req.__bodyText === 'string') return Promise.resolve(req.__bodyText);
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -163,20 +170,28 @@ function readBody(req, limit) {
       chunks.push(chunk);
     });
     req.on('end', () => {
-      if (!chunks.length) return resolve({});
-      const text = Buffer.concat(chunks).toString('utf8');
-      try {
-        resolve(JSON.parse(text));
-      } catch {
-        reject(new Error('提交的格式不正确'));
-      }
+      const text = chunks.length ? Buffer.concat(chunks).toString('utf8') : '';
+      req.__bodyText = text;
+      resolve(text);
     });
     req.on('error', reject);
   });
 }
 
+function readBody(req, limit) {
+  return readBodyText(req, limit).then((text) => {
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error('提交的格式不正确');
+    }
+  });
+}
+
 // 收原始字节：本地挑的文件直接传上来，不走 JSON 包一层
 function readRaw(req, limit) {
+  if (Buffer.isBuffer(req.__bodyBuffer)) return Promise.resolve(req.__bodyBuffer);
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -189,7 +204,11 @@ function readRaw(req, limit) {
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('end', () => {
+      const buffer = Buffer.concat(chunks);
+      req.__bodyBuffer = buffer;
+      resolve(buffer);
+    });
     req.on('error', reject);
   });
 }
@@ -1504,6 +1523,127 @@ function lanCanvasScopeDenied(pathname, method) {
   return '这块画布没有开启共享，协作者不能操作它';
 }
 
+// 「按画布授权」用到的辅助：从各种请求里问出「这次操作落在哪块画布上」。
+//
+// 为什么需要它：协作放行的是「协作」这一整类接口，但其中不少路径自己不带画布编号
+// （生成、尾帧、素材库……）。少了这一步，局域网就能拿它们去打主机上任意一块
+// 没开共享的画布 —— 包括花主机的付费额度、把主机的素材挪进回收站。
+function taskCanvasIdOf(taskId) {
+  const id = String(taskId || '').trim();
+  if (!id) return '';
+  // 任务可能已经不在表里（清理过），那就无从判断归属
+  const task = store.getTask(id);
+  return task ? String(task.canvasId || '') : '';
+}
+
+// 定量组的运行记录里带着画布编号。还没跑起来的定时组没有 run 记录，
+// 这时返回空串 —— 调用方会按「说不清是哪块」拒绝，这是有意的保守选择。
+function scheduleCanvasIdOf(nodeId) {
+  const run = store.getScheduleRun(String(nodeId || '').trim());
+  return run ? String(run.canvasId || '') : '';
+}
+
+// 从请求体 / 查询串里取 canvasId。缺省返回空串（= 没指定画布）。
+function askedCanvasIdOf(body, query) {
+  const fromBody = body && typeof body === 'object' ? body.canvasId : '';
+  const fromQuery = query && typeof query.get === 'function' ? query.get('canvasId') : '';
+  return String(fromBody || fromQuery || '').trim();
+}
+
+// 这几个路径的 canvasId 只写在请求体里，判权限时必须先把体读出来。
+// 注意别把 /api/assets/import 加进来：它的 canvasId 在查询串里，
+// 而它可能带着几百 MB 的文件体，为判权限把整个体读进内存不划算。
+const BODY_SCOPED_PATHS = ['/api/generate', '/api/preflight', '/api/tailframe'];
+function needsBodyForScope(pathname) {
+  if (BODY_SCOPED_PATHS.indexOf(pathname) >= 0) return true;
+  return /^\/api\/schedules\/[^/]+\/start$/.test(pathname);
+}
+
+// 局域网协作者这次请求要碰哪块画布；返回空数组表示「说不清是哪块」。
+//
+// 说不清时一律拒绝（见 lanCollabDenied）。宁可让协作者偶尔碰壁，
+// 也不能因为「没解析出画布」就默认放行 —— 那正是原来那个洞。
+function lanTargetCanvasIds(pathname, method, body, query) {
+  // 1) /api/canvases/<id>/... 直接把编号写在路径里
+  const inPath = /^\/api\/canvases\/([^/]+)(?:\/|$)/.exec(pathname);
+  if (inPath) {
+    try {
+      return [decodeURIComponent(inPath[1])];
+    } catch {
+      return [inPath[1]];
+    }
+  }
+  // 2) /api/share/<id>/...：协作本身的那几条（state / patch / presence / events）。
+  //    这些是协作者的主干道，编号同样在路径里。
+  const inShare = /^\/api\/share\/([^/]+)(?:\/|$)/.exec(pathname);
+  if (inShare) {
+    try {
+      return [decodeURIComponent(inShare[1])];
+    } catch {
+      return [inShare[1]];
+    }
+  }
+  // 3) /api/schedules/<nodeId>[/action]：画布编号藏在定时组那条运行记录里
+  const inSchedule = /^\/api\/schedules\/([^/]+)(?:\/|$)/.exec(pathname);
+  if (inSchedule) {
+    let nodeId = inSchedule[1];
+    try {
+      nodeId = decodeURIComponent(nodeId);
+    } catch {
+      /* 保持原样 */
+    }
+    const id = scheduleCanvasIdOf(nodeId);
+    return id ? [id] : [];
+  }
+  // 4) /api/tasks/<taskId>[/cancel]
+  const inTask = /^\/api\/tasks\/([^/]+)(?:\/|$)/.exec(pathname);
+  if (inTask) {
+    let taskId = inTask[1];
+    try {
+      taskId = decodeURIComponent(taskId);
+    } catch {
+      /* 保持原样 */
+    }
+    const id = taskCanvasIdOf(taskId);
+    return id ? [id] : [];
+  }
+  // 5) 其余（/api/generate、/api/preflight、/api/tailframe、/api/tasks、
+  //    /api/schedules、/api/assets/import）从请求体 / 查询串里取
+  const asked = askedCanvasIdOf(body, query);
+  return asked ? [asked] : [];
+}
+
+// 素材库是「整台电脑共用的一份」，天然不带画布编号，没法按画布授权。
+// 所以对局域网单独分成两档：
+//   只读的（浏览 / 找孤儿 / 看回收站）—— 放行。协作者要能看素材库，
+//     页面上那个素材抽屉就是这么取数据的；
+//   会动的（删素材 / 清孤儿 / 从回收站还原）—— 一律拒。
+//     这几条动的是主机磁盘上的真实文件，而且不分属于哪块画布，
+//     「共享一块画布」不该等于「可以删掉主机整个素材库」。
+const LAN_LIBRARY_READONLY = ['/api/library', '/api/library/orphans'];
+function lanLibraryReadOnly(pathname, method) {
+  if (method !== 'GET') return false;
+  if (LAN_LIBRARY_READONLY.indexOf(pathname) >= 0) return true;
+  // 回收站列表是只读的；还原（POST）不是。
+  return pathname === '/api/library/recycle';
+}
+
+// 这次局域网请求放不放行。返回空串表示放行，否则返回给用户看的原因。
+//
+// 规则：
+//   · 素材库的只读接口 —— 放行（它不属于任何一块画布，没法按画布判）；
+//   · 其余一律**必须报出一块「正开着共享」的画布**才放行。
+//     拿不出画布编号、或那块画布没开共享，都拒。
+function lanCollabDenied(pathname, method, body, query) {
+  if (lanLibraryReadOnly(pathname, method)) return '';
+  const ids = lanTargetCanvasIds(pathname, method, body, query);
+  if (!ids.length) {
+    return '这个操作要先指明是哪块画布，请从共享画布页面里发起';
+  }
+  if (ids.some((id) => store.isShared(id))) return '';
+  return '这块画布没有开启共享，协作者不能操作它';
+}
+
 // 只能在本机打开的路径：平台密钥、托盘控制、进程级操作、以及会弹系统窗口的操作。
 // 局域网请求现在连这些路径都到不了（上面那道总闸先拦了），这里保留给未来的本机判断用。
 function isLocalOnlyPath(pathname) {
@@ -1519,7 +1659,10 @@ function isLocalOnlyPath(pathname) {
   return false;
 }
 
-function requestHandler(req, res) {
+// 注意：这个处理器是 async 的 —— 局域网判权限时要先把请求体读出来
+// （见下面 fromLan 那一段），而读体是异步的。
+// 全局异常由下面 http.createServer 那处的 .catch 兜住，与 handleApi 同一套处理。
+async function requestHandler(req, res) {
   applySecurityHeaders(res);
   const parsed = new URL(req.url, 'http://127.0.0.1');
   let pathname = '/';
@@ -1571,8 +1714,23 @@ function requestHandler(req, res) {
 
   // 共享放行的是「协作」这一整类接口，但协作者只能碰「开着共享的那块画布」。
   // 少了这一道，局域网就能删掉主机上任意一块没共享的画布 —— 那等于把整库交出去。
+  //
+  // 这一道必须**先拿到 canvasId 再判**，而有些路径的编号只写在请求体里
+  // （生成、预检、尾帧、定时组启动），所以必要时先把体读出来。
+  // readBodyText 会把结果缓存在 req 上，稍后路由里再 readBody 拿到的是同一份，
+  // 流不会因为「读两次」而枯竭。
   if (fromLan && pathname.indexOf('/api/') === 0) {
-    const denied = lanCanvasScopeDenied(pathname, req.method.toUpperCase()) || '';
+    const method = req.method.toUpperCase();
+    let scopeBody = null;
+    if (needsBodyForScope(pathname) && method !== 'GET' && method !== 'HEAD') {
+      try {
+        scopeBody = await readBody(req);
+      } catch {
+        // 体读不出来（太大 / 格式不对）就按「说不清是哪块画布」处理，交给下面拒掉
+        scopeBody = null;
+      }
+    }
+    const denied = lanCollabDenied(pathname, method, scopeBody, parsed.searchParams) || '';
     if (denied) {
       log('拦下局域网越权：' + pathname);
       return sendJson(res, 403, { error: denied });
@@ -1726,7 +1884,16 @@ function alreadyRunningBanner(running) {
 }
 
 function listen(port, attempts) {
-  const server = http.createServer(requestHandler);
+  // requestHandler 是 async 的：局域网判权限要先读请求体。http.createServer
+  // 不认 Promise，抛出来的 rejection 会变成 unhandledRejection 而不会被这里接住，
+  // 请求就会挂住不回。所以包一层，把异步异常转成 500。
+  const server = http.createServer((req, res) => {
+    Promise.resolve(requestHandler(req, res)).catch((error) => {
+      log('请求处理出错：' + req.url + ' ' + ((error && error.message) || error));
+      if (!res.headersSent) sendJson(res, 500, { error: (error && error.message) || '服务内部错误' });
+      else res.end();
+    });
+  });
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE' && attempts > 0) {
       log('端口 ' + port + ' 被占用，换到 ' + (port + 1) + ' 再试');
