@@ -10,6 +10,14 @@ runtime/
 tools/ffmpeg.exe
 tools/ffprobe.exe
 
+# ---------- 便携版 Git ----------
+# .git-tools/ 是随项目带的 MinGit（约 92MB，375 个文件），用途是「本机没有任何
+# git 时也能提交代码」。和 runtime/、tools/ffmpeg.exe 一样属于「体积大、可重新
+# 获取」的第三方二进制，不进版本库。
+# 注意：不能放在 tools/ 下 —— 那个目录在 server/codesync.js 的同步白名单里，
+# 放进去会把 92MB 的 git 同步到局域网另一台电脑。
+.git-tools/
+
 # ---------- 用户素材 ----------
 # 生成的图片/视频/音频，体积大且可再生
 素材/
