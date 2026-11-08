@@ -76,34 +76,66 @@
   let checks = [];
   let assetRoot = '';
   let submitCompress = { enabled: true };
-  // 尾部提示词：每套预设只存名字和正文，卡片只记「用哪一套」
-  let tailPrompts = { enabled: true, defaultId: '', presets: [] };
+  // 尾部提示词：按类型分成两个池子（视频 / 图片），互不相通。
+  // 每套预设只存名字和正文，卡片只记「用哪一套」。
+  let tailPrompts = {
+    enabled: true,
+    groups: { video: { defaultId: '', presets: [] }, image: { defaultId: '', presets: [] } },
+  };
+  // 设置面板当前在编辑哪一组
+  let tailEditingGroup = 'video';
   // 局域网访问：开关 + 这台电脑的网卡地址（服务端算好，前端只负责显示和复制）
   let lan = { enabled: false, addresses: [], port: 0 };
 
+  const TAIL_GROUP_META = {
+    video: { label: '视频', hint: '视频卡和快速视频卡用这一组。可以写运镜、时长、音效、嘴型这类只对视频有意义的规则。' },
+    image: { label: '图片', hint: '图片卡用这一组。写构图、画风、光影、画幅这类对出图有意义的描述；别把视频的音频规则写进来。' },
+  };
+
+  function emptyTailGroup() {
+    return { defaultId: '', presets: [] };
+  }
+
+  // 归一：既认新结构（groups），也认老结构（扁平 presets → 全部归 video 池）。
+  // 与服务端 config.normalizeTailPrompts 的迁移规则保持一致。
   function normalizeTailPresets(value) {
     const raw = value && typeof value === 'object' ? value : {};
-    const list = Array.isArray(raw.presets) ? raw.presets : [];
-    const presets = [];
-    const seen = new Set();
-    list.slice(0, 30).forEach((item) => {
-      if (!item || typeof item !== 'object') return;
-      let id = String(item.id || '').trim() || 'tail_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      if (seen.has(id)) id = id + '_' + presets.length;
-      seen.add(id);
-      presets.push({
-        id: id,
-        name: String(item.name || '').trim().slice(0, 40) || '未命名风格',
-        text: String(item.text || '').slice(0, 20000),
+    const one = (src) => {
+      const list = Array.isArray(src && src.presets) ? src.presets : [];
+      const presets = [];
+      const seen = new Set();
+      list.slice(0, 30).forEach((item) => {
+        if (!item || typeof item !== 'object') return;
+        let id = String(item.id || '').trim() || 'tail_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        if (seen.has(id)) id = id + '_' + presets.length;
+        seen.add(id);
+        presets.push({
+          id: id,
+          name: String(item.name || '').trim().slice(0, 40) || '未命名风格',
+          text: String(item.text || '').slice(0, 20000),
+        });
       });
-    });
-    let defaultId = String(raw.defaultId || '');
-    if (defaultId && !presets.some((one) => one.id === defaultId)) defaultId = presets.length ? presets[0].id : '';
-    return { enabled: raw.enabled !== false, defaultId: defaultId, presets: presets };
+      let defaultId = String((src && src.defaultId) || '');
+      if (defaultId && !presets.some((one_) => one_.id === defaultId)) defaultId = presets.length ? presets[0].id : '';
+      return { defaultId: defaultId, presets: presets };
+    };
+    const groups = { video: emptyTailGroup(), image: emptyTailGroup() };
+    if (raw.groups && typeof raw.groups === 'object') {
+      groups.video = one(raw.groups.video);
+      groups.image = one(raw.groups.image);
+    } else {
+      // 老结构：那时只有视频 / 快速视频支持尾部提示词，所以全部归 video 池
+      groups.video = one(raw);
+    }
+    return { enabled: raw.enabled !== false, groups: groups };
   }
 
   function cloneTailPrompts(value) {
     return JSON.parse(JSON.stringify(normalizeTailPresets(value)));
+  }
+
+  function tailGroupOf(value) {
+    return value === 'image' ? 'image' : 'video';
   }
 
   function fontStack(family) {
@@ -476,10 +508,16 @@
       '      <label class="tail-switch"><input type="checkbox" id="tail-enabled" /><span>启用尾部提示词</span></label>' +
       '      <div class="set-hint">关掉后所有卡片都不再追加尾部文字。卡片上自己的开关会保留，下次打开总开关仍然按卡片的选择走。</div>' +
       '    </div>' +
+      '    <div class="tail-tabs" id="tail-tabs">' +
+      '      <button type="button" class="tail-tab" data-group="video">视频</button>' +
+      '      <button type="button" class="tail-tab" data-group="image">图片</button>' +
+      '      <span class="tail-tab-hint" id="tail-tab-hint"></span>' +
+      '    </div>' +
       '    <div class="tail-list" id="tail-list"></div>' +
       '    <div class="tail-add"><button type="button" id="tail-add">+ 新增一套</button>' +
       '      <span class="set-hint">可以按风格预先写好多套，生成前在卡片上勾选即可。</span></div>' +
-      '    <div class="tail-preview-note">尾部提示词会自动接在主提示词后面，中间空一行；主提示词里已经含这段文字时不会重复追加。</div>' +
+      '    <div class="tail-preview-note">尾部提示词会自动接在主提示词后面，中间空一行；主提示词里已经含这段文字时不会重复追加。' +
+      '      <b>视频和图片是分开的两组，互不相通</b> —— 图片卡只会用到「图片」这一组里的预设。</div>' +
       '  </div>' +
       '  <div class="modal-foot"><span class="set-saved" id="tail-saved"></span><span class="grow"></span>' +
       '    <button class="ghost" data-close>关闭</button>' +
@@ -491,6 +529,8 @@
     const listEl = mask.querySelector('#tail-list');
     const enabledEl = mask.querySelector('#tail-enabled');
     const savedEl = mask.querySelector('#tail-saved');
+    const tabsEl = mask.querySelector('#tail-tabs');
+    const tabHintEl = mask.querySelector('#tail-tab-hint');
     enabledEl.checked = draft.enabled;
 
     const flash = (text, bad) => {
@@ -498,16 +538,35 @@
       savedEl.className = 'set-saved' + (bad ? ' bad' : '');
     };
 
+    // 当前编辑的那一组（引用，直接改 draft.groups[group]）
+    const groupOf = () => draft.groups[tailGroupOf(tailEditingGroup)];
+
+    const paintTabs = () => {
+      Array.from(tabsEl.querySelectorAll('.tail-tab')).forEach((tab) => {
+        const g = tailGroupOf(tab.dataset.group);
+        const count = draft.groups[g].presets.length;
+        tab.textContent = TAIL_GROUP_META[g].label + (count ? '（' + count + '）' : '');
+        tab.classList.toggle('on', g === tailGroupOf(tailEditingGroup));
+        // 图片卡那一组还没建过预设时给个提示点，免得用户以为坏了
+        tab.classList.toggle('empty', count === 0);
+      });
+      tabHintEl.textContent = TAIL_GROUP_META[tailGroupOf(tailEditingGroup)].hint;
+    };
+
     const render = () => {
+      paintTabs();
       listEl.textContent = '';
-      if (!draft.presets.length) {
+      const group = groupOf();
+      if (!group.presets.length) {
         const empty = document.createElement('div');
         empty.className = 'tail-empty';
-        empty.textContent = '还没有预设。点下面的「+ 新增一套」，先写一套常用的画面风格。';
+        empty.textContent = tailGroupOf(tailEditingGroup) === 'image'
+          ? '「图片」这一组还没有预设。图片卡要的措辞和视频不同，点下面的「+ 新增一套」单独写一套（例如构图 / 画风 / 光影 / 画幅）。'
+          : '还没有预设。点下面的「+ 新增一套」，先写一套常用的画面风格。';
         listEl.appendChild(empty);
         return;
       }
-      draft.presets.forEach((preset, index) => {
+      group.presets.forEach((preset, index) => {
         const item = document.createElement('div');
         item.className = 'tail-item';
         item.dataset.id = preset.id;
@@ -523,14 +582,16 @@
         name.addEventListener('input', () => { preset.name = name.value; });
         head.appendChild(name);
 
-        const isDefault = draft.defaultId === preset.id;
+        const isDefault = group.defaultId === preset.id;
         const def = document.createElement('button');
         def.type = 'button';
         def.className = 'tail-default' + (isDefault ? ' on' : '');
         def.textContent = isDefault ? '默认' : '设为默认';
-        def.title = isDefault ? '新卡片会自动选这套' : '把这套设为新卡片的默认尾部提示词';
+        def.title = isDefault
+          ? '新建' + TAIL_GROUP_META[tailGroupOf(tailEditingGroup)].label + '卡片会自动选这套'
+          : '把这套设为新建' + TAIL_GROUP_META[tailGroupOf(tailEditingGroup)].label + '卡片的默认';
         def.addEventListener('click', () => {
-          draft.defaultId = isDefault ? '' : preset.id;
+          group.defaultId = isDefault ? '' : preset.id;
           render();
         });
         head.appendChild(def);
@@ -541,8 +602,8 @@
         del.textContent = '删除';
         del.title = '删除这套预设；已经引用它的卡片会提示重新选择';
         del.addEventListener('click', () => {
-          draft.presets.splice(index, 1);
-          if (draft.defaultId === preset.id) draft.defaultId = draft.presets.length ? draft.presets[0].id : '';
+          group.presets.splice(index, 1);
+          if (group.defaultId === preset.id) group.defaultId = group.presets.length ? group.presets[0].id : '';
           render();
         });
         head.appendChild(del);
@@ -571,14 +632,25 @@
       });
     };
 
+    // 切换「视频 / 图片」两组
+    tabsEl.addEventListener('click', (event) => {
+      const tab = event.target && event.target.closest ? event.target.closest('.tail-tab') : null;
+      if (!tab) return;
+      tailEditingGroup = tailGroupOf(tab.dataset.group);
+      render();
+    });
+
     mask.querySelector('#tail-add').addEventListener('click', () => {
+      const group = groupOf();
+      const isImage = tailGroupOf(tailEditingGroup) === 'image';
       const preset = {
         id: 'tail_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        name: '新风格 ' + (draft.presets.length + 1),
+        // 名字默认带上分组，避免两边出现两个同名「新风格 1」分不清
+        name: (isImage ? '图片风格 ' : '新风格 ') + (group.presets.length + 1),
         text: '',
       };
-      draft.presets.push(preset);
-      if (!draft.defaultId) draft.defaultId = preset.id;
+      group.presets.push(preset);
+      if (!group.defaultId) group.defaultId = preset.id;
       render();
       const first = listEl.querySelector('.tail-item:last-child .tail-name');
       if (first) first.focus();
@@ -587,10 +659,22 @@
     mask.querySelector('#tail-save').addEventListener('click', async () => {
       const cleaned = normalizeTailPresets({
         enabled: enabledEl.checked,
-        defaultId: draft.defaultId,
-        presets: draft.presets.map((one) => ({ id: one.id, name: one.name, text: one.text })),
+        groups: {
+          video: {
+            defaultId: draft.groups.video.defaultId,
+            presets: draft.groups.video.presets.map((one) => ({ id: one.id, name: one.name, text: one.text })),
+          },
+          image: {
+            defaultId: draft.groups.image.defaultId,
+            presets: draft.groups.image.presets.map((one) => ({ id: one.id, name: one.name, text: one.text })),
+          },
+        },
       });
-      if (!cleaned.presets.some((one) => String(one.text).trim())) {
+      // 只有**两组都空**才拦。只建了视频那组是正常状态（图片可以先不用），
+      // 反过来也一样 —— 不能因为另一组没内容就不让保存。
+      const anyText = cleaned.groups.video.presets.some((one) => String(one.text).trim()) ||
+        cleaned.groups.image.presets.some((one) => String(one.text).trim());
+      if (!anyText) {
         flash('至少要有一套写了内容的尾部提示词', true);
         return;
       }

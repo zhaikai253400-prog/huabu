@@ -15,8 +15,10 @@
   // 视频卡片的三种模式。图片 / 音频没有模式概念，统一归一成空串。
   const MODES = ['reference', 'frames', 'text'];
 
-  // 只有这两种卡片支持尾部提示词（对应前端的 TAIL_KINDS）
-  const TAIL_KINDS = { video: 1, quick: 1 };
+  // 支持尾部提示词的卡片类型：视频卡、快速视频卡、图片卡。
+  // 图片卡和视频卡用**两个互不相通的预设池**（服务端 generate.tailPoolOf
+  // 按 kind 分流，前端 tailGroupOf 同样），所以这里"支持"不等于"共用"。
+  const TAIL_KINDS = { image: 1, video: 1, quick: 1 };
 
   function kindOf(nodeType) {
     const type = String(nodeType || 'image');

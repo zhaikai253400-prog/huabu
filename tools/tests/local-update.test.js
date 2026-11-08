@@ -392,6 +392,72 @@ check('拖动中放宽了小地图重画间隔（松手仍会补画一次）', (
     'endInteraction 不再补画小地图 —— 松手后小地图会停在中途状态');
 });
 
+// ── 图片卡的尾部提示词：卡片 UI 必须按类型取池 ──────────────────────
+//
+// 需求：图片卡也支持尾部提示词，但**图片和视频的预设互不相通**。
+// 服务端侧的护栏在 payload-rules.test.js；这里守前端卡片面板这一侧：
+//   面板下拉框必须只列"自己那一类"的预设，否则就成了"互通"。
+// 实测（真实浏览器）：图片卡的下拉里只有图片池的项，看不到视频那套「3D国漫风格」。
+console.log('\nD10 · 图片卡尾部提示词：前端按类型取池');
+
+check('TAIL_KINDS 里包含 image（否则图片卡根本不会出现这个模块）', () => {
+  const rules = require(path.join(ROOT, 'web', 'assets', 'payload-rules.js'));
+  assert(rules.TAIL_KINDS.image, 'TAIL_KINDS 里没有 image —— 图片卡上不会出现尾部提示词模块');
+});
+
+check('前端有按类型分池的取用函数（tailGroupOf / tailPoolOf）', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  assert(/function tailGroupOf\(/.test(src), '缺少 tailGroupOf —— 没法判断一张卡属于哪个池');
+  assert(/function tailPoolOf\(/.test(src), '缺少 tailPoolOf —— 没法按类型取池');
+  // 图片归 image、其余归 video
+  const fn = /function tailGroupOf\([\s\S]*?\n  \}/.exec(src);
+  assert(fn, '抽不出 tailGroupOf');
+  assert(/'image'/.test(fn[0]) && /'video'/.test(fn[0]),
+    'tailGroupOf 没有把 image 和 video 分开');
+});
+
+check('卡片下拉框列的是**自己池子**的预设，不是全部预设', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  const block = /function buildTailCardBlock\([\s\S]*?\n  \}/.exec(src);
+  assert(block, '抽不出 buildTailCardBlock');
+  // 关键：遍历的是 pool.presets，不能是"全部预设"
+  assert(/pool\.presets\.forEach/.test(block[0]),
+    'buildTailCardBlock 不再遍历 pool.presets —— 会把另一类的预设也列出来，等于互通了');
+  assert(!/cfg\.presets\.forEach/.test(block[0]),
+    'buildTailCardBlock 又在遍历全部预设了 —— 图片卡会看到视频那套');
+  // 默认预设也要按池取
+  assert(/tailPresetById\(node, pool\.defaultId\)/.test(block[0]),
+    '下拉里的"跟随默认"没有按类型取默认预设');
+});
+
+check('新卡片按自己的类型拿默认尾巴（图片卡不会拿到视频的默认）', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'canvas.js'), 'utf8');
+  assert(/defaultTailChoice\(node\)/.test(src),
+    '新建卡片时没有把 node 传给 defaultTailChoice —— 会拿到另一类的默认预设');
+});
+
+check('设置面板分成「视频 / 图片」两组，且保存时两组都带上', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'ui.js'), 'utf8');
+  assert(/data-group="video"/.test(src) && /data-group="image"/.test(src),
+    '设置面板没有视频 / 图片两个分页');
+  assert(/TAIL_GROUP_META/.test(src), '缺少分组文案');
+  const save = /#tail-save'\)\.addEventListener[\s\S]*?\n    \}\);/.exec(src);
+  assert(save, '抽不出保存处理');
+  assert(/groups:\s*\{/.test(save[0]), '保存时没有带上 groups（会把分组结构写丢）');
+  // 只有两组都空才拦 —— 否则"只建了视频组"就无法保存了
+  assert(/anyText/.test(save[0]),
+    '保存校验没有改成"两组都空才拦" —— 只建了视频组时会不让保存');
+});
+
+check('设置面板能读懂老结构（扁平 presets → 视频池）', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'ui.js'), 'utf8');
+  const fn = /function normalizeTailPresets\([\s\S]*?\n  \}/.exec(src);
+  assert(fn, '抽不出 normalizeTailPresets');
+  assert(/raw\.groups/.test(fn[0]), '前端归一没有处理 groups 结构');
+  assert(/groups\.video = one\(raw\)/.test(fn[0]),
+    '前端归一没有把老结构迁进 video 池 —— 服务端还没保存过时面板会显示空');
+});
+
 console.log('\n' + '─'.repeat(52));
 if (fail) {
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');

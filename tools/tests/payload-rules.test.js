@@ -187,11 +187,17 @@ check('平铺值优先于 params 里的同名值', () => {
   eq(out.sizeKey, '4K');
 });
 
-check('图片卡：mode 为空串，且不带尾部选择', () => {
+// 【需求变更】原来是"图片卡不带尾部选择"，现在图片卡也要有尾部提示词了。
+// 注意 `mode` 那一行**必须保留** —— 它是"图片不接受 mode"的护栏，
+// 而且 normalizeMode 曾经错误地借用 isTailKind 当判据，正是这条断言把那事挡住的。
+check('图片卡：mode 仍为空串，且**现在可以**带尾部选择', () => {
   const out = rules.assemble({ nodeType: 'image', params: { mode: 'reference' }, tailPrompt: { enabled: true } });
   eq(out.kind, 'image');
-  eq(out.mode, '');
-  eq(out.tailPrompt.enabled, false, '图片卡不该带尾部选择');
+  eq(out.mode, '', '图片卡的 mode 必须永远是空串');
+  eq(out.tailPrompt.enabled, true, '图片卡现在应当可以带尾部选择');
+  // 反过来也要守住：不支持的类型仍然必须被关掉
+  const audio = rules.assemble({ nodeType: 'audio', tailPrompt: { enabled: true } });
+  eq(audio.tailPrompt.enabled, false, '音频卡不该带尾部选择');
 });
 
 check('视频卡：保留尾部选择；快速卡也算支持尾部', () => {
@@ -315,6 +321,117 @@ check('canvas.html 引了共享规则脚本，且在 canvas.js 之前', () => {
   const canvasAt = html.indexOf('/assets/canvas.js');
   assert(rulesAt >= 0, 'html 里没有引 payload-rules.js');
   assert(canvasAt < 0 || rulesAt < canvasAt, 'payload-rules.js 必须排在 canvas.js 之前');
+});
+
+// ── 图片卡尾部提示词 + 两个池子互不相通 ─────────────────────────────
+//
+// 需求：给图片卡也加尾部提示词，但**图片和视频的预设互不相通**
+//（视频那套会写「无 BGM、嘴型不动」，塞进图片请求是噪声）。
+//
+// 这里守三件事：
+//   ① 图片卡确实进了"支持尾部"的清单
+//   ② 图片的 mode 仍然永远是空串（与①解耦，见上面那条反向断言）
+//   ③ 服务端按 kind 取到的是**不同的池子**
+console.log('\nC5 · 图片卡尾部提示词与"两个池子不互通"');
+
+check('图片卡进了支持尾部的清单，音频 / 其他类型没有', () => {
+  assert(rules.isTailKind('image'), '图片卡应当支持尾部提示词');
+  assert(rules.isTailKind('video'), '视频卡应当支持尾部提示词');
+  assert(rules.isTailKind('quick'), '快速视频应当支持尾部提示词');
+  assert(!rules.isTailKind('audio'), '音频卡不该支持尾部提示词');
+  assert(!rules.isTailKind('zone'), '区域不该支持尾部提示词');
+  assert(!rules.isTailKind('generate'), '生成组不该支持尾部提示词');
+});
+
+check('assemble 对图片卡保留尾部选择，且不影响 mode', () => {
+  const on = rules.assemble({ nodeType: 'image', tailPrompt: { enabled: true, presetId: 'p-img' } });
+  eq(on.tailPrompt.enabled, true);
+  eq(on.tailPrompt.presetId, 'p-img');
+  eq(on.mode, '', '图片的 mode 必须仍是空串');
+  const off = rules.assemble({ nodeType: 'image', tailPrompt: { enabled: false } });
+  eq(off.tailPrompt.enabled, false);
+  eq(off.tailPrompt.presetId, '');
+});
+
+check('**服务端按 kind 取到不同的池子**（图片 / 视频不互通）', () => {
+  const configStore = require(path.join(SERVER, 'config.js'));
+  const cfg = configStore.normalizeTailPrompts({
+    enabled: true,
+    groups: {
+      video: { defaultId: 'v1', presets: [{ id: 'v1', name: '视频风', text: '视频专用尾部' }] },
+      image: { defaultId: 'i1', presets: [{ id: 'i1', name: '图片风', text: '图片专用尾部' }] },
+    },
+  });
+  const vPool = configStore.tailPoolOfConfig(cfg, 'video');
+  const iPool = configStore.tailPoolOfConfig(cfg, 'image');
+  eq(vPool.defaultId, 'v1');
+  eq(iPool.defaultId, 'i1');
+  eq(vPool.presets.length, 1);
+  eq(iPool.presets.length, 1);
+  // 内容必须真的不同 —— 否则"不互通"没法验证
+  assert(vPool.presets[0].text !== iPool.presets[0].text, '两个池子内容相同，测不出互通与否');
+  // 快速视频算视频
+  eq(configStore.tailPoolOfConfig(cfg, 'quick').defaultId, 'v1');
+  // 给错值退回视频池，不返回 undefined
+  eq(configStore.tailPoolOfConfig(cfg, 'nonsense').defaultId, 'v1');
+  eq(configStore.tailPoolOfConfig(null, 'image').presets.length, 0);
+});
+
+check('**老配置（扁平 presets）读时迁进视频池，图片池留空**', () => {
+  const configStore = require(path.join(SERVER, 'config.js'));
+  const migrated = configStore.normalizeTailPrompts({
+    enabled: true,
+    defaultId: 'old1',
+    presets: [{ id: 'old1', name: '3D国漫风格', text: '音频规则：无 BGM…' }],
+  });
+  eq(migrated.groups.video.presets.length, 1, '老预设应当迁进视频池');
+  eq(migrated.groups.video.defaultId, 'old1');
+  eq(migrated.groups.image.presets.length, 0, '图片池必须留空');
+  // 顶层兼容视图 = video 池（老读写路径行为不变）
+  eq(migrated.presets.length, 1);
+  eq(migrated.defaultId, 'old1');
+});
+
+// 这一条守的是一个**很隐蔽、差点让用户丢掉预设**的坑：
+// `config.load()` 是 `merge(defaultConfig(), 磁盘配置)` 之后再归一的。
+// 新默认值里已经有空的 groups，而磁盘上还是老结构（只有 presets）——
+// merge 出来的对象**同时**带"空 groups"和"有内容的 presets"。
+// 若只判断 `raw.groups` 在不在，就会走"已分组"分支、把老预设整个丢掉。
+check('反向断言：混了空 groups 的老配置，预设不能被丢掉', () => {
+  const configStore = require(path.join(SERVER, 'config.js'));
+  const merged = configStore.normalizeTailPrompts({
+    enabled: true,
+    // 这两项来自新的 defaultConfig()（空的）
+    groups: { video: { defaultId: '', presets: [] }, image: { defaultId: '', presets: [] } },
+    // 这两项来自磁盘上的老配置（有内容）
+    defaultId: 'old1',
+    presets: [{ id: 'old1', name: '3D国漫风格', text: '音频规则：无 BGM…' }],
+  });
+  eq(merged.groups.video.presets.length, 1,
+    '老预设被"空 groups"挤掉了 —— load() 会因此丢掉用户已有的尾部提示词');
+  eq(merged.groups.video.defaultId, 'old1');
+  eq(merged.groups.image.presets.length, 0);
+});
+
+check('服务端 composeSubmission 按 kind 拼各自的尾部', () => {
+  const generate = require(path.join(SERVER, 'generate.js'));
+  const configStore = require(path.join(SERVER, 'config.js'));
+  const cfg = configStore.normalizeTailPrompts({
+    enabled: true,
+    groups: {
+      video: { defaultId: 'v1', presets: [{ id: 'v1', name: '视频风', text: '视频尾部' }] },
+      image: { defaultId: 'i1', presets: [{ id: 'i1', name: '图片风', text: '图片尾部' }] },
+    },
+  });
+  const payload = { prompt: '主体', tailPrompt: { enabled: true, presetId: '' } };
+  eq(generate.composeSubmission(cfg, payload, 'video').apiPrompt, '主体\n\n视频尾部');
+  eq(generate.composeSubmission(cfg, payload, 'image').apiPrompt, '主体\n\n图片尾部');
+  // 图片卡引用视频池的预设 → 必须报错，不能静默用错池
+  let threw = '';
+  try {
+    generate.resolveTail(cfg, { tailPrompt: { enabled: true, presetId: 'v1' } }, 'image');
+  } catch (e) { threw = e.message; }
+  assert(/已删除|重新选/.test(threw), '图片卡引用视频池预设时应当报错，实际：' + threw);
 });
 
 console.log('\n' + '─'.repeat(52));

@@ -5347,6 +5347,53 @@ input::placeholder { color: var(--placeholder); }
   cursor: pointer;
 }
 
+/* 视频 / 图片两组预设的分页条。
+   图片和视频的预设互不相通，所以要先让用户一眼看到"现在在编辑哪一组"。 */
+.tail-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tail-tab {
+  padding: 5px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.88em;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.tail-tab:hover { border-color: var(--accent); color: var(--accent); }
+
+.tail-tab.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* 这一组一套预设都没有：给个空心提示，避免用户以为面板坏了 */
+.tail-tab.empty:not(.on) {
+  border-style: dashed;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.tail-tab-hint {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 0.82em;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
 .tail-switch input {
   width: 15px;
   height: 15px;

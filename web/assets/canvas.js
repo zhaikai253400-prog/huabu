@@ -352,22 +352,54 @@
   // 支持尾部的类型清单同样从共享规则里取，避免两处清单各写一份慢慢走偏
   const TAIL_KINDS = window.CanvasPayloadRules ? window.CanvasPayloadRules.TAIL_KINDS : { video: 1, quick: 1 };
 
+  // 尾部提示词分两个池子，互不相通：视频卡用 video、图片卡用 image。
+  // quick（快速视频）在接口眼里就是视频，所以归 video。
+  // 服务端按同样的规则分池（generate.tailPoolOf），两边必须一致。
+  function tailGroupOf(nodeOrType) {
+    const type = typeof nodeOrType === 'string' ? nodeOrType : String((nodeOrType && nodeOrType.type) || '');
+    return type === 'image' ? 'image' : 'video';
+  }
+
+  // 取整个尾部提示词配置（含两个池子）。
+  // 老配置（扁平的 presets/defaultId）在这里被当作 video 池 —— 那时只有视频
+  // 和快速视频支持尾部提示词，所以那些预设本来就属于视频池。
+  // 服务端 normalizeTailPrompts 也会做同样的迁移，这里是为了在设置还没保存过、
+  // 前端直接读到老结构时也能正确显示。
   function tailConfig() {
-    const fallback = { enabled: false, defaultId: '', presets: [] };
+    const fallback = {
+      enabled: false,
+      groups: { video: { defaultId: '', presets: [] }, image: { defaultId: '', presets: [] } },
+    };
     if (!window.UITheme) return fallback;
     const raw = window.UITheme.tailPrompts();
     if (!raw || typeof raw !== 'object') return fallback;
-    return {
-      enabled: raw.enabled !== false,
-      defaultId: String(raw.defaultId || ''),
-      presets: Array.isArray(raw.presets) ? raw.presets : [],
+    const groups = { video: { defaultId: '', presets: [] }, image: { defaultId: '', presets: [] } };
+    const pick = (group, src) => {
+      const value = src && typeof src === 'object' ? src : {};
+      return {
+        defaultId: String(value.defaultId || ''),
+        presets: Array.isArray(value.presets) ? value.presets : [],
+      };
     };
+    if (raw.groups && typeof raw.groups === 'object') {
+      groups.video = pick('video', raw.groups.video);
+      groups.image = pick('image', raw.groups.image);
+    } else {
+      // 老结构 → 全部归 video 池（与服务端迁移一致）
+      groups.video = pick('video', raw);
+    }
+    return { enabled: raw.enabled !== false, groups: groups };
   }
 
-  function tailPresetById(id) {
+  // 取某一类卡片的池子
+  function tailPoolOf(nodeOrType) {
+    return tailConfig().groups[tailGroupOf(nodeOrType)] || { defaultId: '', presets: [] };
+  }
+
+  function tailPresetById(nodeOrType, id) {
     const key = String(id || '');
     if (!key) return null;
-    return tailConfig().presets.find((item) => item && String(item.id) === key) || null;
+    return tailPoolOf(nodeOrType).presets.find((item) => item && String(item.id) === key) || null;
   }
 
   function tailPresetName(preset) {
@@ -385,16 +417,20 @@
     return { enabled: raw.enabled !== false, presetId: String(raw.presetId || '') };
   }
 
-  function defaultTailChoice() {
+  // 新卡片的初始尾部选择：跟随**自己那一类**的默认预设
+  function defaultTailChoice(nodeOrType) {
     const cfg = tailConfig();
-    if (!cfg.enabled || !cfg.defaultId || !tailPresetById(cfg.defaultId)) return { enabled: false, presetId: '' };
+    const pool = tailPoolOf(nodeOrType);
+    if (!cfg.enabled || !pool.defaultId || !tailPresetById(nodeOrType, pool.defaultId)) {
+      return { enabled: false, presetId: '' };
+    }
     return { enabled: true, presetId: '' };
   }
 
-  function tailPresetForChoice(choice) {
-    const cfg = tailConfig();
-    const id = String((choice && choice.presetId) || cfg.defaultId || '');
-    return id ? tailPresetById(id) : null;
+  function tailPresetForChoice(nodeOrType, choice) {
+    const pool = tailPoolOf(nodeOrType);
+    const id = String((choice && choice.presetId) || pool.defaultId || '');
+    return id ? tailPresetById(nodeOrType, id) : null;
   }
 
   // 保证卡片数据字段齐全，老数据也能直接打开
@@ -4100,18 +4136,27 @@
   // 卡片只记「用哪一套」，正文仍在设置里；这样改一套预设，所有引用它的卡片一起生效。
   function tailHintText(node, choice) {
     const cfg = tailConfig();
+    const pool = tailPoolOf(node);
+    const isImageCard = tailGroupOf(node) === 'image';
     if (!cfg.enabled) return '尾部提示词总开关已关闭：所有卡片暂时都不追加，打开总开关后这张卡片的设置会自动恢复。';
-    if (!cfg.presets.length) return '还没有尾部提示词预设，点「管理预设」先写一套常用风格。';
+    // 图片卡和视频卡各有各的预设池，所以提示语要说清"你这一类的池子是空的"
+    if (!pool.presets.length) {
+      return isImageCard
+        ? '图片卡还没有尾部提示词预设，点「管理预设」在「图片」那一栏写一套。图片与视频的预设是分开的。'
+        : '还没有尾部提示词预设，点「管理预设」先写一套常用风格。';
+    }
     if (!choice.enabled) return '这张卡片不会追加尾部提示词。勾上左边的开关即可启用。';
-    const preset = tailPresetForChoice(choice);
+    const preset = tailPresetForChoice(node, choice);
     if (choice.presetId && !preset) return '这张卡片原来引用的预设已经删除了，请重新选一套。';
     if (!preset) return '当前没有默认预设，请在下拉框里选一套，或者到「管理预设」里把常用的一套设为默认。';
     if (!String(preset.text || '').trim()) return '「' + tailPresetName(preset) + '」还没有正文，提交时不会追加。';
-    return '本次提交会追加「' + tailPresetName(preset) + '」 · ' + String(preset.text).trim().length + ' 字' + (choice.presetId ? '' : '（跟随全局默认）');
+    return '本次提交会追加「' + tailPresetName(preset) + '」 · ' + String(preset.text).trim().length + ' 字' +
+      (choice.presetId ? '' : (isImageCard ? '（跟随图片默认）' : '（跟随视频默认）'));
   }
 
   function buildTailCardBlock(node, data) {
     const cfg = tailConfig();
+    const pool = tailPoolOf(node);
     const choice = cardTailChoice(node);
     const wrap = document.createElement('div');
     wrap.className = 'tail-card';
@@ -4124,7 +4169,7 @@
     const check = document.createElement('input');
     check.type = 'checkbox';
     check.checked = choice.enabled;
-    check.disabled = isLocked(node) || !cfg.presets.length;
+    check.disabled = isLocked(node) || !pool.presets.length;
     check.title = isLocked(node) ? '卡片已锁定，先解锁再改' : '这张卡片提交时要不要追加尾部提示词';
     const name = document.createElement('span');
     name.textContent = '尾部提示词';
@@ -4157,12 +4202,15 @@
       if (picked) opt.selected = true;
       select.appendChild(opt);
     };
-    const defPreset = tailPresetById(cfg.defaultId);
-    addOption('', '跟随全局默认' + (defPreset ? '（' + tailPresetName(defPreset) + '）' : cfg.defaultId ? '（原默认已删除）' : '（未设置）'), !choice.presetId);
-    if (choice.presetId && !tailPresetById(choice.presetId)) {
+    // 默认项按**自己那一类**的池子取：图片卡跟的是图片默认，视频卡跟的是视频默认
+    const defPreset = tailPresetById(node, pool.defaultId);
+    addOption('', '跟随' + (tailGroupOf(node) === 'image' ? '图片' : '视频') + '默认' +
+      (defPreset ? '（' + tailPresetName(defPreset) + '）' : pool.defaultId ? '（原默认已删除）' : '（未设置）'), !choice.presetId);
+    // 只列自己池子里的预设 —— 图片卡看不到视频那套，反之亦然（这就是"不互通"）
+    if (choice.presetId && !tailPresetById(node, choice.presetId)) {
       addOption(choice.presetId, '原预设已删除，请重新选择', true);
     }
-    cfg.presets.forEach((preset) => {
+    pool.presets.forEach((preset) => {
       if (!preset || !preset.id) return;
       addOption(String(preset.id), tailPresetName(preset), String(choice.presetId) === String(preset.id));
     });
@@ -4181,7 +4229,10 @@
       if (isLocked(node)) return;
       pushHistory();
       let presetId = choice.presetId;
-      if (check.checked && !presetId && !cfg.defaultId && cfg.presets.length) presetId = String(cfg.presets[0].id || '');
+      // 勾上但还没选具体预设时，挑**自己池子里**的第一套兜底（别拿到另一类的）
+      if (check.checked && !presetId && !pool.defaultId && pool.presets.length) {
+        presetId = String(pool.presets[0].id || '');
+      }
       data.tailPrompt = { enabled: check.checked, presetId: presetId };
       scheduleSave();
       refreshNode(node);
@@ -4327,7 +4378,7 @@
     // 尾部提示词：那一版用的预设若还在，就一起换过去（预设被删了就保留现在的，不乱清）
     const tailPresetId = String((entry && entry.tailPresetId) || '');
     const tailNext =
-      supportsTail(node) && tailPresetId && tailPresetById(tailPresetId) &&
+      supportsTail(node) && tailPresetId && tailPresetById(node, tailPresetId) &&
       String((data.tailPrompt && data.tailPrompt.presetId) || '') !== tailPresetId
         ? tailPresetId
         : '';
@@ -11295,7 +11346,8 @@
       createdAt: Date.now(),
     };
     if (!(opts && opts.suppressTail) && TAIL_KINDS[type]) {
-      const seed = defaultTailChoice();
+      // 按新建卡片的**类型**取默认：新图片卡默认跟随图片池的默认预设
+      const seed = defaultTailChoice(node);
       if (seed.enabled) node.data.tailPrompt = seed;
     }
     // 新卡排在同类素材的最后，入画布后再统一重排一次，保证号是连续的

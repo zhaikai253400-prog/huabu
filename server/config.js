@@ -189,14 +189,30 @@ function tailPoolOf(group, rawGroup) {
 // **读时迁移**（重要）：老配置是扁平的 `{enabled, defaultId, presets}`，
 // 那时只有视频 / 快速视频支持尾部提示词，所以那些预设**全部归入 video 池**。
 // 这样用户既有的「3D国漫风格」不会被塞到图片卡上。
+//
+// 判定"有没有分过组"不能只看 `raw.groups` 在不在 —— 这里踩过一个很隐蔽的坑：
+// `load()` 是先 `merge(defaultConfig(), 磁盘配置)` 再归一的。新默认值里已经有
+// 空的 `groups`，而磁盘上还是老结构（只有 presets）—— merge 出来的对象
+// **同时**带着"空的 groups"和"有内容的 presets"。若只看 groups 存在与否，
+// 就会走"已分组"分支、**把用户真实的预设整个丢掉**（实测：你那套 335 字的
+// 「3D国漫风格」直接消失）。所以判据是"**有没有任何一组真的有预设**"。
+function tailPromptsHasRealGroups(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  const g = raw.groups;
+  if (!g || typeof g !== 'object') return false;
+  return TAIL_GROUPS.some((name) => {
+    const one = g[name];
+    return Boolean(one && typeof one === 'object' && Array.isArray(one.presets) && one.presets.length);
+  });
+}
+
 function normalizeTailPrompts(value) {
   const raw = value && typeof value === 'object' ? value : {};
   const enabled = raw.enabled !== false;
   const groups = {};
 
-  // 已经分过组：按新结构读
-  const hasGroups = raw.groups && typeof raw.groups === 'object';
-  if (hasGroups) {
+  if (tailPromptsHasRealGroups(raw)) {
+    // 确实已经分过组：按新结构读
     TAIL_GROUPS.forEach((g) => { groups[g] = tailPoolOf(g, raw.groups[g]); });
   } else {
     // 老结构（扁平）→ 全部迁进 video 池；image 池初始为空

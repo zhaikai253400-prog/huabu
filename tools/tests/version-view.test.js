@@ -103,7 +103,13 @@ const sandbox = {
   scheduleSave: function () {},
   // 尾部块只有 video / quick 支持；沙箱里没有真实卡片，用它给个开关
   supportsTail: function (node) { return node.type === 'video' || node.type === 'quick'; },
-  tailPresetById: function (id) { return String(id) === 'tail-missing' ? null : { id: String(id), name: '预设' + id }; },
+  // 尾部分两个池子（视频 / 图片），取预设要先给"哪一类"。
+  // 这里只关心"这个 id 存不存在"，不区分池子。
+  tailPresetById: function (nodeOrType, id) { return String(id) === 'tail-missing' ? null : { id: String(id), name: '预设' + id }; },
+  // 版本回滚那条路会检查"这个预设还在不在**这一类的池子**里"，
+  // 沙箱里给个最小实现：video 池有 tail-old/tail-keep 并被 tail-missing 之外的都算在
+  tailPoolOf: function () { return { defaultId: '', presets: [] }; },
+  tailGroupOf: function () { return 'video'; },
   // 测试模式下没有渠道配置，modelSpecOf 返回 null —— 这也是真实代码在没有渠道时的行为
   modelSpecOf: function () { return null; },
   console: console,
