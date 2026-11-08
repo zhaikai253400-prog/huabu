@@ -152,6 +152,13 @@
     root.setAttribute('data-theme', current.theme === 'dark' ? 'dark' : 'light');
   }
 
+  // 尾部预设的结构版本。前端保存前跟服务端给的号比对：
+  // 不一致说明"页面是新的、服务进程还是旧的"（或反之）。
+  // 这种时候**不能盲目保存** —— 2026-11-08 就是这么把用户那套 335 字的预设清空的：
+  // 新前端发 {enabled, groups}，旧服务端只认扁平 presets，于是读成空并落盘。
+  const TAIL_SCHEMA_VERSION = 2;
+  let tailSchemaMismatch = false;
+
   function applyStatus(status) {
     if (!status) return;
     apply(status.ui || (status.defaults && status.defaults.ui));
@@ -159,6 +166,8 @@
     if (status.shortcuts) shortcuts = Object.assign({}, DEFAULT_SHORTCUTS, status.shortcuts);
     submitCompress = { enabled: !(status.submitCompress && status.submitCompress.enabled === false) };
     tailPrompts = normalizeTailPresets(status.tailPrompts);
+    // 服务端没报版本号 = 它是改动前的旧进程；报了但不是 2 = 结构对不上
+    tailSchemaMismatch = Number(status.tailSchemaVersion) !== TAIL_SCHEMA_VERSION;
     if (status.lan && typeof status.lan === 'object') {
       lan = {
         enabled: status.lan.enabled === true,
@@ -508,6 +517,10 @@
       '      <label class="tail-switch"><input type="checkbox" id="tail-enabled" /><span>启用尾部提示词</span></label>' +
       '      <div class="set-hint">关掉后所有卡片都不再追加尾部文字。卡片上自己的开关会保留，下次打开总开关仍然按卡片的选择走。</div>' +
       '    </div>' +
+      // 版本不一致的红条：默认不显示，打开面板时按实际状态决定
+      '    <div class="tail-version-warn" id="tail-version-warn" hidden>' +
+      '      服务端还是旧版本（页面已经更新了）。这时候保存会把预设写空，请先<b>重启画布服务</b>，再刷新本页。' +
+      '    </div>' +
       '    <div class="tail-tabs" id="tail-tabs">' +
       '      <button type="button" class="tail-tab" data-group="video">视频</button>' +
       '      <button type="button" class="tail-tab" data-group="image">图片</button>' +
@@ -532,6 +545,10 @@
     const tabsEl = mask.querySelector('#tail-tabs');
     const tabHintEl = mask.querySelector('#tail-tab-hint');
     enabledEl.checked = draft.enabled;
+    // 版本不一致时直接把红条亮出来（保存按钮也会拒绝），
+    // 免得用户点半天才发现存不上、或者更糟——把预设写空。
+    const warnEl = mask.querySelector('#tail-version-warn');
+    if (warnEl && tailSchemaMismatch) warnEl.hidden = false;
 
     const flash = (text, bad) => {
       savedEl.textContent = text;
@@ -657,6 +674,12 @@
     });
 
     mask.querySelector('#tail-save').addEventListener('click', async () => {
+      // 版本不一致时**拦在保存之前**：这时字段名对不上，写下去会把预设清空。
+      // 让用户先重启服务，比让他丢一次数据强。
+      if (tailSchemaMismatch) {
+        flash('服务端还是旧版本，请先重启画布服务再保存（否则会把预设写空）', true);
+        return;
+      }
       const cleaned = normalizeTailPresets({
         enabled: enabledEl.checked,
         groups: {

@@ -434,6 +434,75 @@ check('服务端 composeSubmission 按 kind 拼各自的尾部', () => {
   assert(/已删除|重新选/.test(threw), '图片卡引用视频池预设时应当报错，实际：' + threw);
 });
 
+// ── 事故回归：版本错配时**不能把用户预设写空**（2026-11-08 真实事故）────
+//
+// 经过：服务进程 17:53 启动（改动前的代码），浏览器刷新拿到**新前端**
+//（静态文件现读磁盘）。新前端保存时发 {enabled, groups:{video,image}}，
+// 而旧服务端的 normalizeTailPrompts 只认扁平的 raw.presets ——
+// 于是把用户的预设读成空并落盘，那套 **335 字的「3D国漫风格」被清空**。
+//
+// 加固两条，这里都守住：
+//   ① 服务端有 tailPromptsShapeOf() 能分辨提交的形状（groups / flat / none）
+//   ② 有 TAIL_SCHEMA_VERSION 供前端判断"是否需要重启服务"
+// 真正的写盘拦截在 index.js 的 /api/settings 里（见 .tmp-test/safety-net-e2e.js 的端到端验证）。
+console.log('\nC5 · 事故回归：版本错配不得清空用户预设');
+
+check('能分辨尾部预设提交的形状（groups / flat / none）', () => {
+  const configStore = require(path.join(SERVER, 'config.js'));
+  const shape = configStore.tailPromptsShapeOf;
+  assert(typeof shape === 'function', '缺少 tailPromptsShapeOf —— 无法识别旧形状的提交');
+  eq(shape({ groups: { video: { presets: [] } } }), 'groups', '新结构');
+  eq(shape({ presets: [] }), 'flat', '老结构');
+  eq(shape({ enabled: true, defaultId: '', presets: [] }), 'flat', '旧代码写出来的空对象');
+  eq(shape(undefined), 'none', '没这个字段');
+  eq(shape('nonsense'), 'none', '垃圾值');
+});
+
+check('导出了尾部预设的结构版本号（前端据此提示重启）', () => {
+  const configStore = require(path.join(SERVER, 'config.js'));
+  const v = configStore.TAIL_SCHEMA_VERSION;
+  assert(Number.isFinite(v) && v >= 2,
+    'TAIL_SCHEMA_VERSION 应当是 ≥2 的数字，实际 ' + JSON.stringify(v));
+});
+
+check('**旧形状 + 空内容，命中"会被当作清空"的判据**（安全网的条件）', () => {
+  const configStore = require(path.join(SERVER, 'config.js'));
+  // index.js 的拦截条件是：磁盘上有预设 && 提交归一后为空 && 形状不是 groups
+  const incoming = configStore.tailPromptsShapeOf({ enabled: true, defaultId: '', presets: [] });
+  const normalized = configStore.normalizeTailPrompts({ enabled: true, defaultId: '', presets: [] });
+  const afterCount = normalized.groups.video.presets.length + normalized.groups.image.presets.length;
+  assert(incoming !== 'groups', '旧形状应当不是 groups');
+  eq(afterCount, 0, '旧形状空提交归一后确实是 0 套');
+  // 三个条件同时成立 → index.js 会返回 409 拒绝保存
+});
+
+check('**新形状即使为空也不算"清空式保存"**（用户真心清空要放行）', () => {
+  const configStore = require(path.join(SERVER, 'config.js'));
+  const clearBody = {
+    enabled: true,
+    groups: { video: { defaultId: '', presets: [] }, image: { defaultId: '', presets: [] } },
+  };
+  const incoming = configStore.tailPromptsShapeOf(clearBody);
+  eq(incoming, 'groups', '新前端一律发 groups —— 所以它清空是真心想清空');
+  const normalized = configStore.normalizeTailPrompts(clearBody);
+  eq(normalized.groups.video.presets.length, 0);
+  eq(normalized.groups.image.presets.length, 0);
+  // 形状是 groups → index.js 不会拦，用户能正常清空（安全网不把人锁死）
+});
+
+check('服务端 /api/status 会报出结构版本号', () => {
+  const src = fs.readFileSync(path.join(SERVER, 'index.js'), 'utf8');
+  assert(/tailSchemaVersion:\s*configStore\.TAIL_SCHEMA_VERSION/.test(src),
+    '/api/status 没有报 tailSchemaVersion —— 前端无法判断是否需要重启服务');
+});
+
+check('/api/settings 对"旧形状空提交"有拒绝分支', () => {
+  const src = fs.readFileSync(path.join(SERVER, 'index.js'), 'utf8');
+  assert(/incoming !== 'groups'/.test(src),
+    '/api/settings 缺少"旧形状 + 空内容"的拒绝分支 —— 事故会重演');
+  assert(/409/.test(src), '拒绝时应当返回 409');
+});
+
 console.log('\n' + '─'.repeat(52));
 console.log(fail === 0 ? '全部通过：' + pass + ' 项' : '通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 console.log('─'.repeat(52) + '\n');

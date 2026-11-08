@@ -378,6 +378,9 @@ function statusPayload() {
     shortcuts: config.shortcuts,
     submitCompress: config.submitCompress,
     tailPrompts: config.tailPrompts,
+    // 尾部预设的结构版本：前端拿它跟自己的比对，不一致就提示"服务需要重启"。
+    // 这是 2026-11-08 那次"预设被清空"事故的防线之一 —— 见 config.js 的注释。
+    tailSchemaVersion: configStore.TAIL_SCHEMA_VERSION,
     // 局域网访问：开关 + 可供另一台电脑直接输入的地址（只列真实网卡，不含回环 / 自动地址）
     lan: {
       enabled: Boolean(config.lan && config.lan.enabled),
@@ -654,7 +657,37 @@ async function handleApi(req, res, pathname, query) {
       log('提交压缩已' + (config.submitCompress.enabled ? '打开' : '关闭'));
     }
     if (body.tailPrompts !== undefined) {
-      config.tailPrompts = configStore.normalizeTailPrompts(body.tailPrompts);
+      // **安全网**：拒绝"会把已有预设清空"的保存。
+      //
+      // 背景（2026-11-08 的真实事故）：服务进程跑的是旧代码、页面是新前端时，
+      // 新前端发 {enabled, groups:{...}}，旧服务端只认扁平 raw.presets，
+      // 于是把用户的预设读成空并落盘 —— 那套 335 字的预设就没了。
+      //
+      // 判据：这次提交**没有任何可识别的预设**，而磁盘上**原本有** →
+      // 这几乎一定是"两端字段对不上"，而不是用户真的想全删。
+      // 这种情况宁可报错让用户重开，也不能安静地把内容抹掉。
+      // 用户真要清空，可以先删掉预设的正文内容（那样服务端会正常接受）。
+      const beforeCount = (function () {
+        const v = configStore.tailPoolOfConfig(config, 'video');
+        const i = configStore.tailPoolOfConfig(config, 'image');
+        return v.presets.length + i.presets.length;
+      })();
+      const incoming = configStore.tailPromptsShapeOf(body.tailPrompts);
+      const normalized = configStore.normalizeTailPrompts(body.tailPrompts);
+      const afterCount = normalized.groups.video.presets.length + normalized.groups.image.presets.length;
+      // 只有"**旧形状**（没有 groups）+ 空内容"才是版本错配的特征 ——
+      // 新前端一律发 groups，所以它清空预设是**真心想清空**，必须放行。
+      // 这样安全网既能拦住事故，又不会把用户锁死。
+      if (beforeCount > 0 && afterCount === 0 && incoming !== 'groups') {
+        log('拒绝了这次尾部提示词保存：提交是旧形状（' + incoming + '）且没有任何预设，' +
+          '而当前有 ' + beforeCount + ' 套。为避免误清空，没有写入。');
+        return sendJson(res, 409, {
+          error: '这次提交的格式是旧版的，里面没有带任何尾部提示词预设，但当前已有 ' + beforeCount +
+            ' 套。为避免把你的预设清空，这次没有保存。' +
+            '这通常是因为页面已经更新、而画布服务还是旧进程 —— 请重启一下画布服务再试。',
+        });
+      }
+      config.tailPrompts = normalized;
       changed.push('尾部提示词');
       // 分两个池子了，日志要把两边都报出来，否则"只有 1 套"会让人以为图片那套没存上
       const vPool = configStore.tailPoolOfConfig(config, 'video');

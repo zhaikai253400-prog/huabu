@@ -155,6 +155,28 @@ const TAIL_MAX_TEXT = 20000;
 // 对视频也未必合适。所以从数据结构上就分开，卡片只在自己的池子里选。
 const TAIL_GROUPS = ['video', 'image'];
 
+// 尾部预设的**结构版本**。前端保存前会跟它比对：
+// 不一致说明"页面是新的、服务进程是旧的"（或反之），这时**不要写盘**，
+// 而应提示用户重启服务。
+//
+// 为什么需要这个：2026-11-08 出过一次真实事故 ——
+//   · 服务进程 17:53 启动（跑改动前的代码）
+//   · 浏览器刷新拿到的是新前端（静态文件现读磁盘）
+//   · 新前端发 {enabled, groups:{video,image}}，老服务端只认扁平的 raw.presets
+//   · 老代码把 presets 读成空 → **用户那套 335 字的预设被清空**
+// 两个版本都能"正常跑"，却在交界处悄悄毁数据。有了版本号就能在写盘前拦住。
+const TAIL_SCHEMA_VERSION = 2;
+
+// 判断一份 tailPrompts 提交"是什么形状"。用于区分：
+//   groups —— 新结构（带 groups 字段）
+//   flat   —— 老结构（只有顶层 presets），或老代码写出来的空对象
+//   none   —— 压根没这个字段 / 不是对象
+function tailPromptsShapeOf(value) {
+  if (!value || typeof value !== 'object') return 'none';
+  if (value.groups && typeof value.groups === 'object') return 'groups';
+  return 'flat';
+}
+
 function tailPoolOf(group, rawGroup) {
   const raw = rawGroup && typeof rawGroup === 'object' ? rawGroup : {};
   const source = Array.isArray(raw.presets) ? raw.presets : [];
@@ -358,6 +380,8 @@ module.exports = {
   normalizeTailPrompts,
   tailPoolOfConfig,
   tailConfigOf,
+  tailPromptsShapeOf,
+  TAIL_SCHEMA_VERSION,
   TAIL_GROUPS,
   TAIL_MAX_PRESETS,
   TAIL_MAX_NAME,
