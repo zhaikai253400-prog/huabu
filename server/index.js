@@ -1016,9 +1016,10 @@ async function handleApi(req, res, pathname, query) {
     }
     // 尾部提示词在服务端统一拼：前端预览和真正提交用的是同一套规则，
     // 定时组则带 frozenTail 快照，运行期间改预设不会影响已经开始的这一轮。
+    // kind 显式传进去 —— 图片和视频各用各的预设池，不能靠猜。
     let submission = null;
     try {
-      submission = generate.composeSubmission(config, body || {});
+      submission = generate.composeSubmission(config, body || {}, kind);
     } catch (error) {
       return sendJson(res, 400, { error: error.message });
     }

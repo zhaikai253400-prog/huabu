@@ -512,11 +512,14 @@ function submitItem(run, item, node) {
   const channelId = backupIndex > 0 ? candidate.channelId || '' : snap.channelId || '';
   const channelName = backupIndex > 0 ? candidate.channelName || '' : snap.channelName || '';
   const params = snap.params && typeof snap.params === 'object' ? snap.params : {};
-  // 尾部提示词在开始那一刻就冻结：运行期间改预设不会串味，暂停再继续也还是同一套
+  // 尾部提示词在开始那一刻就冻结：运行期间改预设不会串味，暂停再继续也还是同一套。
+  // 类型必须显式传：组里可能既有视频卡也有图片卡（`nodeType` 那段注释也这么说），
+  // 而图片和视频用的是两个互不相通的预设池 —— 不传类型就会让图片卡错拿到视频那套。
+  const memberKind = member.type;
   let frozenTail = item && item.frozenTail;
   if (!frozenTail || typeof frozenTail !== 'object') {
     try {
-      frozenTail = generate.resolveTail(runtimeConfig, { tailPrompt: snap.tailPrompt });
+      frozenTail = generate.resolveTail(runtimeConfig, { tailPrompt: snap.tailPrompt }, memberKind);
       item.frozenTail = frozenTail;
     } catch (error) {
       item.status = 'failed';
@@ -533,7 +536,7 @@ function submitItem(run, item, node) {
       prompt: snap.prompt,
       tailPrompt: snap.tailPrompt,
       frozenTail: frozenTail,
-    });
+    }, memberKind);
   } catch (error) {
     item.status = 'failed';
     item.error = error.message;
@@ -817,14 +820,16 @@ function start(canvasId, nodeId, options) {
         return Object.assign({}, item, { dueAt: fresh.dueAt, index: fresh.index });
       })
     : items;
-  // 开始前把每张待执行卡片的尾部提示词冻住；引用的预设已删除就直接报错，不带病开跑
+  // 开始前把每张待执行卡片的尾部提示词冻住；引用的预设已删除就直接报错，不带病开跑。
+  // 同样要按卡片自己的类型选池：图片卡和视频卡用的是两个互不相通的池子。
   nextItems.forEach((item) => {
     if (item.frozenTail && typeof item.frozenTail === 'object') return;
     if (item.status !== 'pending') return;
     const snap = conf.snapshots ? conf.snapshots[item.nodeId] : null;
+    const member = readScheduleNode(canvasId, item.nodeId);
     item.frozenTail = generate.resolveTail(runtimeConfig, {
       tailPrompt: snap && snap.tailPrompt,
-    });
+    }, member ? member.type : '');
   });
   const frozen = backupListOf(conf, null);
   const run = store.upsertScheduleRun({

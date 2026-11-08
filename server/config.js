@@ -214,11 +214,31 @@ function normalizeTailPrompts(value) {
   };
 }
 
+// 从「完整 config」或「tailPrompts 本身」里取出尾部提示词配置。
+// 和 tailPoolOfConfig 同样的容错理由：两种形状容易传混，
+// 传混的后果是**总开关被忽略**（回落到默认 enabled:true），
+// 表现为"我明明关了尾部提示词，它还在追加" —— 所以统一在这里认形状。
+function tailConfigOf(config) {
+  const raw = config && typeof config === 'object' ? config : {};
+  if (raw.tailPrompts && typeof raw.tailPrompts === 'object') return raw.tailPrompts;
+  const looksLikeTailPrompts = raw.groups && typeof raw.groups === 'object'
+    ? true
+    : (Array.isArray(raw.presets) || typeof raw.enabled === 'boolean' || typeof raw.defaultId === 'string');
+  return looksLikeTailPrompts ? raw : null;
+}
+
 // 取某一类的池子。给错 group 时退回 video —— 宁可给视频池，
 // 也不要让调用方拿到 undefined 然后在别处炸掉。
+//
+// 入参容错：**既接受完整 config，也接受 tailPrompts 本身**。
+// 为什么值得容错：这两种形状很容易传混（我自己写测试时就传混过一次），
+// 而传混的后果是"安静地返回空池" —— 表现为"尾部提示词莫名其妙不追加了"，
+// 非常难查。多认一种形状就能把这个坑直接消掉。
+//   完整 config：{ tailPrompts: { groups: {...} } }
+//   tailPrompts：{ groups: {...} } 或老形状 { presets: [...] }
 function tailPoolOfConfig(config, group) {
   const key = TAIL_GROUPS.indexOf(String(group)) >= 0 ? String(group) : 'video';
-  const tp = config && config.tailPrompts ? config.tailPrompts : null;
+  const tp = tailConfigOf(config);
   if (tp && tp.groups && tp.groups[key]) return tp.groups[key];
   // 兼容没经过 normalizeTailPrompts 的对象（例如测试里手写的 config）
   if (key === 'video' && tp) {
@@ -321,6 +341,7 @@ module.exports = {
   normalizeSubmitCompress,
   normalizeTailPrompts,
   tailPoolOfConfig,
+  tailConfigOf,
   TAIL_GROUPS,
   TAIL_MAX_PRESETS,
   TAIL_MAX_NAME,

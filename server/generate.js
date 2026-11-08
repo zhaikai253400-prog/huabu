@@ -11,6 +11,7 @@ const lastframe = require('./lastframe');
 const store = require('./store');
 const modelSpecs = require('./model-specs');
 const errorKinds = require('./error-kinds');
+const configStore = require('./config');
 // 参数装配规则与前端共用同一份源码（web 目录下的 UMD 模块，浏览器 <script> 直接加载）
 const payloadRules = require('../web/assets/payload-rules.js');
 // @ 引用语法（@[图1] / @图1）也只留一份实现：前端连显示、换号、摘引用都走它，
@@ -69,13 +70,20 @@ function normalizeTailChoice(value) {
   return payloadRules.normalizeTailChoice(value);
 }
 
-function tailPresetsOf(config) {
-  return config && config.tailPrompts && Array.isArray(config.tailPrompts.presets)
-    ? config.tailPrompts.presets
-    : [];
+// 尾部提示词分两个池子：视频卡用 video 池、图片卡用 image 池，互不相通。
+// 池子按「请求要哪一种」来选，而不是按卡片类型字符串 —— quick（快速视频）
+// 在接口眼里就是视频，所以它取 video 池。
+function tailPoolOf(config, kind) {
+  const wanted = String(kind || '') === 'image' ? 'image' : 'video';
+  return configStore.tailPoolOfConfig(config, wanted);
 }
 
-function resolveTail(config, payload) {
+// resolveTail(config, payload, kind)
+//   kind 显式传进来，**不要**从 payload 里猜：定时组那条路上 payload 是装配出来的，
+//   早期版本压根没传类型，只能靠猜，于是图片卡会错拿到视频池里那套带
+//   「无 BGM、嘴型不动」的文字。显式传参能让调用点自己说清"这是哪一类"。
+function resolveTail(config, payload, kind) {
+  const pool = tailPoolOf(config, kind);
   const frozen = payload && payload.frozenTail;
   if (frozen && typeof frozen === 'object') {
     if (!frozen.enabled) return { enabled: false, presetId: '', name: '', text: '' };
@@ -86,26 +94,30 @@ function resolveTail(config, payload) {
       text: String(frozen.text || ''),
     };
   }
-  const global = config && config.tailPrompts ? config.tailPrompts : { enabled: true, presets: [] };
+  // 总开关从 config 里取（tailConfigOf 容错"完整 config"与"tailPrompts 本身"两种形状）
+  const global = configStore.tailConfigOf(config) || { enabled: true, presets: [] };
   const choice = normalizeTailChoice(payload && payload.tailPrompt);
   const override = payload && payload.tailOverride && typeof payload.tailOverride === 'object' ? payload.tailOverride : null;
   if (override && override.mode === 'none') return { enabled: false, presetId: '', name: '', text: '' };
   if (!global.enabled) return { enabled: false, presetId: '', name: '', text: '' };
   if (!choice.enabled && !(override && override.presetId)) return { enabled: false, presetId: '', name: '', text: '' };
-  const presetId = String((override && override.presetId) || choice.presetId || global.defaultId || '');
+  // 默认预设也要按池子取：图片卡的「跟随全局默认」指的是图片池的默认
+  const presetId = String((override && override.presetId) || choice.presetId || pool.defaultId || '');
   if (!presetId) return { enabled: false, presetId: '', name: '', text: '' };
-  const preset = tailPresetsOf(config).find((item) => item && String(item.id) === presetId);
-  if (!preset) throw new Error('这张卡片引用的尾部提示词原预设已删除，请重新选一套，或关闭这张卡片的尾部提示词');
+  const preset = pool.presets.find((item) => item && String(item.id) === presetId);
+  if (!preset) {
+    throw new Error('这张卡片引用的尾部提示词原预设已删除，请重新选一套，或关闭这张卡片的尾部提示词');
+  }
   const text = String(preset.text || '').trim();
   if (!text) return { enabled: false, presetId: presetId, name: String(preset.name || ''), text: '' };
   return { enabled: true, presetId: presetId, name: String(preset.name || '尾部提示词'), text: text };
 }
 
 // 主提示词照旧处理 @[图1]；尾部提示词是纯文字，里面的 @ 原样保留，不再二次处理
-function composePrompt(config, payload) {
+function composePrompt(config, payload, kind) {
   const rawMain = String((payload && (payload.promptRaw || payload.prompt)) || '');
   const main = promptForApi(rawMain).trim();
-  const tail = resolveTail(config, payload);
+  const tail = resolveTail(config, payload, kind);
   if (!main) return { apiPrompt: '', mainPrompt: '', tail: tail, appended: false };
   if (!tail.enabled || !tail.text) {
     return { apiPrompt: main, mainPrompt: main, tail: tail, appended: false };
@@ -119,8 +131,8 @@ function composePrompt(config, payload) {
   };
 }
 
-function composeSubmission(config, payload) {
-  const composed = composePrompt(config, payload);
+function composeSubmission(config, payload, kind) {
+  const composed = composePrompt(config, payload, kind);
   if (!composed.apiPrompt) throw new Error('提示词是空的，先写点内容再生成');
   return {
     apiPrompt: composed.apiPrompt,
@@ -1177,7 +1189,7 @@ async function runKind(config, kind, payload, ctx) {
   if (!channel.baseUrl) throw errorKinds.configError('通道「' + channel.name + '」还没填 Base URL');
   const spec = channel[kind];
   const model = resolveModel(channel, kind, input.model);
-  const composed = composePrompt(config, input);
+  const composed = composePrompt(config, input, kind);
   const prompt = composed.apiPrompt;
   if (!prompt) throw new Error('提示词是空的，先写点内容再生成');
   const count = input.count;
@@ -1333,7 +1345,7 @@ async function preflight(config, payload) {
     const model = resolveModel(channel, kind, payload && payload.model);
     out.model = model || '';
     out.channel = channel.name || '';
-    const submission = composeSubmission(config, payload);
+    const submission = composeSubmission(config, payload, kind);
     out.promptLength = submission.apiPrompt.length;
     out.tailName = submission.tailPresetName || '';
     out.tailLength = submission.tailText ? submission.tailText.length : 0;
