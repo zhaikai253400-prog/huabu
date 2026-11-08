@@ -22,9 +22,14 @@ function defaultConfig() {
     submitCompress: {
       enabled: true,
     },
-    // 尾部提示词：总开关 + 多套预设，视频 / 快速视频提交时自动追加
+    // 尾部提示词：总开关 + 按类型分开的两套预设（视频一套、图片一套，互不相通）。
+    // 视频 / 快速视频提交时从 video 池取，图片卡从 image 池取。
     tailPrompts: {
       enabled: true,
+      groups: {
+        video: { defaultId: '', presets: [] },
+        image: { defaultId: '', presets: [] },
+      },
       defaultId: '',
       presets: [],
     },
@@ -142,10 +147,16 @@ const TAIL_MAX_PRESETS = 30;
 const TAIL_MAX_NAME = 40;
 const TAIL_MAX_TEXT = 20000;
 
-// 尾部提示词预设：最多 30 套，名称和正文都做长度保护；旧配置缺省时不影响使用
-function normalizeTailPrompts(value) {
-  const raw = value && typeof value === 'object' ? value : {};
-  const enabled = raw.enabled !== false;
+// 尾部提示词分两个池子，互不相通：
+//   video —— 视频卡 / 快速视频卡用
+//   image —— 图片卡用
+// 为什么要分：两种卡片要的文字根本不同。视频那套会写「无 BGM、嘴型不动、
+// 运镜、时长」之类，塞进图片请求纯属噪声；反过来图片那套的构图 / 画风措辞
+// 对视频也未必合适。所以从数据结构上就分开，卡片只在自己的池子里选。
+const TAIL_GROUPS = ['video', 'image'];
+
+function tailPoolOf(group, rawGroup) {
+  const raw = rawGroup && typeof rawGroup === 'object' ? rawGroup : {};
   const source = Array.isArray(raw.presets) ? raw.presets : [];
   const seen = new Set();
   const presets = [];
@@ -170,7 +181,50 @@ function normalizeTailPrompts(value) {
   let defaultId = String(raw.defaultId || '').trim();
   if (defaultId && !presets.some((item) => item.id === defaultId)) defaultId = '';
   if (!defaultId && presets.length) defaultId = presets[0].id;
-  return { enabled: enabled, defaultId: defaultId, presets: presets };
+  return { defaultId: defaultId, presets: presets };
+}
+
+// 尾部提示词预设：每类最多 30 套，名称和正文都做长度保护；旧配置缺省时不影响使用。
+//
+// **读时迁移**（重要）：老配置是扁平的 `{enabled, defaultId, presets}`，
+// 那时只有视频 / 快速视频支持尾部提示词，所以那些预设**全部归入 video 池**。
+// 这样用户既有的「3D国漫风格」不会被塞到图片卡上。
+function normalizeTailPrompts(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const enabled = raw.enabled !== false;
+  const groups = {};
+
+  // 已经分过组：按新结构读
+  const hasGroups = raw.groups && typeof raw.groups === 'object';
+  if (hasGroups) {
+    TAIL_GROUPS.forEach((g) => { groups[g] = tailPoolOf(g, raw.groups[g]); });
+  } else {
+    // 老结构（扁平）→ 全部迁进 video 池；image 池初始为空
+    groups.video = tailPoolOf('video', { defaultId: raw.defaultId, presets: raw.presets });
+    groups.image = tailPoolOf('image', null);
+  }
+
+  // 顶层保留一份 video 池的兼容视图：老版本的读写路径（以及暂时还没改的
+  // 调用方）仍然按 raw.presets / raw.defaultId 取用，行为与迁移前一致。
+  return {
+    enabled: enabled,
+    groups: groups,
+    defaultId: groups.video.defaultId,
+    presets: groups.video.presets,
+  };
+}
+
+// 取某一类的池子。给错 group 时退回 video —— 宁可给视频池，
+// 也不要让调用方拿到 undefined 然后在别处炸掉。
+function tailPoolOfConfig(config, group) {
+  const key = TAIL_GROUPS.indexOf(String(group)) >= 0 ? String(group) : 'video';
+  const tp = config && config.tailPrompts ? config.tailPrompts : null;
+  if (tp && tp.groups && tp.groups[key]) return tp.groups[key];
+  // 兼容没经过 normalizeTailPrompts 的对象（例如测试里手写的 config）
+  if (key === 'video' && tp) {
+    return { defaultId: String(tp.defaultId || ''), presets: Array.isArray(tp.presets) ? tp.presets : [] };
+  }
+  return { defaultId: '', presets: [] };
 }
 
 // 提交压缩总开关：缺省打开；只有明确关掉才关闭
@@ -266,6 +320,8 @@ module.exports = {
   normalizeShortcuts,
   normalizeSubmitCompress,
   normalizeTailPrompts,
+  tailPoolOfConfig,
+  TAIL_GROUPS,
   TAIL_MAX_PRESETS,
   TAIL_MAX_NAME,
   TAIL_MAX_TEXT,
