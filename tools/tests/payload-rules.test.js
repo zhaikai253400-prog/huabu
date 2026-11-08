@@ -87,8 +87,36 @@ check('快速视频固定 reference（卡片上没这个选项）', () => {
 check('图片 / 音频不接受模式 -> 空串（硬塞值会让通道模板判断走偏）', () => {
   eq(rules.normalizeMode('image', ''), '');
   eq(rules.normalizeMode('image', 'reference'), '');
+  eq(rules.normalizeMode('image', 'frames'), '');
+  eq(rules.normalizeMode('image', 'text'), '');
+  eq(rules.normalizeMode('image', undefined), '');
   eq(rules.normalizeMode('audio', 'reference'), '');
   eq(rules.normalizeMode('audio', 'frames'), '');
+  eq(rules.normalizeMode('audio', undefined), '');
+});
+
+// 这一条是**反向断言**，守着一个很容易再次踩进去的坑：
+// normalizeMode 原来拿 isTailKind（"支持不支持尾部提示词"）当判据来决定
+// "接不接受 mode"，两件本来无关的事被绑在一起。给图片卡加上尾部提示词之后，
+// isTailKind('image') 变成 true，图片的 mode 就会被填成 'reference'（本该为空串）。
+// 所以这里**不看 TAIL_KINDS 里有没有 image**，而是直接断言行为：
+// 不管尾部提示词支持哪些类型，图片 / 音频的 mode 永远必须是空串。
+check('反向断言：尾部提示词的支持范围与"接不接受 mode"必须解耦', () => {
+  // 模拟"图片也被算作支持尾部提示词"的情形：判据若仍借用 isTailKind 就会在这里露馅
+  const fakeRules = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'web', 'assets', 'payload-rules.js'), 'utf8');
+  const modeFn = /function normalizeMode\(nodeType, rawMode\) \{[\s\S]*?\n  \}/.exec(fakeRules);
+  assert(modeFn, '抽不出 normalizeMode');
+  assert(!/isTailKind\(nodeType\)/.test(modeFn[0]),
+    'normalizeMode 又在借用 isTailKind 当判据了 —— 图片卡一旦支持尾部提示词，' +
+    '它的 mode 就会被填成 reference，通道模板里的 {{mode}} 判断会走偏');
+  assert(/kind !== 'video'/.test(modeFn[0]),
+    'normalizeMode 应当用「是不是视频这一类」来判断，而不是「支不支持尾部提示词」');
+
+  // 行为层面再确认一次：图片 + 任意 mode 都必须是空串
+  ['', 'reference', 'frames', 'text', undefined, null, 0].forEach((m) => {
+    eq(rules.normalizeMode('image', m), '', 'image 传 ' + JSON.stringify(m));
+  });
 });
 
 console.log('\nC5 · 张数 / 参考素材归一');

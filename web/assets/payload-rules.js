@@ -33,8 +33,14 @@
   // 结果同一张卡片在通道模板里拿到的 {{mode}} 可能一个是空串、一个是 reference。
   function normalizeMode(nodeType, rawMode) {
     const kind = kindOf(nodeType);
-    // 图片 / 音频不接受模式，硬塞值会让通道模板里的判断走偏
-    if (!isTailKind(nodeType) && kind !== 'video') return '';
+    // 图片 / 音频不接受模式，硬塞值会让通道模板里的判断走偏。
+    //
+    // 判据必须是「**视频这一类**」，不能借用 isTailKind（「支持不支持尾部提示词」）——
+    // 那两件事本来无关，绑在一起会出事：给图片卡加上尾部提示词之后，
+    // isTailKind('image') 变成 true，这行就不再提前返回，图片的 mode
+    // 会一路走到最后被填成 'reference'（本该是空串），
+    // 于是通道模板里的 {{mode}} 判断走偏 —— 正是这个文件开头统一过的那个 bug。
+    if (kind !== 'video') return '';
     if (nodeType === 'quick') return 'reference';
     const value = String(rawMode == null ? '' : rawMode);
     return MODES.indexOf(value) >= 0 ? value : 'reference';
