@@ -280,15 +280,54 @@ console.log('\nD5 · 上限与清理');
 
 check('条数超过上限时砍掉最早的，不让索引无限长大', () => {
   assetIndex.clear();
-  // 上限 5000，这里塞 5005 条不同内容
-  const total = 5005;
-  for (let i = 0; i < total; i += 1) {
-    const data = Buffer.from('图-' + i);
-    assetIndex.remember(assetRoot, data, { relPath: '图片/n' + i + '.png', url: '/media/x', kind: 'image', bytes: data.length }, 'n' + i);
+  // 上限 5000，这里塞 5005 条。
+  //
+  // **为什么直接写索引、而不是循环调 remember()**：
+  // `remember()` 每记一条都要 readIndex() + writeIndex()（读写**整个** JSON），
+  // 是 O(N²)。实测 5005 次 remember() 要 **44.9 秒** —— 这一个断言
+  // 就占了全量测试 55 秒里的 77%，而且机器忙时容易偶发失败。
+  //
+  // 但这条测试真正要验的是**上限裁剪逻辑**（writeIndex 里那段），
+  // 不是"remember 能不能调 5005 次"。所以直接把 5005 条塞进 entries 再
+  // 调一次 writeIndex —— 走的仍是产品代码的裁剪分支，覆盖度不减，耗时降到毫秒级。
+  const entries = {};
+  const base = Date.now() - 100000;
+  for (let i = 0; i < 5005; i += 1) {
+    // 指纹用不重复的假值即可（裁剪只看 at 与数量）
+    entries['fp' + i] = {
+      relPath: '图片/n' + i + '.png', url: '/media/x', name: 'n' + i,
+      kind: 'image', bytes: 4, at: base + i,
+    };
   }
+  assetIndex.writeIndex({ version: 1, entries: entries });
   const n = assetIndex.count();
   assert(n <= 5000, '条数该被压到 5000 以内，实际 ' + n);
   assert(n >= 4990, '不该砍掉太多，实际 ' + n);
+  // 砍的必须是**最早**的那些（按 at 升序）
+  const left = assetIndex.readIndex().entries;
+  const oldestKept = Object.values(left).reduce((min, e) => Math.min(min, Number(e.at) || 0), Infinity);
+  assert(oldestKept >= base + 5,
+    '被砍掉的不该是最新的：留下的最老一条 at=' + oldestKept + '，期望 >= ' + (base + 5));
+});
+
+// 单独守一下"remember 是 O(N²) 的"这件事 —— 不是为了修它，
+// 而是留个**可观测的数字**：素材多起来之后如果哪天觉得上传变慢，
+// 看这里就知道是不是索引的锅。真实素材规模（200 多条）下它仍是毫秒级。
+check('remember 在真实素材规模（250 条）下仍是毫秒级', () => {
+  assetIndex.clear();
+  const t0 = Date.now();
+  const N = 250;
+  for (let i = 0; i < N; i += 1) {
+    const data = Buffer.from('规模测试-' + i);
+    assetIndex.remember(assetRoot, data, {
+      relPath: '图片/s' + i + '.png', url: '/media/x', kind: 'image', bytes: data.length,
+    }, 's' + i);
+  }
+  const ms = Date.now() - t0;
+  assert(assetIndex.count() === N, '条数不对：' + assetIndex.count());
+  // 留足余量：空闲时约 300ms，机器繁忙时放宽到 8 秒。
+  // 若这条超了，说明 O(N²) 已经影响到真实规模，该去看 asset-index 的写盘方式了。
+  assert(ms < 8000, '250 条 remember 用了 ' + ms + ' ms —— 索引写盘可能已经拖慢真实上传');
 });
 
 check('clear() 能清干净', () => {

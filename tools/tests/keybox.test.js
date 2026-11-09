@@ -70,13 +70,24 @@ console.log('【一】基本加解密');
 
 check('加密后的字符串带版本前缀（将来换算法时旧密文还认得出）', () => {
   const one = keybox.seal('hello-secret');
-  ok(one && one.indexOf(keybox.PREFIX) === 0, '没有前缀：' + String(one).slice(0, 12));
+  // **先分清"失败"和"没前缀"**：seal 返回 null 表示 DPAPI 辅助程序没跑起来
+  //（机器繁忙 / csc 编译失败 / 句柄耗尽），那是**环境问题**，不是"前缀写错了"。
+  // 原来的断言只说"没有前缀：null"，排查时会往错的方向找（我自己就被带偏过：
+  // 一度以为是加密逻辑坏了，实际是并发压力下 spawnSync 建子进程失败）。
+  ok(one !== null, 'seal 返回了 null —— DPAPI 不可用（环境问题），不是前缀问题。' +
+    'keybox.state(): ' + JSON.stringify(keybox.state()));
+  ok(one.indexOf(keybox.PREFIX) === 0, '没有前缀：' + String(one).slice(0, 12));
   eq(keybox.open(one), 'hello-secret');
 });
 
 check('同一个明文加密两次得到不同密文（IV 每次随机）', () => {
   const a = keybox.seal('same-value');
   const b = keybox.seal('same-value');
+  // 同样是先分环境问题：两次都为 null 时 a === b 恰好成立，
+  // 报"IV 没随机"会把人引到加密实现上去（实际两次都失败了）。
+  ok(a !== null && b !== null,
+    'seal 返回了 null —— DPAPI 不可用（环境问题），不是 IV 的问题。' +
+    'keybox.state(): ' + JSON.stringify(keybox.state()));
   ok(a !== b, '两次密文一样，说明 IV 没随机');
   eq(keybox.open(a), 'same-value');
   eq(keybox.open(b), 'same-value');
