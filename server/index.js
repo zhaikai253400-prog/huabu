@@ -2030,6 +2030,31 @@ function listen(port, attempts) {
   shutdownServer = shutdown;
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  installCrashHandlers();
+}
+
+// 最后一道兜底：让"意外崩溃"至少留下痕迹。
+//
+// 为什么需要：这是个**托盘常驻服务**，用户平时看不到它的控制台。
+// 一旦某个后台回调抛出未捕获异常（Node 默认行为是直接退出进程），
+// 表现就是"画布突然打不开了"，而且**没有任何提示** —— 用户完全无从下手。
+//
+// 这里做两件最小的事：
+//   ① uncaughtException：记一条日志（含堆栈），**然后继续运行**。
+//      不主动退出，是因为本服务的核心（express 式的请求处理、SQLite 连接）
+//      并不依赖某个特定回调的中间状态；让用户能继续用画布，比"干净地死掉"更有价值。
+//      真的坏到不能用了，用户重启即可，而日志里已经有据可查。
+//   ② unhandledRejection：只记日志。这个更常见，多半是某个 await 失败没人管，
+//      通常不影响其它功能，不该因此杀掉服务。
+function installCrashHandlers() {
+  process.on('uncaughtException', (error) => {
+    const where = (error && error.stack) || (error && error.message) || String(error);
+    log('捕获到未处理的异常（服务继续运行）：' + where);
+  });
+  process.on('unhandledRejection', (reason) => {
+    const text = (reason && reason.stack) || (reason && reason.message) || String(reason);
+    log('捕获到未处理的 Promise 拒绝（服务继续运行）：' + text);
+  });
 }
 
 // 进程锁：不管从托盘、双击还是命令行启动，同一时间只允许一份服务活着，

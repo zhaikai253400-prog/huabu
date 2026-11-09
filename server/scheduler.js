@@ -376,16 +376,37 @@ function watchTask(run, item) {
   const key = item.taskId;
   if (!key || watches.has(key)) return;
   const timer = setInterval(() => {
-    const task = store.getTask(item.taskId);
-    if (!task) {
+    // **必须有兜底**：setInterval 回调里抛出的异常在 Node 里会变成
+    // uncaughtException，而本服务没有 process.on('uncaughtException') ——
+    // 进程会**直接退出**。表现就是"画布突然打不开了，而且没有任何提示"。
+    //
+    // 这个定时器在两条真实路径上都会挂上（提交生成任务、服务重启恢复定时组），
+    // 而回调里要落库、改卡片、发通知，任何一处出问题都不该带崩整个服务。
+    // 写法照抄同文件 tick() 的那套（try/catch/finally + log）——
+    // tick() 本来就写得很规范，这里只是漏了一处。
+    try {
+      const task = store.getTask(item.taskId);
+      if (!task) {
+        clearWatch(key);
+        applyResultToCard(run.canvasId, item.nodeId, { error: '生成任务记录找不到了（服务可能重启过）' }, item);
+        finishItem(run, item, 'failed', '生成任务记录找不到了（服务可能重启过）');
+        return;
+      }
+      if (!TERMINAL[task.status]) return;
       clearWatch(key);
-      applyResultToCard(run.canvasId, item.nodeId, { error: '生成任务记录找不到了（服务可能重启过）' }, item);
-      finishItem(run, item, 'failed', '生成任务记录找不到了（服务可能重启过）');
-      return;
+      handleTaskEnd(run, item, task);
+    } catch (error) {
+      // 先把这个 watcher 摘掉，避免每 1.6 秒重复抛同一个错、刷爆日志。
+      // 任务本身仍在库里，服务重启后会按 liveScheduleRuns 重新挂上。
+      clearWatch(key);
+      log('盯任务时出错（已摘掉这个 watcher，服务重启后会重新接管）：taskId=' +
+        key + ' ' + ((error && error.message) || error));
+      try {
+        finishItem(run, item, 'failed', '处理任务结果时出错：' + ((error && error.message) || error));
+      } catch {
+        /* 连标记失败都失败就算了，至少日志里已经记了一笔 */
+      }
     }
-    if (!TERMINAL[task.status]) return;
-    clearWatch(key);
-    handleTaskEnd(run, item, task);
   }, 1600);
   watches.set(key, timer);
 }
