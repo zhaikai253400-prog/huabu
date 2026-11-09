@@ -213,9 +213,26 @@ function readRaw(req, limit) {
   });
 }
 
+// 静态服务**不该发出去**的文件后缀。
+//
+// 为什么需要：web/ 目录里本来只该有正式的前端资源，但实际很容易混进
+// 「改代码前留的备份」—— 实测 web/assets 下就躺着
+//   canvas.js.bak-defaultresize-20261105-resize（633 KB）
+//   style.css.bak-defaultresize-20261105-resize（153 KB）
+//   canvas.html.bak-defaultresize-20261105-resize（20 KB）
+// 而静态服务原本只挡越界路径、**不认后缀**，于是这三份旧源码
+// 用浏览器直接访问 /assets/canvas.js.bak-… 就能下载（实测 HTTP 200）。
+//
+// 不是严重漏洞（本机自用），但白白多传 806 KB，还把历史代码暴露出去。
+// 这里按后缀挡住，比"记得别把 .bak 放进 web/"更可靠 ——
+// 以后不管谁再往里丢临时文件，都不会被发出去。
+const STATIC_DENY_SUFFIX = /\.(bak|backup|tmp|temp|swp|swo|orig|old|log|sqlite|db|db-wal|db-shm|key|pem|env)$/i;
+
 function serveStatic(res, filePath) {
   const resolved = path.resolve(filePath);
   if (!guard.isInsideDir(paths.WEB_DIR, resolved)) return sendText(res, 403, '不允许访问该路径');
+  // 备份 / 临时 / 密钥类文件一律当作不存在（不是 403，避免暴露"这里有什么"）
+  if (STATIC_DENY_SUFFIX.test(resolved)) return sendText(res, 404, '找不到页面：' + path.basename(resolved));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
     return sendText(res, 404, '找不到页面：' + path.basename(resolved));
   }
@@ -250,6 +267,8 @@ function stampAssetUrls(html) {
 function serveHtmlWithTokens(res, filePath, withAdmin, fromLan) {
   const resolved = path.resolve(filePath);
   if (!guard.isInsideDir(paths.WEB_DIR, resolved)) return sendText(res, 403, '不允许访问该路径');
+  // 与 serveStatic 同一道后缀闸：备份 / 临时 / 密钥类一律不发
+  if (STATIC_DENY_SUFFIX.test(resolved)) return sendText(res, 404, '找不到页面：' + path.basename(resolved));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
     return sendText(res, 404, '找不到页面：' + path.basename(resolved));
   }
