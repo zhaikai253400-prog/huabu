@@ -208,10 +208,17 @@
       stat('失败', report.failed.length, report.failed.length ? 'warn' : '');
       stat('跳过', report.skipped.length, '');
 
+      // 备份失败的单独统计并高亮 —— 它和"写入失败"是两回事：
+      // 写入失败用户会看到文件没更新；备份失败则是**文件已经覆盖了、但老版本没存下来**，
+      // 事后想回退才发现没有。所以必须单独说清楚。
+      const backupFailed = Array.isArray(report.backupFailed) ? report.backupFailed : [];
+      stat('未备份', backupFailed.length, backupFailed.length ? 'warn' : '');
       const blocks = [
         group('已更新', report.updated, 'update'),
         group('已新增', report.added, 'add'),
         group('失败', report.failed.map((one) => ({ path: one.path, size: 0 })), 'warn'),
+        group('没能备份（覆盖前没存下旧版本）',
+          backupFailed.map((one) => ({ path: one.path, size: 0 })), 'warn'),
         group('这台电脑多出来的（保留不动）', report.skipped, 'extra'),
       ].filter(Boolean);
       blocks.forEach((one) => groupsEl.appendChild(one));
@@ -226,10 +233,22 @@
         groupsEl.appendChild(why);
       }
 
+      if (backupFailed.length) {
+        const why = document.createElement('div');
+        why.className = 'sync-note warn';
+        why.textContent =
+          '有 ' + backupFailed.length + ' 个文件已经覆盖成新版本了，但覆盖前没能备份：' +
+          (backupFailed[0].reason || '') +
+          '。这些文件已经改成新版本了，想回退只能靠其它备份 —— ' +
+          '建议先确认画布能正常打开，再把 ' + (report.backupDir || '备份目录') + ' 里已有的备份留好。';
+        groupsEl.appendChild(why);
+      }
+
       setHint(
         '完成：更新 ' + report.updated.length + '，新增 ' + report.added.length +
-          (report.failed.length ? '，失败 ' + report.failed.length : ''),
-        report.failed.length ? 'warn' : 'ok'
+          (report.failed.length ? '，失败 ' + report.failed.length : '') +
+          (backupFailed.length ? '，未备份 ' + backupFailed.length : ''),
+        (report.failed.length || backupFailed.length) ? 'warn' : 'ok'
       );
       restartEl.classList.toggle('hidden', !report.needRestart);
       if (report.backupDir) {

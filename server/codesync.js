@@ -291,14 +291,24 @@ function backupDir() {
 
 // 覆盖前先把老文件挪进 data\\codesync-backup\\<时间>，同步出问题还能手改回去。
 // 备份写在自己这台电脑的 data 里，不参与下一次同步（data 目录本来就不同步）。
+//
+// 返回 { ok, reason }：**备份失败必须能被调用方看到**。
+// 这里原来是个空 catch，注释声称"结果里也会有记录"，但：
+//   · 它不返回任何值，调用方无从得知
+//   · result 里也没有对应字段
+// 结果是：备份悄悄失败，用户仍看到"同步完成"，以为有备份可回退 —— 实际没有。
+// 这是"覆盖程序文件"前**唯一的安全网**，失灵必须说出来。
 function backupExisting(abs, rel, dir) {
   try {
-    if (!fs.existsSync(abs)) return;
+    if (!fs.existsSync(abs)) return { ok: true, reason: '' };
     const target = path.join(dir, ...rel.split('/'));
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(abs, target);
-  } catch {
-    /* 备份失败不阻塞同步，但会在结果里体现 */
+    return { ok: true, reason: '' };
+  } catch (error) {
+    // 不抛错：备份失败不该中断同步（用户可能正是要靠同步来修复代码）。
+    // 但把原因如实回传，由调用方汇总进 result.backupFailed。
+    return { ok: false, reason: (error && error.message) || '备份失败' };
   }
 }
 
@@ -319,6 +329,9 @@ async function pull(hostUrl, options) {
     updated: [],
     added: [],
     failed: [],
+    // 备份失败的（路径, 原因）。**必须上报**：它是覆盖前的唯一安全网，
+    // 悄悄失灵会让用户误以为"有备份可以回退"。
+    backupFailed: [],
     skipped: diff.extra,
     same: diff.same,
     needRestart: false,
@@ -330,7 +343,26 @@ async function pull(hostUrl, options) {
 
   const dir = backupDir();
   result.backupDir = dir;
-  fs.mkdirSync(dir, { recursive: true });
+  // 建备份目录也可能失败（磁盘满、权限、或那个路径被别的东西占住了）。
+  // 这里**不能直接抛** —— 一抛整个同步就中断，用户既没同步到、也得不到说明。
+  // 改成：记下来，然后继续同步（同步本身仍有价值），
+  // 但把"这次没有任何备份"这件事如实放进 result.backupFailed。
+  let backupDirOk = true;
+  let backupDirReason = '';
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (error) {
+    backupDirOk = false;
+    backupDirReason = (error && error.message) || '备份目录建不出来';
+  }
+  if (!backupDirOk) {
+    // 把待覆盖的每个文件都记一条 —— 用户需要知道"哪些文件此刻没有安全网"
+    todo.forEach((one) => {
+      if (fs.existsSync(resolveCodePath(one.path) || '')) {
+        result.backupFailed.push({ path: one.path, reason: '备份目录建不出来：' + backupDirReason });
+      }
+    });
+  }
 
   for (const one of todo) {
     const abs = resolveCodePath(one.path);
@@ -350,7 +382,10 @@ async function pull(hostUrl, options) {
       continue;
     }
     const existed = fs.existsSync(abs);
-    if (existed) backupExisting(abs, one.path, dir);
+    if (existed && backupDirOk) {
+      const backup = backupExisting(abs, one.path, dir);
+      if (!backup.ok) result.backupFailed.push({ path: one.path, reason: backup.reason });
+    }
     const tmp = abs + '.codesync.tmp';
     try {
       fs.mkdirSync(path.dirname(abs), { recursive: true });
