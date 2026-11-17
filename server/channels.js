@@ -351,6 +351,11 @@ function defaultChannel() {
     sizeMap: defaultSizeMap(),
     videoSizeMap: defaultVideoSizeMap(),
     upload: defaultUpload(),
+    // 参考图本来就是公网 https 地址时，直接透传给平台，不再下载→压缩→传图床。
+    // 只对「只认公网地址」的平台有意义（xm API 这类），其他通道保持 false 即可。
+    directRefUrls: false,
+    refPromptIndex: false,
+    refPromptAt: false,
     refLimits: defaultRefLimits(),
     refCompress: defaultRefCompress(),
     faceProcessing: defaultFaceProcessing(),
@@ -420,6 +425,10 @@ function normalizeSpec(kind, input) {
     resultUrl: source.resultUrl === undefined ? base.resultUrl : str(source.resultUrl),
     resultB64: source.resultB64 === undefined ? base.resultB64 : str(source.resultB64),
     timeoutSec: Math.max(10, Math.min(3600, Number(source.timeoutSec) || base.timeoutSec)),
+    // 单次提交请求体的体积上限（MB）。0 / 不填 = 不检查。
+    // 只有那些「把整个请求体读进内存」的平台才需要（例如 520ruo 的 64 MB 网关上限），
+    // 内嵌 Base64 的通道最容易撞到，其它通道保持 0 不受影响。
+    maxBodyMB: Math.max(0, Math.min(1024, Number(source.maxBodyMB) || 0)),
     poll: normalizePoll(source.poll, kind),
   };
 }
@@ -680,6 +689,14 @@ function normalizeChannel(input) {
     sizeMap: normalizeSizeMap(source.sizeMap),
     videoSizeMap: normalizeSizeMap(source.videoSizeMap, defaultVideoSizeMap()),
     upload: normalizeUpload(source.upload),
+    directRefUrls: source.directRefUrls === true,
+    // 提示词里要不要把「图42」这类画布素材名换成平台认的「图片N」。
+    // 只有按素材出现顺序理解参考图的平台才需要（Prompt Hubs 的 Seedance / SD2.5 全系）。
+    // 默认关闭：别的平台是直接看地址的，改提示词反而可能把它们弄糊涂。
+    refPromptIndex: source.refPromptIndex === true,
+    // 映射成「@图片1」还是「图片1」：元梦源梦创作要求带 @，Prompt Hubs 那边不要 @。
+    // 跟着 refPromptIndex 一起开关，默认关闭，免得把不要 @ 的平台改坏。
+    refPromptAt: source.refPromptAt === true,
     refLimits: normalizeLimits(source.refLimits),
     refCompress: normalizeRefCompress(source.refCompress),
     faceProcessing: faceProcessing,
@@ -701,10 +718,25 @@ function activeChannels(config) {
 // 找通道：先用指定 id，其次找能用这个模型的那个，最后退回第一个能干这活的
 function findChannel(config, options) {
   const opts = options || {};
-  const usable = activeChannels(config).filter((channel) => channel.kinds.indexOf(opts.kind) >= 0);
+  const all = ((config && config.channels) || []).filter((channel) => channel && channel.kinds.indexOf(opts.kind) >= 0);
+  // includeDisabled：给「已经把任务提交出去了、只是回来取结果」的场景用。
+  // 钱已经花了、任务在平台上跑着，这时候通道被停用也不该把结果丢掉。
+  const usable = opts.includeDisabled ? all : all.filter((channel) => channel.enabled !== false);
   if (opts.channelId) {
     const hit = usable.find((channel) => channel.id === opts.channelId);
     if (hit) return hit;
+    // 通道「还在、但被停用」时不能悄悄换别的通道顶上。
+    // 换了道意味着请求体模板、模型清单、计费单价全变了 —— 用户以为在跑 A 通道，
+    // 实际扣的是 B 通道的钱，出来的东西还可能是另一个模型的。
+    // 通道被彻底删掉（配置里根本没有这个 id）时仍然允许回落：
+    // 那是老画布里的历史引用，换一条能用的通道接着跑更符合预期。
+    const disabled = all.find((channel) => channel.id === opts.channelId);
+    if (disabled) {
+      throw errorKinds.configError(
+        '通道「' + (disabled.name || opts.channelId) + '」当前是停用状态，不能用来生成。' +
+          '要么在「接口通道」里把它打开，要么在这张卡片上换个模型。'
+      );
+    }
   }
   if (opts.channelName) {
     const hit = usable.find((channel) => channel.name === opts.channelName);
@@ -862,7 +894,19 @@ function sizeFor(channel, sizeKey, ratioKey, kind) {
     if (hit) return str(hit);
   }
   if (bySize && typeof bySize === 'string') return bySize;
-  // 图表里没有这个档位：视频退回 720p 那一行，图片退回 1K
+  // 图表里没有这个档位（含 sizeKey 是空串：老卡片 / 定时组没带尺寸）。
+  // 这里必须退到**这个通道自己**的表，不能退到内置表：内置表给的是 1280x720 这种
+  // 通用像素值，而有些平台只认自己那三个固定值（xinbiapi 的 gpt-image-2.5-flare
+  // 只收 1024*1024 / 1536*1024 / 1024*1536，且必须是星号写法）。
+  // 退到内置表等于把平台不认的值直接发出去，白白浪费一次调用。
+  const ownRow = map[useVideo ? '720p' : '1K'];
+  if (ownRow && typeof ownRow === 'object' && ownRow[str(ratioKey)]) return str(ownRow[str(ratioKey)]);
+  if (ownRow && typeof ownRow === 'string') return ownRow;
+  // 通道自己的表也没有 1K/720p 这一行：取它第一条，仍然比内置表更贴近这个平台
+  const firstKey = Object.keys(map)[0];
+  const first = firstKey ? map[firstKey] : null;
+  if (first && typeof first === 'object' && first[str(ratioKey)]) return str(first[str(ratioKey)]);
+  if (first && typeof first === 'string') return first;
   const fallbackRow = fallbackMap[useVideo ? '720p' : '1K'];
   if (fallbackRow && typeof fallbackRow === 'object' && fallbackRow[str(ratioKey)]) return str(fallbackRow[str(ratioKey)]);
   return str(sizeKey) || (useVideo ? '1280x720' : '1024x1024');
@@ -1138,11 +1182,30 @@ async function queryRide(channel) {
   return { ride: ride, url: data.url, raw: data.text };
 }
 
+// 上传路径是不是「外部图床」（绝对地址 + 跟 Base URL 不同源）。
+// 同源（或相对路径）一律当作平台自己的上传接口，照旧带鉴权。
+function isExternalUpload(channel, relPath) {
+  const target = str(relPath).trim();
+  if (!/^https?:\/\//i.test(target)) return false;
+  try {
+    return new URL(target).host !== new URL(str(channel.baseUrl).trim()).host;
+  } catch {
+    return true;
+  }
+}
+
 // 上传一个参考素材：form = multipart（默认），base64 = data URL 塞进 JSON，binary = 原始字节
 async function callUpload(channel, spec, item) {
   const url = buildUrl(channel, spec.path);
   if (!url) throw errorKinds.configError('这个通道还没填 Base URL');
-  const headers = buildHeaders(channel);
+  // 上传地址可以写成外部图床的绝对地址（有的平台只认公网 HTTPS 素材，
+  // 得先借第三方图床转一手）。这时候绝对不能把通道密钥一起发出去 ——
+  // 那是给生成平台用的，发给不相干的图床等于泄露。
+  // 判定很窄：上传路径本身就是绝对地址、且跟 Base URL 不同源，才不带鉴权头。
+  const external = isExternalUpload(channel, spec.path);
+  // 外部图床只给空头：multipart 下 Content-Type 必须由 fetch 自己带 boundary，
+  // base64 / binary 分支会各自写上正确的类型，这里不该抢着定死一个。
+  const headers = external ? {} : buildHeaders(channel);
   Object.keys(spec.headers || {}).forEach(function (key) {
     if (key) headers[key] = str(assertUsableSecret(spec.headers[key], '上传请求头 ' + key));
   });

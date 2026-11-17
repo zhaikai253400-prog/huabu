@@ -1524,13 +1524,9 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
   .node-panel { min-width: 260px; }
 }
 
-/* 卡片贴着窗口底边时，编辑面板翻到卡片上面，免得下面被切掉 */
-.node.panel-up .node-panel {
-  top: auto;
-  bottom: 100%;
-  margin-top: 0;
-  margin-bottom: 6px;
-}
+/* 编辑面板永远在卡片正下方（不再翻到上方）。
+   下方空间不够时由 canvas.js 的 placePanel 把画布整体往上挪，
+   所以这里只需要声明「向下」这一种定位，不再有上下两套。 */
 
 .node-model {
   flex: 1 1 auto;

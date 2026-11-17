@@ -299,6 +299,10 @@ function encryptChannels(list) {
       sealed += 1;
       return;
     }
+    // 请求头里允许写占位符（{{requestId}} 这类），提交时才换成真值。
+    // 这类值不是密钥，绝不能加密：加密后成了一串 base64，发出去平台只当垃圾头，
+    // 而配置界面看着又像「已经填好了」，出问题时极难排查。
+    if (value.indexOf('{{') >= 0 && value.indexOf('}}') >= 0) return;
     const result = seal(value);
     if (result) {
       holder[name] = result;

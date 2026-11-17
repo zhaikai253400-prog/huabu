@@ -481,8 +481,10 @@ function modelsPayload() {
           id: id,
           label: channels.modelLabel(entry),
           note: channels.modelNote(entry),
-          // 图片模型也带上规格（能选几 K、哪些比例），卡片上的选项跟着变
-          spec: modelSpecs.forModel(id),
+          // 图片模型也带上规格（能选几 K、哪些比例），卡片上的选项跟着变。
+          // 必须把通道 id 一起传：同一串模型名在不同平台可能是完全不同的尺寸契约
+          // （gpt-image-2.5-flare 在 xinbiapi 只有 3 个固定像素值）。
+          spec: modelSpecs.forModel(id, channel.id),
           channel: channel.name || channel.id || '',
           channelId: channel.id || '',
           isDefault: picked ? id === picked : false,
@@ -881,12 +883,20 @@ async function handleApi(req, res, pathname, query) {
   if (pathname === '/api/channels/test-video' && method === 'POST') {
     const body = await readBody(req);
     const model = String(body.model || '').trim();
-    const channel = channels.findChannel(config, {
-      channelId: body.channelId,
-      channelName: body.channelName,
-      kind: 'video',
-      model: model,
-    });
+    let channel = null;
+    try {
+      channel = channels.findChannel(config, {
+        channelId: body.channelId,
+        channelName: body.channelName,
+        kind: 'video',
+        model: model,
+      });
+    } catch (error) {
+      // 通道被停用这类配置问题属于「你填的不对」，回 400 把原因说清楚，
+      // 别让它掉进最外层的 500 兜底，那样用户只看到「服务内部错误」。
+      log('试生成视频失败：' + error.message);
+      return sendJson(res, 400, { error: error.message });
+    }
     if (!channel) return sendJson(res, 400, { error: '这个通道没有视频模型：先填好视频模型，并确认通道勾了「视频」' });
     const prompt = String(body.prompt || '一只小猫坐在窗边看雨，镜头缓慢推进，电影感光线').trim();
     const task = tasks.start(
@@ -1055,12 +1065,18 @@ async function handleApi(req, res, pathname, query) {
     const kind = ['image', 'video', 'audio'].indexOf(asked) >= 0 ? asked : 'image';
     const label = kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频';
     const model = String(body.model || '').trim();
-    const channel = channels.findChannel(config, {
-      channelId: body.channelId,
-      channelName: body.channelName,
-      kind: kind,
-      model: model,
-    });
+    let channel = null;
+    try {
+      channel = channels.findChannel(config, {
+        channelId: body.channelId,
+        channelName: body.channelName,
+        kind: kind,
+        model: model,
+      });
+    } catch (error) {
+      // 同上：通道停用 / 配置缺失都属于可解释的错误，回 400 比 500 有用得多
+      return sendJson(res, 400, { error: error.message });
+    }
     if (!channel) {
       return sendJson(res, 400, {
         error: '还没有能生成' + label + '的通道，先到门户页的「接口通道」里加一个，并勾上「' + label + '」',

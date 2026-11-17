@@ -100,6 +100,19 @@ const KINDS = {
     failFast: false,
     strikes: 0,
   },
+  // 「提交出去了，但平台没说清楚成没成」。
+  // 最典型的是 502 / 网关超时 / "提交结果待确认" 这类：
+  // 任务可能已经在平台上跑起来、钱可能已经扣了，但我们**没拿到任务号**。
+  // 这种情况下重试有重复扣费的风险，所以 retryable 必须是 false，
+  // 并且要把平台的原文（诊断号、request id）完整留给用户去核对。
+  SUBMIT_UNKNOWN: {
+    title: '提交结果待确认',
+    advice:
+      '平台没给出任务号，这次可能已经扣费了。先去平台后台的「消费记录 / 任务」核对有没有这条；确认没有之后再用同样的提示词重试，别直接连点。',
+    retryable: false,
+    failFast: true,
+    strikes: 0,
+  },
   UNKNOWN: {
     title: '生成失败',
     advice: '看看下面的平台原文，或者到日志里查这次请求',
@@ -239,6 +252,31 @@ function pick(kind) {
 //   'submit'   提交生成     → 404 一般也是模型不存在
 //   'balance' / 'status' / 'download' / 'api' 等
 // context.path 是请求路径，404 时用来兜底判断是不是模型相关的接口。
+// 提交生成的 5xx，正文里出现这些说法时，说明「任务可能已经建了、但我们没拿到号」。
+// 这类不确定状态绝不能被当成"网络抖动，自动重试"——重试等于可能付两次钱。
+//
+// 判定放宽一点：不同网关的措辞不一样（中英文、直白/隐晦），
+// 只要沾上任何一种，就按"待确认"处理。宁可让用户多点一次核对，
+// 也不能让他不知不觉被扣两次。
+const AMBIGUOUS_SUBMIT_WORDS = [
+  '待确认',
+  '提交结果',
+  '连接异常',
+  'fail_to_fetch_task',
+  'fail_to_fetch',
+  'unknown',
+  'pending',
+  'diagnostic_id',
+  'may have been',
+  'uncertain',
+];
+
+function looksAmbiguousSubmit(body) {
+  const text = String(body === undefined || body === null ? '' : body).toLowerCase();
+  if (!text) return false;
+  return AMBIGUOUS_SUBMIT_WORDS.some((word) => text.indexOf(String(word).toLowerCase()) >= 0);
+}
+
 function classify(error, context) {
   const ctx = context || {};
   const status = statusOf(error);
@@ -263,6 +301,10 @@ function classify(error, context) {
   // 一律当密钥错会让用户去改密钥，白折腾一圈。
   if (status === 403) {
     if (byWord(body, 'NO_MODEL')) return pick('NO_MODEL');
+    // 403 还常被 New API 这类网关拿来报「额度不够」：
+    // 正文是 insufficient_user_quota，却回 403 而不是 402。
+    // 一律当密钥错会让用户白折腾改密钥，所以先按额度关键词认一次。
+    if (byWord(body, 'QUOTA')) return pick('QUOTA');
     return pick('AUTH');
   }
   if (status === 402) return pick('QUOTA');
@@ -284,7 +326,14 @@ function classify(error, context) {
   if (byWord(body, 'BAD_REF')) return pick('BAD_REF');
 
   // 5xx 与网关超时都当网络类：会自动重试，不该急着判死
-  if (status >= 500 || status === 408 || status === 504) return pick('NETWORK');
+  if (status >= 500 || status === 408 || status === 504) {
+    // 但「提交生成」这一步不一样：钱可能已经扣了，只是没把任务号返回来。
+    // 这时候提示"会自动重试"是害人的（平台文档明确要求：没拿到 id 就别盲目重发）。
+    // 只有正文明确表示"结果待确认 / 连接异常"才升级成 SUBMIT_UNKNOWN，
+    // 纯粹的连不上（fetch 直接失败，压根没到平台）仍然按 NETWORK 处理。
+    if (where === 'submit' && looksAmbiguousSubmit(body)) return pick('SUBMIT_UNKNOWN');
+    return pick('NETWORK');
+  }
 
   return pick('UNKNOWN');
 }

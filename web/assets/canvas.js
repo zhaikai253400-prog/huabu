@@ -320,15 +320,39 @@
     const defaults = PARAM_DEFAULTS[node.type] || {};
     if (!data.params || typeof data.params !== 'object') data.params = {};
     const defs = paramDefsOf(node, data);
+    // 模型自己声明了默认值的，优先按模型的默认走：
+    // 例如 SD2.5 Flash 默认 5 秒、1080p，而卡片全局默认是 30 秒 / 720p，
+    // 照全局默认填会一上手就报「超出 5–30 秒」或者白多花钱。
+    const spec = modelSpecOf(node.type, data) || {};
+    let specDefaults = null;
+    if (spec.defaultDuration !== undefined || spec.defaultResolution !== undefined) {
+      specDefaults = {
+        duration: spec.defaultDuration === undefined ? undefined : String(spec.defaultDuration),
+        resolution: spec.defaultResolution === undefined ? undefined : String(spec.defaultResolution),
+      };
+    }
     Object.keys(defaults).forEach((key) => {
       const def = defs.find((item) => item.key === key);
       if (!def || !def.options.length) return;
       if (def.options.indexOf(data.params[key]) >= 0) return;
-      // 换过模型后老的值可能不适用了：先用默认值，再不行就用第一个
-      const fallback = String(defaults[key] === undefined ? '' : defaults[key]);
+      // 换过模型后老的值可能不适用了：先用模型默认 / 全局默认，再不行就用第一个
+      const specDefault = specDefaults && specDefaults[key] !== undefined ? specDefaults[key] : '';
+      const fallback = String(specDefault || (defaults[key] === undefined ? '' : defaults[key]));
       data.params[key] = def.options.indexOf(fallback) >= 0 ? fallback : def.options[0];
     });
     return data.params;
+  }
+
+  // 新卡片的初始参数：全局默认打底，再用模型自己声明的默认值盖一层
+  function seedParamsOf(type, modelId) {
+    const base = Object.assign({}, PARAM_DEFAULTS[type] || {});
+    const spec = modelId ? modelSpecOf(type, { model: modelId }) : null;
+    if (!spec) return base;
+    if (spec.defaultDuration !== undefined) base.duration = String(spec.defaultDuration);
+    if (spec.defaultResolution !== undefined && base.resolution !== undefined) {
+      base.resolution = String(spec.defaultResolution).toLowerCase();
+    }
+    return base;
   }
 
   // 定时组「同时生成」：0 = 不限制，1~10 张；缺省或乱填按 2 张
@@ -1250,8 +1274,11 @@
     }
     scheduleMinimap();
     placeAlignBar();
-    // 编辑面板是固定屏幕尺寸的界面元素：缩放变了要重新贴一次，平移不用
-    if (expandedId && viewport.zoom !== panelZoom) placePanel();
+    // 编辑面板是固定屏幕尺寸的界面元素：缩放变了要重新贴一次，平移不用。
+    // 这里传 false：缩放是用户在调视角，面板放不下也不能把画布顶走，
+    // 否则缩小时画布会自己往一个方向滑，越缩越偏。
+    // placingPanel 期间跳过 —— placePanel 内部本来就会 applyViewport。
+    if (expandedId && !placingPanel && viewport.zoom !== panelZoom) placePanel(false);
   }
 
   // 一轮手势（拖动 / 平移 / 缩放）期间：关掉流光等重特效，松手后再恢复
@@ -2765,11 +2792,14 @@
   // 编辑面板固定宽度（屏幕像素），不跟着卡片大小伸缩：所有卡片弹出来一样大
   const PANEL_W = 560;
 
-  // 编辑面板：固定大小，水平以卡片中心线对齐；
-  // 下方放不下就翻到卡片上方，始终贴着卡片居中显示
+  // 编辑面板：固定大小，水平以卡片中心线对齐，**永远在卡片正下方**；
+  // 下面放不下就把画布整体往上挪（见 placePanel 第 ⑤ 步），不再翻到上方
   // 只记住「上一次真正贴过的面板」，不再每次遍历整张画布的所有卡片
   let lastPlacedPanel = null;
-  let lastPlacedHost = null;
+  // placePanel 里要 applyViewport()，而 applyViewport 在「缩放变了」时会回头再调
+  // placePanel。不拦着就一层套一层，外层还会用上一轮量到的旧尺寸继续算。
+  // 贴面板期间直接跳过那个回调：这一轮贴完，尺寸本来就是按新缩放量的。
+  let placingPanel = false;
 
   function resetPanelPlacement() {
     if (lastPlacedPanel) {
@@ -2785,134 +2815,186 @@
       lastPlacedPanel.style.marginBottom = '';
       lastPlacedPanel.style.bottom = '';
     }
-    if (lastPlacedHost) lastPlacedHost.classList.remove('panel-up');
     lastPlacedPanel = null;
-    lastPlacedHost = null;
   }
 
-  function placePanel() {
-    {
-      const el = expandedId ? elements.get(expandedId) : null;
-      const id = expandedId;
-      const panel = el && el.querySelector('.node-panel');
-      // 展开的卡片换了（或者收起来了）：先把上一块面板的定位清掉
-      if (lastPlacedPanel && lastPlacedPanel !== panel) resetPanelPlacement();
-      if (panel) {
-        lastPlacedPanel = panel;
-        lastPlacedHost = el;
-      }
-      const hostNode = id ? byId(id) : null;
-      if (!panel) {
-        panelZoom = viewport.zoom || 1;
-        return;
-      }
-      if (isSchedule(hostNode)) {
-        // 定时组：设置窗口贴在组框正中间，缩放时跟着组一起变，不会跑到画布外面
-        const zoom = viewport.zoom || 1;
-        const k = Math.max(0.35, 1 / zoom);
-        // 用界面级 zoom 抵消画布缩放，避免父级 scale 再套子级 scale 时文字发糊
-        panel.style.zoom = String(k);
-        panel.style.transform = 'translate(-50%, -50%)';
-        const screenW = Math.max(240, hostNode.w * zoom - 28);
-        const screenH = Math.max(240, hostNode.h * zoom - 28);
-        const width = Math.min(860, screenW);
-        panel.style.left = '50%';
-        panel.style.top = '50%';
-        panel.style.width = width + 'px';
-        panel.style.minWidth = width + 'px';
-        panel.style.maxHeight = Math.min(760, screenH) + 'px';
-        return;
-      }
-      {
-        const view = viewportBox();
-        const box = el.getBoundingClientRect();
-        const zoom = viewport.zoom || 1;
-        // 面板属于界面，不跟着画布缩放：屏幕上始终是同一个尺寸
-        const k = Math.max(0.35, 1 / zoom);
-        const scale = k;
-        // 用界面级 zoom 抵消画布缩放，避免父级 scale 再套子级 scale 时文字发糊
-        panel.style.zoom = String(k);
-        const pad = 12;
-        const gap = 8;
-
-        // ① 固定宽度：屏幕 460px；原地展开时用更宽的大面板；窗口实在太窄才跟着收一收
-        const wide = promptWideOn(hostNode);
-        const wantW = wide ? Math.max(PANEL_W, PROMPT_WIDE_W) : PANEL_W;
-        const screenW = Math.min(wantW, Math.max(220, view.width - pad * 2));
-        const width = screenW;
-        panel.style.width = width + 'px';
-        panel.style.minWidth = width + 'px';
-        panel.style.maxHeight = '';
-
-        // ② 上还是下：按屏幕上的实际空位判断，下方不够、上方更宽裕就翻上去
-        const height = panel.offsetHeight;
-        const roomBelow = view.bottom - box.bottom;
-        const roomAbove = box.top - view.top;
-        const up = roomBelow < height + gap + pad && roomAbove > roomBelow;
-        el.classList.toggle('panel-up', up);
-
-        panel.style.transform = '';
-        // 上下翻转只影响基准位置；缩放已经交给面板自身的 zoom 处理
-        panel.style.transformOrigin = up ? 'center bottom' : 'center top';
-
-        // ③ 水平：对齐卡片中心线（左边缘 50%，再往回挪半个面板宽）
-        panel.style.left = '50%';
-        panel.style.marginLeft = -width / 2 + 'px';
-
-        // ④ 贴着窗口左右边缘时整体往里让，保证整块面板都在窗口里
-        let rect = panel.getBoundingClientRect();
-        let dx = 0;
-        if (rect.right > view.right - pad) dx = view.right - pad - rect.right;
-        if (rect.left + dx < view.left + pad) dx = view.left + pad - rect.left;
-        if (dx) panel.style.marginLeft = -width / 2 + dx + 'px';
-
-        // ⑤ 竖直方向：先压高度让面板自己滚，再整体挪回视口内。
-        // 只压高度不够 —— 面板比卡片高得多，矮窗口里「下面放不下就翻到上面」
-        // 也未必有地方翻（卡片本来就贴着窗口顶边或底边），面板照样会顶出视口，
-        // 底部常驻区（模型 / 参数 / 生成）跟着一起跑到屏幕外。
-        // 先按可用空间压到 160~满屏之间，再量一次实际位置，超出多少就挪回多少。
-        //
-        // 位移直接写 top / bottom，不用 margin：上方展开时面板靠 bottom:100% 定位，
-        // top 是 auto，margin-top 不参与定位，写了也不会动（踩过这个坑）。
-        // 先清掉上一轮写进去的位移，否则窗口变高以后面板会一直停在挪过的位置
-        panel.style.top = '';
-        panel.style.bottom = '';
-        panel.style.marginTop = '';
-        panel.style.marginBottom = '';
-        const after = panel.getBoundingClientRect();
-        const room = up ? after.bottom - view.top - pad : view.bottom - pad - after.top;
-        const limit = Math.max(160, Math.min(room, view.height - pad * 2));
-        if (after.height > limit) panel.style.maxHeight = limit + 'px';
-
-        // 高度定下来后重新量一次，按屏幕坐标把整块面板推回视口。
-        const fit = panel.getBoundingClientRect();
-        let shift = 0;
-        if (fit.bottom > view.bottom - pad) shift = view.bottom - pad - fit.bottom;
-        if (fit.top + shift < view.top + pad) shift = view.top + pad - fit.top;
-        if (shift) {
-          // 上方展开：贴卡片顶边往上画，shift 为负要把 bottom 收小（整体下移）；
-          // 下方展开：贴卡片底边往下画，shift 为负要把 top 收小（整体上移）。
-          // EDGE 与 CSS 里默认的 6px 间距保持一致，挪过之后不会比原来多出 2px 缝。
-          const EDGE = 6;
-          if (up) panel.style.bottom = 'calc(100% + ' + (EDGE - shift) + 'px)';
-          else panel.style.top = 'calc(100% + ' + (EDGE + shift) + 'px)';
-        }
-      }
+  // 把展开卡片的编辑面板贴到卡片正下方。
+  //
+  // allowShift（默认 true）：放不下时要不要自动平移画布。
+  //   传 false 的只有两处：画布缩放、平移画布松手。
+  //   那两种都是用户在主动调视角，画布自己往回跑会让人永远挪不动。
+  //   （拖动卡片途中根本不调 placePanel —— 面板跟着卡片走，松手后才统一落位。）
+  function placePanel(allowShift) {
+    const autoShift = allowShift !== false;
+    // 重入保护：内部会调 applyViewport()，而 applyViewport 在「缩放变了」时会回头
+    // 再调 placePanel。不拦着就一层套一层，外层还会拿上一轮量到的旧尺寸继续算。
+    if (placingPanel) return;
+    placingPanel = true;
+    try {
+      placePanelInner(autoShift);
+    } finally {
+      placingPanel = false;
+      panelZoom = viewport.zoom || 1;
     }
-    panelZoom = viewport.zoom || 1;
   }
 
-  // 拖动时轻量判断：面板该在卡片下方还是上方，只有状态变了才真的重新贴一次
-  function refreshPanelFlip(node) {
-    const el = elements.get(node.id);
+  function placePanelInner(autoShift) {
+    const el = expandedId ? elements.get(expandedId) : null;
+    const id = expandedId;
     const panel = el && el.querySelector('.node-panel');
-    if (!panel || isSchedule(node)) return;
+    // 展开的卡片换了（或者收起来了）：先把上一块面板的定位清掉
+    if (lastPlacedPanel && lastPlacedPanel !== panel) resetPanelPlacement();
+    if (panel) lastPlacedPanel = panel;
+    const hostNode = id ? byId(id) : null;
+    if (!panel) {
+      panelZoom = viewport.zoom || 1;
+      return;
+    }
+    // 定时组：设置窗口贴在组框正中间，缩放时跟着组一起变，不会跑到画布外面
+    if (isSchedule(hostNode)) {
+      const zoom = viewport.zoom || 1;
+      const k = Math.max(0.35, 1 / zoom);
+      // 用界面级 zoom 抵消画布缩放，避免父级 scale 再套子级 scale 时文字发糊
+      panel.style.zoom = String(k);
+      panel.style.transform = 'translate(-50%, -50%)';
+      const screenW = Math.max(240, hostNode.w * zoom - 28);
+      const screenH = Math.max(240, hostNode.h * zoom - 28);
+      const width = Math.min(860, screenW);
+      panel.style.left = '50%';
+      panel.style.top = '50%';
+      panel.style.width = width + 'px';
+      panel.style.minWidth = width + 'px';
+      panel.style.maxHeight = Math.min(760, screenH) + 'px';
+      return;
+    }
+
     const view = viewportBox();
     const box = el.getBoundingClientRect();
-    const roomBelow = view.bottom - box.bottom;
-    const roomAbove = box.top - view.top;
-    const up = roomBelow < panel.offsetHeight + 20 && roomAbove > roomBelow;
-    if (up !== el.classList.contains('panel-up')) placePanel();
+    const zoom = viewport.zoom || 1;
+    // 面板属于界面，不跟着画布缩放：屏幕上始终是同一个尺寸
+    const k = Math.max(0.35, 1 / zoom);
+    // 用界面级 zoom 抵消画布缩放，避免父级 scale 再套子级 scale 时文字发糊
+    panel.style.zoom = String(k);
+    const pad = 12;
+
+    // ① 固定宽度：屏幕 560px；原地展开时用更宽的大面板；窗口实在太窄才跟着收一收
+    const wide = promptWideOn(hostNode);
+    const wantW = wide ? Math.max(PANEL_W, PROMPT_WIDE_W) : PANEL_W;
+    const width = Math.min(wantW, Math.max(220, view.width - pad * 2));
+    panel.style.width = width + 'px';
+    panel.style.minWidth = width + 'px';
+
+    // ② 永远贴在卡片**正下方**，不再按空位翻到上方。
+    // 翻上去以后，同一个操作有时在上、有时在下，手指和眼睛都要重新找位置；
+    // 而下方空间不够是可以解决的 —— 见第 ⑤ 步，把画布整体往上挪一点就行，
+    // 反正是无限画布，挪一下没有任何代价。
+    // 定位完全交给 CSS 的 top:100% + margin-top，这里只清掉历史内联值，
+    // 千万别再写 panel.style.top —— 会和 CSS 的 margin-top 叠成双份间距。
+    panel.style.top = '';
+    panel.style.bottom = '';
+    panel.style.marginTop = '';
+    panel.style.marginBottom = '';
+    panel.style.maxHeight = '';
+    panel.style.transform = '';
+    panel.style.transformOrigin = 'center top';
+
+    // ③ 水平：对齐卡片中心线（左边缘 50%，再往回挪半个面板宽）
+    panel.style.left = '50%';
+    panel.style.marginLeft = -width / 2 + 'px';
+
+    // ④ 贴着窗口左右边缘时整体往里让，保证整块面板都在窗口里
+    const rect0 = panel.getBoundingClientRect();
+    let dx = 0;
+    if (rect0.right > view.right - pad) dx = view.right - pad - rect0.right;
+    if (rect0.left + dx < view.left + pad) dx = view.left + pad - rect0.left;
+    if (dx) panel.style.marginLeft = -width / 2 + dx + 'px';
+
+    placePanelVertical(panel, view, box, autoShift, pad);
+  }
+
+  // ⑤ 竖直方向：面板永远往下画，绝不翻到卡片上方。
+  //
+  // 处理顺序（不能颠倒）：
+  //   ① 面板比整屏还高 —— 先压到整屏内让它自己滚。底栏是 sticky 的，
+  //      压完「生成」按钮仍然贴着面板下沿，不会丢。
+  //   ② 整块塞进视口 —— **一次**算出唯一偏移，平移画布。
+  //      面板挂在卡片下面，跟卡片同在 .world 里；viewport.y 就是屏幕像素，
+  //      挪多少面板就跟着挪多少，一比一，不存在误差累积。
+  //      上下两个方向都设了上限：卡片顶部不许掉出视口上边、也不许掉出下边，
+  //      否则卡片被推出视野，用户会以为卡片丢了 —— 那比面板矮一截更糟。
+  //   ③ 挪到极限还差一点 —— 兜底压 maxHeight，面板内部滚动。
+  //
+  // 为什么第 ② 步必须一次算完：
+  //   如果先「往下挪让面板顶进屏」、再「往上挪让面板底进屏」，两步方向相反，
+  //   同一轮里互相抵掉；下一轮又从新位置重算，画布就在两处之间来回跳，
+  //   看起来是面板在抖。合成一个 dy 之后位移是单调的：要么刚好放下，
+  //   要么被「卡片不出视野」卡住，下一轮算出的 dy 只会更小。
+  function placePanelVertical(panel, view, box, autoShift, pad) {
+    // 写 maxHeight 用 CSS 像素，量 rect 拿到屏幕像素。面板被 .world 的 scale
+    // 缩过、又用自身 zoom 抵消，两者乘起来 ≈1 但不正好是 1（zoom 有 0.35 下限），
+    // 所以要按实测比例换算；不换算的话反复压缩会越压越矮。
+    const toCssPx = (screenPx) => {
+      const live = panel.getBoundingClientRect();
+      const scale = panel.offsetHeight > 0 ? live.height / panel.offsetHeight : 1;
+      return Math.max(1, Math.round(screenPx / (scale || 1)));
+    };
+    const topPad = view.top + pad;
+    const bottomPad = view.bottom - pad;
+    const roomH = Math.max(160, bottomPad - topPad);
+
+    // ① 面板本身比整屏高：先压到整屏内
+    let rect = panel.getBoundingClientRect();
+    if (rect.height > roomH) {
+      panel.style.maxHeight = toCssPx(roomH) + 'px';
+      rect = panel.getBoundingClientRect();
+    }
+
+    // ② 一次算出唯一偏移 dy（dy>0 画布下移，dy<0 画布上移）
+    if (autoShift) {
+      // 只有卡片本身还在视野里才动画布。卡片整个被拖出视野时，用户是故意在看别处，
+      // 这时候把画布拽回来只会让人莫名其妙（而且可能是上千像素的大跳）。
+      const cardOnScreen = box.bottom > topPad && box.top < bottomPad;
+      // 1 像素以内的差不算差：rect 是小数，平移后又会有缩放取整，
+      // 不留这点容差的话每次重贴都会再挪 0.x 像素，看着就是面板在微微游走。
+      const EPS = 1;
+      let dy = 0;
+      // 让位幅度上限：半屏。
+      //
+      // 为什么不"能挪多少挪多少"：卡片被拖到屏幕外时，面板要整个人塞进视口可能得挪
+      // 上千像素，那一下画面剧变，用户会以为点错了。半屏以内是「滚动到可视区」
+      // 的量级，看上去像画面滑了一段，不会失去方向感。
+      // 半屏又足够让「贴着屏幕底边的卡片」把 384px 的面板整个腾出来 ——
+      // 这是最常见的一档，再小就只剩压缩、看不了提示词。
+      const shiftCap = Math.round(view.height * 0.5);
+      if (cardOnScreen) {
+        if (rect.top < topPad - EPS) {
+          // 面板顶部跑到视口上边之外：画布往下挪。
+          // 上限除了半屏，还有「卡片顶边别掉出视口下边」—— 否则等于把卡片推出屏幕。
+          const maxDown = Math.min(shiftCap, Math.max(0, bottomPad - box.top));
+          dy = Math.min(topPad - rect.top, maxDown);
+        } else if (rect.bottom > bottomPad + EPS) {
+          // 面板底边超出视口：画布往上挪，最多挪到「卡片顶部贴住视口上边」
+          const maxUp = Math.min(shiftCap, Math.max(0, box.top - view.top));
+          dy = Math.min(0, Math.max(bottomPad - rect.bottom, -maxUp));
+        }
+      }
+      if (dy) {
+        viewport.y += dy;
+        applyViewport();
+        rect = panel.getBoundingClientRect();
+      }
+    }
+
+    // ③ 兜底：还超出底边就压高度（面板内部滚，底栏 sticky 住按钮不会丢）。
+    //    下限取「底栏（模型+参数+生成）有多高」，而不是随手写个 160：
+    //    压得比底栏还矮时，底栏会被挤出面板可视区，按钮照样丢。
+    const restOver = rect.bottom - bottomPad;
+    if (restOver > 0) {
+      const footerEl = panel.querySelector('.node-footer');
+      const footerH = footerEl ? footerEl.getBoundingClientRect().height : 0;
+      const floorH = Math.max(96, Math.min(200, Math.round(footerH) || 160));
+      panel.style.maxHeight = toCssPx(Math.max(floorH, rect.height - restOver)) + 'px';
+    }
   }
 
   function refreshZOrder() {
@@ -4867,13 +4949,17 @@
   }
 
   // ---------- 提示词框：高度偏好 / 字数统计 / 滚动位置 ----------
-  // 默认「矮」（76px，约 3 行），点进去自动长高到 220px；
-  // 手动加高或拖框底只记住这一张卡片，下次打开这张卡还是这个高度。
+  // 高度**固定**：每张卡片的提示词框一直是 220px（约 9 行），点进去不长高、
+  // 点出去也不缩回。原因很实际：写长提示词时，鼠标一点画布（比如去拖一张参考图），
+  // 框就缩回 3 行、滚动位置跟着跳，反复几次非常难受。
+  // 想看更高：点「加高」或直接拖框底，高度记在这张卡片自己名下。
   // 按画布分开存：打开别的画布不会把这块画布记的高度清掉
   const PROMPT_SIZE_KEY = 'canvas.promptHeights.' + canvasId;
   const PROMPT_LEGACY_KEY = 'canvas.promptSize';
-  const PROMPT_SHORT_H = 76;
-  const PROMPT_TALL_H = 220;
+  // 固定高度。老版本按焦点在 76 / 220 之间切换，现在统一按 220 起步。
+  const PROMPT_FIXED_H = 220;
+  // 「加高」按钮加到的档位（比默认再高一档，写超长提示词用）
+  const PROMPT_TALL_H = 380;
   const PROMPT_MIN_H = 60;
   // 每张卡片各自记住的高度：{ [nodeId]: 高度 }
   let promptHeights = readPromptHeights();
@@ -5010,24 +5096,22 @@
     savePromptHeights();
   }
 
-  // 没手动调过：不点进去 76px，点进去 220px；手动调过：一直是调好的高度
-  function promptHeightFor(node, box, focusedOverride) {
+  // 提示词框高度：固定值，跟「有没有点进去」完全无关。
+  //   · 没手动调过 → 固定 220px；
+  //   · 手动加高 / 拖过框底 → 一直是那个高度（记在这张卡片名下）。
+  function promptHeightFor(node) {
     const limit = promptHeightLimit();
     const custom = promptCustomHeight(node);
     if (custom) return clamp(custom, PROMPT_MIN_H, limit);
-    const focused =
-      focusedOverride === undefined
-        ? Boolean(box && (document.activeElement === box || box.contains(document.activeElement)))
-        : Boolean(focusedOverride);
-    return focused ? Math.min(PROMPT_TALL_H, limit) : PROMPT_SHORT_H;
+    return Math.min(PROMPT_FIXED_H, limit);
   }
 
-  function applyPromptHeight(box, node, focusedOverride) {
+  function applyPromptHeight(box, node) {
     if (!box) return;
     // 原地展开时提示词框跟着放大，长提示词看起来才舒服
     const height = promptWideOn(node)
-      ? Math.max(promptWideHeight(), promptHeightFor(node, box, focusedOverride))
-      : promptHeightFor(node, box, focusedOverride);
+      ? Math.max(promptWideHeight(), promptHeightFor(node))
+      : promptHeightFor(node);
     box.style.height = Math.round(Math.min(height, promptHeightLimit())) + 'px';
   }
 
@@ -5067,7 +5151,7 @@
     btn.setAttribute('aria-pressed', custom ? 'true' : 'false');
     btn.setAttribute('aria-label', custom ? '还原提示词框高度' : '加高提示词框');
     btn.title = custom
-      ? '把这张卡片的提示词框恢复默认高度（不点进去约 3 行，点进去自动长高）'
+      ? '把这张卡片的提示词框恢复默认高度（固定 ' + PROMPT_FIXED_H + ' 像素，不会随点进点出伸缩）'
       : '把这张卡片的提示词框加高，写长提示词更舒服（只影响这张卡）';
   }
 
@@ -5270,9 +5354,8 @@
       // 先把用户正在看的位置记下来：等框变高以后再取，scrollTop 已经被压过一遍了
       const scrollSnap = on ? promptScrollSnapshot(el) : null;
       setPromptWide(node, on);
-      // 展开时框加高；收起时把这张卡的手动高度清掉，回到原来的自动伸缩
-      if (on) setPromptCustomHeight(node, promptWideHeight());
-      else clearPromptCustomHeight(node);
+      // 大面板的高度由 applyPromptHeight 里 promptWideHeight() 兜着，
+      // 不往「自定义高度」里写：写了以后收起大面板，框会停在那个很高的尺寸回不去。
       el.classList.toggle('wide', on);
       applyPromptHeight(box, node);
       paintPromptSizeButton(size, node);
@@ -8837,14 +8920,13 @@
     box.spellcheck = false;
     box.dataset.placeholder = preset.placeholder;
     renderPrompt(box, node, data.text);
-    // 平时矮一点，点进去自动长高；这张卡片手动调过高度的，一直按它自己的高度
+    // 固定高度：点进去不长高、点出去不缩回，框的大小始终可预期
     applyPromptHeight(box, node);
     box.addEventListener('focus', () => {
       if (mentionBox && mentionBox !== box) closeMention();
       editingId = node.id;
       el.classList.add('editing');
-      // 点进来就长高，几千字的提示词一眼能看一大段
-      applyPromptHeight(box, node);
+      // 高度不随焦点变，这里不再重算，只保证面板位置与光标可见
       requestPlacePanel();
       schedulePromptCaretFollow(box);
     });
@@ -8852,8 +8934,7 @@
       // 这张卡片的 DOM 已经被远端内容换掉了：失焦时手里的字是过期的，不能提交
       if (el.dataset.remoteStale === '1') return;
       rememberPromptScroll(node, box);
-      // 没手动调过的才收回默认高度，几十张卡片排在一起还是整整齐齐
-      applyPromptHeight(box, node, false);
+      // 高度固定，失焦不再缩回；这里只重贴一次面板（内容可能变过）
       requestPlacePanel();
       if (editingId !== node.id) return;
       editingId = null;
@@ -10454,6 +10535,42 @@
     scheduleMinimap();
   }
 
+  // 模型规格里的素材上限（服务端随模型清单一起发过来）。
+  // 特惠这类模型 maxRefVideos = 0，就是完全不收参考视频；不在这里拦住的话，
+  // 用户能连上、能写提示词、点生成时才被服务端拒掉，白折腾一趟。
+  function refQuotaOf(target) {
+    const spec = modelSpecOf(target.type, target.data);
+    if (!spec) return null;
+    const num = (v) => (v === undefined || v === null ? null : Number(v));
+    return {
+      image: num(spec.maxRefs),
+      video: num(spec.maxRefVideos),
+      audio: num(spec.maxRefAudios),
+      total: num(spec.maxRefTotal),
+    };
+  }
+
+  // 这张卡片再连一个 kind 类素材会不会超限；超了就返回一句能直接弹给用户的话
+  function refQuotaBlock(target, kind) {
+    const q = refQuotaOf(target);
+    if (!q) return '';
+    const name = kind === 'video' ? '参考视频' : kind === 'audio' ? '参考音频' : '参考图';
+    const unit = kind === 'image' ? ' 张' : ' 个';
+    const plan = rolePlan(target).filter((item) => item.source);
+    const used = plan.filter((item) => (item.kind || 'image') === kind).length;
+    const max = q[kind];
+    if (max !== null && Number.isFinite(max) && used + 1 > max) {
+      if (max === 0) {
+        return '模型「' + String(target.data.model || '') + '」不收' + name + '，换一个支持' + name + '的模型再连';
+      }
+      return '模型「' + String(target.data.model || '') + '」最多接 ' + max + unit + name + '，这张卡片上已经有了 ' + used + unit + '，先断开一个再连';
+    }
+    if (q.total !== null && Number.isFinite(q.total) && plan.length + 1 > q.total) {
+      return '模型「' + String(target.data.model || '') + '」的参考素材合计最多 ' + q.total + ' 个，现在已经连了 ' + plan.length + ' 个';
+    }
+    return '';
+  }
+
   function addEdge(sourceId, targetId) {
     if (!sourceId || !targetId || sourceId === targetId) return false;
     const source = byId(sourceId);
@@ -10483,6 +10600,15 @@
     if (edges.some((edge) => edge.sourceId === sourceId && edge.targetId === targetId)) {
       toast('这两张卡片已经连过了');
       return false;
+    }
+    // 模型自己收不收这类素材：特惠模型完全不收参考视频，超量的也一并拦在连线这一步
+    if (target.type === 'video') {
+      const kind = mediaKindOf(source) || 'image';
+      const blocked = refQuotaBlock(target, kind);
+      if (blocked) {
+        toast(blocked);
+        return false;
+      }
     }
     // 首尾帧模式：只收两张图片，第三张直接拦住，免得连线了却不生效
     const frameMode = target.type === 'video' && target.data && target.data.params && target.data.params.mode === 'frames';
@@ -11336,7 +11462,9 @@
       data: {
         text: '',
         model: pickDefaultModel(type),
-        params: { ...(PARAM_DEFAULTS[type] || {}) },
+        // 新卡片一出生就按模型的默认档位来（SD2.5 Flash 默认 5 秒 / 1080p），
+        // 否则会带着全局的 30 秒 / 720p，用户一上手就撞到「超出 5–30 秒」。
+        params: seedParamsOf(type, pickDefaultModel(type)),
         sized: false,
         // 新建的图片 / 视频 / 快速视频按默认盒子摆着，生成结果不再按原图比例拉高
         boxed: !(opts && opts.boxed === false) && (type === 'image' || type === 'video' || type === 'quick'),
@@ -12374,7 +12502,6 @@
     // 拖动只写 transform（GPU 合成），不碰 left/top，整帧不触发重排
     const nodeIndex = new Map(nodes.map((item) => [item.id, item]));
     let frame = 0;
-    let flipAt = 0;
 
     const paintDrag = () => {
       frame = 0;
@@ -12390,14 +12517,10 @@
       if (memberHost) paintMemberDrag(node, memberHost);
       updateEdgePaths(origin.map((item) => item.node), nodeIndex);
       placeAlignBar();
-      // 面板翻面要量尺寸：拖得再快也最多 8 帧查一次
-      if (expandedId === node.id) {
-        const now = performance.now();
-        if (now - flipAt > 120) {
-          flipAt = now;
-          refreshPanelFlip(node);
-        }
-      }
+      // 拖动途中不碰面板：面板是卡片的子元素、同在 .world 里，跟着卡片一起走。
+      // 这里原本每 120ms 量一次尺寸判断要不要翻面（那块逻辑已经删了），
+      // 现在什么都不用判 —— 拖动这一路只写 transform，一次重排都不触发。
+      // 落位（推画布 / 压高度）统一在松手后的 commitDrag 里做一次。
     };
 
     // 松手：把 transform 一次性落到 left/top 上，视觉位置不变
@@ -12416,6 +12539,11 @@
         item.node.y = Math.round(item.node.y);
       });
       if (memberHost) paintMemberDrag(node, memberHost);
+      // 松手后重贴一次：卡片落到底部时，画布往上让一点，把面板整个腾出来。
+      // 让位幅度受 placePanel 里「卡片顶部不许被推出视野」限制，
+      // 所以只有几十像素（卡片贴着屏幕底时），不会出现卡片被拽走一大截；
+      // 卡片被拖到完全在屏幕外时则完全不让位（那条路 placePanel 自己判断）。
+      if (expandedId && movingIds.has(expandedId)) placePanel();
     };
 
     const onMove = (moveEvent) => {
@@ -12825,6 +12953,9 @@
       endInteraction();
       if (moved) {
         flushViewport();
+        // 画布平移完，面板在视口里的位置变了：重贴一次重新算该不该压矮。
+        // 不推画布 —— 用户自己刚挪的视角，再给推回去就永远挪不动了。
+        if (expandedId) placePanel(false);
         scheduleSave();
       } else if (clearOnClick) {
         clearSelection();
@@ -14267,7 +14398,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     mmCanvas.addEventListener('pointerup', stop);
     mmCanvas.addEventListener('pointercancel', stop);
     window.addEventListener('resize', scheduleMinimap);
-    // 窗口大小一变，展开的面板要重新量：可能得翻面，也可能要收窄
+    // 窗口大小一变，展开的面板要重新量：可能得收窄，也可能要把画布挪一下
     window.addEventListener('resize', () => {
       if (expandedId) placePanel();
     });

@@ -1273,6 +1273,53 @@
         '传完之后下单模板里可以用 {{refIds}} {{refUploadUrls}} {{refImageIds}} {{refVideoIds}} {{refAudioIds}}；没上传或没拿到地址时，{{refs}} 系列仍然装的是素材内容本身。'
       )
     );
+    body.appendChild(
+      makeCheckbox(
+        '参考图本来就是公网 HTTPS 地址时，直接透传（不再下载→压缩→上传）',
+        channel.directRefUrls === true,
+        (checked) => {
+          channel.directRefUrls = checked;
+          queueSave(true);
+        }
+      )
+    );
+    body.appendChild(
+      hintRow(
+        '给「只认公网 HTTPS 素材」的平台用（如 xm API 的 SD2.5 系列）。开着时：素材本身是 https 地址就直接发这个地址，省掉一次下载 + 一次图床往返；仍是本地文件 / 被压缩过的，照旧走上面的上传。'
+      )
+    );
+
+    body.appendChild(el('div', 'advanced-title', '提示词里怎么称呼参考素材'));
+    body.appendChild(
+      makeCheckbox(
+        '把提示词里的「图42」「图45」换成平台认的「图片1」「图片2」（按本次提交顺序重新编号）',
+        channel.refPromptIndex === true,
+        (checked) => {
+          channel.refPromptIndex = checked;
+          // 关掉主开关时，@ 前缀也跟着失效，免得留下一个「开了但没用」的孤儿状态
+          if (!checked) channel.refPromptAt = false;
+          queueSave(true);
+          render();
+        }
+      )
+    );
+    if (channel.refPromptIndex === true) {
+      body.appendChild(
+        makeCheckbox(
+          '换成「@图片1」这种带 @ 的写法（元梦「源梦创作」要求带 @；Prompt Hubs 不要 @）',
+          channel.refPromptAt === true,
+          (checked) => {
+            channel.refPromptAt = checked;
+            queueSave(true);
+          }
+        )
+      );
+    }
+    body.appendChild(
+      hintRow(
+        '有的平台只按参考素材的「出现顺序」认图，提示词里写画布上的全局编号（图42）它完全看不懂，参考图等于没接上。开着这个开关，提交时会按本次真正带上去的素材重新编号：图片从 图片1 开始、视频从 视频1 开始、音频各自算。只替换本次确实带上去的名字，没有的一律不动。默认关闭，别的平台（直接看素材地址的）不要开。'
+      )
+    );
 
     if (!channel.refLimits) channel.refLimits = JSON.parse(JSON.stringify(DEFAULT_REF_LIMITS));
     const limits = channel.refLimits;
@@ -1393,6 +1440,19 @@
       fieldRow('结果取值路径', makeText(spec.resultUrl, (v) => { spec.resultUrl = v; queueSave(); }, 'data.0.url'))
     );
     box.appendChild(grid2);
+    const grid2b = el('div', 'grid-2');
+    grid2b.appendChild(
+      fieldRow(
+        '单次请求体上限（MB，0 = 不检查）',
+        makeNumber(spec.maxBodyMB, (v) => { spec.maxBodyMB = v === '' ? 0 : Number(v); queueSave(); }, 0, 1024)
+      )
+    );
+    box.appendChild(grid2b);
+    box.appendChild(
+      hintRow(
+        '给「把整个请求体读进内存」的平台用（例如 520ruo 的 64 MB 网关上限）。参考图内嵌 Base64 时最容易撞到：超出时在本地就拦住并说明差多少，不再白发一次请求。其它通道留 0 即可。'
+      )
+    );
     box.appendChild(
       fieldRow('base64 取值路径', makeText(spec.resultB64, (v) => { spec.resultB64 = v; queueSave(); }, 'data.0.b64_json'))
     );
@@ -1407,7 +1467,7 @@
     }
     box.appendChild(
       hintRow(
-        '可用占位：{{prompt}} {{promptRaw}} {{model}} {{n}} {{size}} {{sizeKey}} {{ratio}} {{duration}} {{resolution}} {{mode}} {{refs}} {{refCount}} {{refNames}} {{ref0}} {{ref1}}…'
+        '可用占位：{{prompt}} {{promptRaw}} {{model}} {{n}} {{size}} {{sizeKey}} {{ratio}} {{duration}} {{resolution}} {{resolutionLower}} {{mode}} {{mediaOperation}} {{refs}} {{refCount}} {{refNames}} {{refImages}} {{refVideos}} {{refAudios}} {{refMedia}} {{refMediaInputs}} {{refInlineImages}} {{refInlineAudios}} {{ref0}} {{ref1}}…'
       )
     );
     box.appendChild(

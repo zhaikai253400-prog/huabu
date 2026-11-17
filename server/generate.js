@@ -57,9 +57,90 @@ function snippet(text, limit) {
   return body.length > max ? body.slice(0, max) + '…' : body;
 }
 
+// 提示词里常带着从别处（聊天窗口、文档、代码块）复制来的 Markdown 围栏：
+//     ```text
+//     镜号一｜30秒 …
+//     ```
+// 这些反引号对模型毫无意义，却要占 token、还可能让模型以为在写代码而不是描述画面。
+// 只去掉「独占一行的开头围栏」和「独占一行的结尾围栏」，正文一个字符都不动 ——
+// 万一用户真的在提示词里讲了反引号（例如「画面里出现 ` 符号」），也不会被误删。
+function stripPromptFence(text) {
+  let body = String(text === undefined || text === null ? '' : text);
+  if (!body) return '';
+  // 开头：整行只有三个以上反引号，后面可跟语言标记（text / markdown / plaintext…）。
+  // 围栏前面允许有若干空行 —— 从聊天窗口 / 文档里连版复制时常常带一行空行进来。
+  const lead = body.match(/^([ \t]*(?:\r?\n[ \t]*)*)(`{3,}[ \t]*[A-Za-z0-9_+-]*[ \t]*(?:\r?\n|$))/);
+  if (lead) body = body.slice(lead[0].length);
+  // 结尾：整行只有三个以上反引号；围栏前后都可以夹空行
+  const tail = body.match(/((?:\r?\n[ \t]*)*)`{3,}[ \t]*(?:(?:\r?\n[ \t]*)*)$/);
+  if (tail) body = body.slice(0, body.length - tail[0].length);
+  return body;
+}
+
 // 送接口前把提示词里的 @[图1] 收拾成平台看得懂的写法
 function promptForApi(text) {
-  return refs.forApi(text);
+  return stripPromptFence(refs.forApi(text));
+}
+
+// 把画布里的素材名（「图42」「图45」）换成平台认的「图片N」序号。
+//
+// 为什么必须做：Prompt Hubs 的模型（Seedance / SD2.5 全系）只按
+// media_inputs 里图片的**出现顺序**理解参考图。平台文档原话：
+// 「提示词里用『图片1、视频1』按类型加序号引用素材，不要把素材 ID 写进提示词」。
+// 而画布上的素材名是「图42」「图45」这种全局编号，跟本次提交的顺序毫无关系 ——
+// 模型看到「图42 是林振南」根本不知道指的是第几张参考图，结果就是
+// 图虽然传上去了（平台校验通过、生成也成功），画面里却完全没用上。
+//
+// 替换规则刻意保守，宁可漏换也不能错换：
+//   · 只认「图N」这种纯阿拉伯数字名字，且该名字必须是本次真正带上来的素材；
+//   · 同一个名字出现几次换几次；
+//   · 长名字优先替换，避免「图4」把「图42」的前半截换掉；
+//   · 图片 / 视频 / 音频分开计数，各自从 1 开始（平台也是这么算的）。
+function remapRefNamesInPrompt(text, refs, opts) {
+  const source = String(text || '');
+  if (!source) return source;
+  const list = Array.isArray(refs) ? refs : [];
+  if (!list.length) return source;
+
+  const counters = { image: 0, video: 0, audio: 0 };
+  const mapping = [];
+  list.forEach((item) => {
+    const kind = item && item.kind === 'video' ? 'video' : item && item.kind === 'audio' ? 'audio' : 'image';
+    counters[kind] += 1;
+    const name = String((item && item.name) || '').trim();
+    if (!name) return;
+    const hit = name.match(/^(图|视频|音频)\s*(\d+)$/);
+    if (!hit) return;
+    const prefix = kind === 'video' ? '视频' : kind === 'audio' ? '音频' : '图片';
+    // 有的平台要求带 @ 前缀（元梦「源梦创作」文档：在提示词中用 @图片1 / @视频1 / @音频1 引用），
+    // 不带 @ 它会当成普通文字，参考图等于没接上。
+    const lead = opts && opts.atPrefix === true ? '@' : '';
+    const target = lead + prefix + counters[kind];
+    if (name === target) return;
+    mapping.push({ from: name, to: target });
+  });
+  if (!mapping.length) return source;
+  mapping.sort((a, b) => b.from.length - a.from.length);
+
+  let out = source;
+  mapping.forEach((pair) => {
+    // 转义正则元字符，再追加「后面不能紧跟数字」的后瞻，
+    // 这样「图4」不会把「图42」吃掉。
+    const escaped = pair.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // 边界要卡死：名字后面不能紧跟中文/数字/字母，否则「图45特写」会被
+    // 误换成「图片1特写」——那不是引用素材，是另一个词了。
+    // 边界只挡「数字和字母」：
+    //   · 挡数字 → 「图4」不会把「图42」的前半截吃掉；
+    //   · 挡字母 → 不会把「图45a」这种奇怪编号改坏；
+    //   · **放行中文** → 「图45是荒废祠堂」（不带空格）这种写法必须能换，
+    //     这是中文提示词里最常见的写法，漏换就等于参考图彻底失效。
+    //     代价是「图45特写」也会变成「图片1特写」——语义依然通顺，可接受。
+    // 名字前面可能已经有一个 @（用户写的「@图42」）。把 @ 一起吃掉再按需要补回来，
+    // 否则 atPrefix 的通道会得到「@@图片1」，不带 @ 的通道会得到「@图片1」——两种都错。
+    const pattern = new RegExp('@?' + escaped + '(?![0-9A-Za-z])', 'g');
+    out = out.replace(pattern, pair.to);
+  });
+  return out;
 }
 
 // ---------- 尾部提示词 ----------
@@ -412,7 +493,12 @@ async function fitRefsToLimits(refs, channel, progress, options) {
     }
 
     const cfg = channel && channel.refCompress ? channel.refCompress : channels.defaultRefCompress();
-    if (always || needShrink()) {
+    // 已经能直接透传给平台的公网图（remoteUrl 是 https）不必参与「提交压缩」：
+    // 它根本不会再上传，压缩只会让本地副本和平台实际收到的图对不上。
+    // 注意仍要按通道上限校验，超限了还是得压（下面 needShrink 的条件不受影响）。
+    const directReady = group.every((item) => /^https:\/\//i.test(String(item.remoteUrl || '')));
+    const wantCompress = always && !directReady;
+    if (wantCompress || needShrink()) {
       // 总开关关掉时，超限兜底也照常执行：旧通道里遗留的「自动压缩关」不再拦住提交
       const compressible = group.filter(
         (item) => ['.png', '.jpg', '.jpeg', '.webp', '.bmp'].indexOf(String(item.ext || '').toLowerCase()) >= 0
@@ -425,7 +511,7 @@ async function fitRefsToLimits(refs, channel, progress, options) {
           item.rawBuffer = item.buffer;
           item.rawExt = item.ext;
         });
-        const steps = compressionSteps(cfg, always);
+        const steps = compressionSteps(cfg, wantCompress);
         // 总开关打开时第 1 档一定执行；之后只有超出限制才继续加码
         for (let index = 0; index < steps.length; index += 1) {
           if (index > 0 && !needShrink()) break;
@@ -518,6 +604,8 @@ async function prepareRefs(config, list, channel, progress, options) {
     const ext = assets.sniffExt(raw.buffer) || raw.ext || assets.extFromMime(raw.mime) || '';
     const mime = raw.mime || MIME_BY_EXT[ext] || '';
     if (kind) await checkRef(channel, kind, (KIND_TEXT[kind] || '参考素材') + '「' + name + '」', ext, raw.buffer);
+    // 参考地址本身就是公网 https、且通道允许直连时，保留原地址（见下面 remoteUrl 的说明）
+    const directRefUrl = channel && channel.directRefUrls === true && /^https:\/\//i.test(String(url));
     out.push({
       dataUrl: dataUrlOf(raw.buffer, mime),
       buffer: raw.buffer,
@@ -529,12 +617,20 @@ async function prepareRefs(config, list, channel, progress, options) {
       // 原始引用地址（一般是 /media/xxx 这种相对路径）。
       // 保留下来是为了能把它冻结进任务快照：服务重启后还知道这次用了哪些素材。
       src: String(url || ''),
-      remoteUrl: '',
+      // 有的通道只认公网 HTTPS 素材（xm API 的 SD2.5 系列就是这样）。
+      // 如果这张参考图本来就是公网 https 地址，就直接把它当作素材地址，
+      // 不再「下载 → 压缩 → 再传图床」来回折腾：少两次网络往返，也少一个会失败的环节。
+      remoteUrl: directRefUrl ? String(url) : '',
       remoteId: '',
     });
   }
   const stats = await fitRefsToLimits(out, channel, progress, options);
   out.refStats = stats;
+  // 压缩过的图，内容已经和原地址上的不是同一张了，不能再拿原地址糊弄平台：
+  // 清掉 remoteUrl，让 uploadRefs 把压缩后的这一份重新传上去。
+  out.forEach((item) => {
+    if (item.compressed && item.remoteUrl) item.remoteUrl = '';
+  });
   if (stats.compressedCount && typeof progress === 'function') {
     const imageStats = stats.byKind.image || { beforeBytes: 0, afterBytes: 0 };
     progress({
@@ -556,6 +652,8 @@ async function uploadRefs(channel, refs, ctx, progress) {
   if (!String(spec.path || '').trim()) throw errorKinds.configError('通道「' + channel.name + '」开了「先上传素材」，但没填上传路径');
   for (let index = 0; index < refs.length; index += 1) {
     const item = refs[index];
+    // 已经是公网 https 地址了（通道允许直连）：平台收的就是这种地址，不用再传一次
+    if (item.remoteUrl && /^https:\/\//i.test(item.remoteUrl)) continue;
     if (ctx && ctx.signal && ctx.signal.aborted) throw new Error('已取消');
     progress({ stage: '正在上传参考素材 ' + (index + 1) + '/' + refs.length + '…' });
     // 名字里已经带了后缀就别再加一遍
@@ -584,11 +682,31 @@ async function fetchMedia(config, found, channel) {
     if (!decoded) throw new Error('素材内容解不开');
     return { buffer: decoded.buffer, mime: decoded.mime };
   }
+  // 下载地址就在通道自己的域名上时，几乎肯定是「必须带鉴权」的取件接口
+  // （例如 xm API 的 /videos/{id}/content）。先无头试一次等于白跑一趟 401，
+  // 所以这种情况直接把鉴权带上；跨域地址（图床、CDN）仍然先不带密钥，
+  // 免得把 API Key 泄露给不相干的下游。两条路都留了兜底重试。
+  const sameHost = (function () {
+    try {
+      return new URL(found.url).host === new URL(channel && channel.baseUrl).host;
+    } catch {
+      return false;
+    }
+  })();
+  const withAuth = () => assets.fetchBuffer(found.url, channels.buildHeaders(channel), 300000);
+  const noAuth = () => assets.fetchBuffer(found.url, {}, 300000);
+  if (sameHost) {
+    try {
+      return await withAuth();
+    } catch (error) {
+      return await noAuth();
+    }
+  }
   try {
-    return await assets.fetchBuffer(found.url, {}, 300000);
+    return await noAuth();
   } catch (error) {
-    // 有的平台下载地址也要带密钥，那就补上再试一次
-    return await assets.fetchBuffer(found.url, channels.buildHeaders(channel), 300000);
+    // 有的平台下载地址也要带密钥（外域 CDN 也偶有这种）
+    return await withAuth();
   }
 }
 
@@ -638,22 +756,144 @@ function faceWanted(payload, channel, model, refs, kind) {
   return (refs || []).some((item) => item && item.kind === 'image');
 }
 
-// 通道级参考图上限取的是「这个通道最宽松的模型」（例如通道5 放 13 张给 Nano），
-// 但 GPT 系列只收 9 张。这里按模型再卡一次，别等平台 400 才知道超了。
-function checkModelRefs(model, refs, kind) {
-  const spec = modelSpecs.forModel(model);
-  const max = Number(spec && spec.maxRefs);
-  if (!max || !Number.isFinite(max) || max <= 0) return;
-  const images = (refs || []).filter((item) => item && (item.kind === 'image' || !item.kind));
-  if (images.length <= max) return;
-  throw new Error('模型「' + model + '」最多接 ' + max + ' 张参考图，现在带了 ' + images.length + ' 张，先在卡片上减几张再生成');
+
+// 提交前按模型能接受的档位再核对一次时长 / 比例。
+// 为什么服务端还要再拦一遍：前端选项是照着模型清单渲染的，正常情况下点不出非法值，
+// 但定时组快照、批量、老画布里的残留参数、以及直接打 /api/generate 的脚本都能绕过前端。
+// 这类参数错了平台只会回 400，而 400 之前可能已经扣了一次额度 —— 宁可在这里先拦下来。
+//
+// 只「报错」不「悄悄改」：时长和比例会直接改变成片内容和计费，
+// 未经用户同意就改掉比报错更糟（用户以为在跑 30 秒，实际出来 5 秒）。
+// 分辨率是例外，见 buildVars 里的 resolvedResolution：那一档只影响清晰度，收敛更顺手。
+function checkModelParams(model, kind, input, channelId) {
+  if (kind !== 'video') return;
+  const spec = modelSpecs.forModel(model, channelId);
+  if (!spec) return;
+  const label = '模型「' + model + '」';
+  const seconds = Number(input && input.duration);
+  const allowedDurations = Array.isArray(spec.durations) ? spec.durations : [];
+  const minSec = Number(spec.minDurationSec) || 0;
+  const maxSec = Number(spec.maxDurationSec) || 0;
+  if (Number.isFinite(seconds) && seconds > 0) {
+    // 判据分两层，别搞混：
+    //   minDurationSec / maxDurationSec 是**平台真正接受的范围**（wan 系列是 2–30 秒内的任意整数）；
+    //   durations 只是**卡片下拉里给的常用档位**（5/10/15/30），是范围的子集，不是白名单。
+    // 所以能用范围判就用范围判，拿档位清单当白名单会把 12 秒这种合法值误杀。
+    const rounded = Math.round(seconds);
+    if (minSec && maxSec) {
+      if (rounded < minSec || rounded > maxSec) {
+        throw new Error(
+          label + '不支持 ' + rounded + ' 秒。它能接受的是 ' + minSec + '–' + maxSec + ' 秒（整数秒）。'
+        );
+      }
+    } else if (allowedDurations.length && allowedDurations.indexOf(String(rounded)) < 0) {
+      throw new Error(
+        label + '不支持 ' + rounded + ' 秒。它能接受的是：' + allowedDurations.join(' / ') + ' 秒。'
+      );
+    }
+  }
+  const ratio = String((input && input.ratio) || '').trim();
+  const allowedRatios = Array.isArray(spec.ratios) ? spec.ratios : [];
+  if (ratio && allowedRatios.length && allowedRatios.indexOf(ratio) < 0) {
+    throw new Error(
+      label + '不支持 ' + ratio + ' 这个比例，它支持：' + allowedRatios.join(' / ') +
+        '。在这张卡片上换一个比例再生成。'
+    );
+  }
+}
+
+// 通道级上限取的是「这个通道最宽松的模型」（例如通道5 放 13 张给 Nano），
+// 但通道里的每个模型各自能收多少并不一样：GPT 系列只收 9 张，SD2.5 特惠连参考视频都不收。
+// 这里按模型再卡一次，别等平台 400 才知道超了 —— 400 之前额度可能已经扣掉了。
+//
+// 三类素材分开判：maxRefs / maxRefVideos / maxRefAudios，0 表示这一类完全不收。
+// maxRefTotal 是「三类加起来」的总数上限（Prompt Hubs 的线路四就是各自 30/10/10 但合计 ≤50）。
+function checkModelRefs(model, refs, kind, channelId) {
+  const spec = modelSpecs.forModel(model, channelId);
+  if (!spec) return;
+  const label = '模型「' + model + '」';
+  const list = refs || [];
+
+  const countOf = (targetKind) =>
+    list.filter((item) => item && (item.kind === targetKind || (targetKind === 'image' && !item.kind))).length;
+
+  const rules = [
+    { kind: 'image', name: '参考图', unit: '张', max: Number(spec.maxRefs) },
+    { kind: 'video', name: '参考视频', unit: '个', max: spec.maxRefVideos === undefined ? null : Number(spec.maxRefVideos) },
+    { kind: 'audio', name: '参考音频', unit: '个', max: spec.maxRefAudios === undefined ? null : Number(spec.maxRefAudios) },
+  ];
+  for (const rule of rules) {
+    if (rule.max === null || !Number.isFinite(rule.max) || rule.max < 0) continue;
+    const used = countOf(rule.kind);
+    if (used <= rule.max) continue;
+    if (rule.max === 0) {
+      throw new Error(
+        label + '不收' + rule.name + '，现在带了 ' + used + ' ' + rule.unit + '。先在卡片上把这些素材取消掉再生成。'
+      );
+    }
+    throw new Error(
+      label + '最多接 ' + rule.max + ' ' + rule.unit + rule.name + '，现在带了 ' + used + ' ' + rule.unit + '，先在卡片上减几个再生成'
+    );
+  }
+
+  // 有的模型只做图生视频（520ruo 的 seedance_2.5_flash 必须至少 1 张参考图），
+  // 纯文字提交会被平台直接拒单。这里先拦住，别让用户白等一次往返。
+  const minImages = Number(spec.minRefs);
+  if (Number.isFinite(minImages) && minImages > 0) {
+    const used = countOf('image');
+    if (used < minImages) {
+      throw new Error(
+        label + '必须至少带 ' + minImages + ' 张参考图（这个模型只做图生视频），现在带了 ' + used +
+          ' 张。先在卡片上挂一张参考图再生成。'
+      );
+    }
+  }
+
+  const maxTotal = Number(spec.maxRefTotal);
+  if (Number.isFinite(maxTotal) && maxTotal > 0) {
+    const total = list.filter(Boolean).length;
+    if (total > maxTotal) {
+      throw new Error(
+        label + '的参考素材合计最多 ' + maxTotal + ' 个（图 / 视频 / 音频加在一起），现在带了 ' + total + ' 个，先在卡片上减几个再生成'
+      );
+    }
+  }
 }
 
 function buildVars(payload, channel, model, size, count, refs, kind) {
+  // 分辨率也得按模型能接受的档位收敛，不能只让前端拦。
+  // 前端选项是照着模型清单渲染的，但定时组、批量、老画布里的残留值、
+  // 以及直接打 /api/generate 的请求，都可能带着这个模型根本没有的档位过来。
+  // 视频看 resolutions（720p/1080p…），图片看 sizes（1K/2K/4K…）；
+  // 模型没登记在 model-specs 里时不动它，免得把新通道的值改坏。
+  const resolvedResolution = (function () {
+    const spec = modelSpecs.forModel(model, channel && channel.id);
+    const raw = String(payload.resolution || (kind === 'image' ? payload.sizeKey : '') || '').trim();
+    if (!spec) return { value: raw.toUpperCase() };
+    const table = Array.isArray(spec.resolutions) && spec.resolutions.length
+      ? spec.resolutions
+      : Array.isArray(spec.sizes) && spec.sizes.length
+      ? spec.sizes
+      : [];
+    if (!table.length) return { value: raw.toUpperCase() };
+    const hit = table.find((item) => String(item).toLowerCase() === raw.toLowerCase());
+    // 传上来的档位模型不收：退回这个模型的默认档，而不是把无效值原样发出去
+    const picked = hit || spec.defaultResolution || table[0];
+    return { value: String(picked).toUpperCase() };
+  })();
   // kind 决定去通道里查哪一份人脸处理名单
+  // 通道开启「提示词用图片N」时，把「图42」这类画布素材名换成平台认的「图片2」。
+  // 必须在 promptForApi 之后做：那一步只负责去掉 @[图1] 的方括号，
+  // 不认识「图45」这种裸写法；真正的序号映射在这里。
+  const rawPrompt = String(payload.apiPrompt || promptForApi(payload.prompt || payload.promptRaw || ''));
+  const finalPrompt =
+    channel && channel.refPromptIndex === true
+      ? remapRefNamesInPrompt(rawPrompt, refs, { atPrefix: channel.refPromptAt === true })
+      : rawPrompt;
+
   const vars = {
     requestId: crypto.randomUUID(),
-    prompt: String(payload.apiPrompt || promptForApi(payload.prompt || payload.promptRaw || '')),
+    prompt: finalPrompt,
     promptRaw: String(payload.promptRaw || payload.prompt || ''),
     model: model,
     n: count,
@@ -663,25 +903,13 @@ function buildVars(payload, channel, model, size, count, refs, kind) {
     duration: Number(payload.duration) || 0,
     // 图片卡片上选的 1K / 2K / 4K 存在 sizeKey 里（视频才是 resolution），
     // 这里统一折算成接口要的 resolution 字段，别让卡片选 4K 却按默认 1K 出图。
-    resolution: (function () {
-      const raw = String(payload.resolution || (kind === 'image' ? payload.sizeKey : '') || '').trim();
-      const spec = modelSpecs.forModel(model);
-      // 有的模型只开了一档清晰度（例如 nano-banana-2-lite 固定 1K），
-      // 卡片上就算还留着旧值，也按平台支持的那一档发，免得直接 400。
-      if (spec && Array.isArray(spec.sizes) && spec.sizes.length) {
-        const hit = spec.sizes.find((item) => String(item).toLowerCase() === raw.toLowerCase());
-        if (hit) return String(hit).toUpperCase();
-        return String(spec.defaultResolution || spec.sizes[0]).toUpperCase();
-      }
-      if (raw) return raw.toUpperCase();
-      return spec && spec.defaultResolution ? spec.defaultResolution : '';
-    })(),
-    resolutionLower: (function () {
-      const raw = String(payload.resolution || (kind === 'image' ? payload.sizeKey : '') || '').trim();
-      if (raw) return raw.toLowerCase();
-      const spec = modelSpecs.forModel(model);
-      return spec && spec.defaultResolution ? spec.defaultResolution.toLowerCase() : '';
-    })(),
+    resolution: String(resolvedResolution.value || ''),
+    // 有的平台分辨率要求小写（xm API 的 sd25-1-pro 就是 720p），
+    // 所以同一个结论出两份写法，模板里按平台要求挑一个用。
+    resolutionLower: String(resolvedResolution.value || '').toLowerCase(),
+    // 有的平台（xinbiapi 的 gpt-image-2.5-flare）分辨率只认「1024*1024」这种星号写法，
+    // 不认 1024x1024。同一份结论再多出一份星号写法，模板里按平台要求挑。
+    sizeAsterisk: String(size || '').toLowerCase().replace(/x/g, '*'),
     mode: String(payload.mode || ''),
     refs: refs.map(refUrlOf),
     refCount: refs.length,
@@ -690,6 +918,47 @@ function buildVars(payload, channel, model, size, count, refs, kind) {
     refImages: refs.filter((item) => item.kind === 'image').map(refUrlOf),
     refVideos: refs.filter((item) => item.kind === 'video').map(refUrlOf),
     refAudios: refs.filter((item) => item.kind === 'audio').map(refUrlOf),
+    // 有的平台（如 xm API 的 bd-VIP 系列）参考素材统一走一个数组，每项是 {type, url}，
+    // 而不是三条分开的地址数组。这里按参考顺序拼好，模板里写 "media": {{refMedia}} 即可。
+    // type 用平台认的 reference_image / reference_video / reference_audio（frames 传 false，不做首尾帧转换）。
+    refMedia: refs.map((item) => ({ type: inputRoleOf(item, false), url: refUrlOf(item) })),
+    // Prompt Hubs（console.prompt-hubs.com）这类平台用的是统一契约 video.v1：
+    // 素材写进 media_inputs，每项是 {kind, role, url}。
+    //   kind 只认 image / video / audio；
+    //   role 只有 reference（图、视频）和 audio_reference（音频）两种语义角色。
+    // 这是平台自家画布提交时用的写法，比老的扁平字段更稳（平台文档也建议新接入走这条）。
+    refMediaInputs: refs.map((item) => ({
+      kind: item.kind === 'video' ? 'video' : item.kind === 'audio' ? 'audio' : 'image',
+      role: item.kind === 'audio' ? 'audio_reference' : 'reference',
+      url: refUrlOf(item),
+    })),
+    // 有的平台只收「内嵌 Base64」素材，完全不吃 URL ——
+    // 520ruo 的 seedance_2.5_flash 就是这样：images 必填 1–10 张，
+    // 元素可以是 Base64 字符串、data URI 或 {base64, mimeType} 对象，
+    // 文档明确写了「本站当前图片URL传入尚未开放」。
+    // 这里直接复用 prepareRefs 已经算好的 dataUrl（压缩之后的那一份），
+    // 不再把 buffer 重新 base64 一遍：30 MB 素材再复制两份很容易把内存顶爆。
+    refInlineImages: refs.filter((item) => item.kind === 'image' || !item.kind).map((item) => item.dataUrl || ''),
+    // 音频的写法不一样：文档要求的是 {base64, mimeType} 对象数组，
+    // 不能像图片那样直接塞 data URI，所以这里把 dataUrl 拆成两段。
+    refInlineAudios: refs
+      .filter((item) => item.kind === 'audio')
+      .map((item) => {
+        const dataUrl = String(item.dataUrl || '');
+        const comma = dataUrl.indexOf(',');
+        const meta = comma > 0 ? dataUrl.slice(5, comma).replace(/;base64$/i, '') : '';
+        return {
+          base64: comma > 0 ? dataUrl.slice(comma + 1) : dataUrl,
+          mimeType: meta || item.mime || 'audio/mpeg',
+        };
+      }),
+    // video.v1 的 operation 跟着素材类型走（和平台自己的判定函数一致）：
+    // 有参考视频 -> video_to_video；只有参考图 -> image_to_video；纯文字 -> text_to_video。
+    mediaOperation: refs.some((item) => item.kind === 'video')
+      ? 'video_to_video'
+      : refs.some((item) => item.kind === 'image' || !item.kind)
+      ? 'image_to_video'
+      : 'text_to_video',
     refIds: refs.map((item) => item.remoteId || ''),
     refUploadUrls: refs.map((item) => item.remoteUrl || ''),
     refImageIds: refs.filter((item) => item.kind === 'image').map((item) => item.remoteId || ''),
@@ -721,7 +990,7 @@ function buildVars(payload, channel, model, size, count, refs, kind) {
 
   // 有的平台要 {role, fileId} 形状的素材清单；没有上传编号时这几项自然是空的
   // 首尾帧任务跟参考任务在两套模型里叫法不同，按模型能力决定
-  const spec = modelSpecs.forModel(model);
+  const spec = modelSpecs.forModel(model, channel && channel.id);
   const framesCapable = !spec || spec.frames !== false;
   const isFrame = (item) => /^(first_frame|last_frame)$/.test(String(item.role || ''));
   const hasFrames = refs.some(isFrame);
@@ -732,8 +1001,17 @@ function buildVars(payload, channel, model, size, count, refs, kind) {
     .map((item) => ({ role: inputRoleOf(item, framesCapable), fileId: item.remoteId || '' }))
     .filter((item) => item.fileId);
   // 纯文生 / 首尾帧 / 带参考素材，三种任务名先备好，模板里写 {{taskType}} 即可自动切换
-  if (wantFrames) vars.taskType = 'VIDEO_IMAGE_TO_VIDEO';
-  else vars.taskType = refs.length ? 'VIDEO_REFERENCE' : 'VIDEO_TEXT_TO_VIDEO';
+  //
+  // 图片通道（xinbiapi 这类 /media/tasks 平台）用的是另一套任务名：IMAGE_GENERATE / IMAGE_EDIT，
+  // 而且 **带参考图就必须报 IMAGE_EDIT**（平台在 IMAGE_GENERATE 下不接受 reference_image）。
+  // 这里按 kind 分支，不要拿视频那三档去凑：名字对不上平台会直接 400。
+  if (kind === 'image') {
+    vars.taskType = refs.length ? 'IMAGE_EDIT' : 'IMAGE_GENERATE';
+  } else if (wantFrames) {
+    vars.taskType = 'VIDEO_IMAGE_TO_VIDEO';
+  } else {
+    vars.taskType = refs.length ? 'VIDEO_REFERENCE' : 'VIDEO_TEXT_TO_VIDEO';
+  }
   return vars;
 }
 
@@ -796,11 +1074,22 @@ const EMPTY_MEDIA_KEYS = [
   'reference_images',
   'reference_videos',
   'reference_audios',
+  // 520ruo 的 seedance_2.5_flash：images / audio 都是可选或必填的 Base64 数组，
+  // 空的时候要整个删掉（平台会把空数组当成「传了但内容无效」）
+  'audio',
+  // Prompt Hubs 的 video.v1：素材统一走 media_inputs，空数组同样要清掉
+  'media_inputs',
+  // xm API 的两个视频模型：bd-VIP 走 media[{type,url}]，sd25-1-pro 走 images/video_refs/audio_refs。
+  // 空数组有的平台会当成「一个无效素材」直接拒单，所以一并按空清理掉。
+  'media',
+  'video_refs',
+  'audio_refs',
   'refs',
   'audioRefs',
   'videoRefs',
   'attachments',
-  'inputFiles',
+  // inputFiles 故意**不**在这里：xinbiapi 的 /media/tasks 把 inputFiles 当必填字段，
+  // 纯文生时也要显式给一个 []，删掉反而会被判「字段缺失」。
   'file_ids',
   'audio_file_ids',
   'video_file_ids',
@@ -848,8 +1137,8 @@ function applyFaceProcessing(bodyText, contentType, on) {
   return JSON.stringify(parsed, null, 2);
 }
 
-function pruneUnsupportedParams(bodyText, model) {
-  const spec = modelSpecs.forModel(model);
+function pruneUnsupportedParams(bodyText, model, channelId) {
+  const spec = modelSpecs.forModel(model, channelId);
   const allowed = spec && Array.isArray(spec.paramKeys) ? spec.paramKeys : null;
   if (!allowed || !allowed.length) return bodyText;
   let parsed = null;
@@ -1087,6 +1376,12 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
           signal: ctx && ctx.signal,
           where: 'download',
         });
+        // 有的平台取件接口直接回视频 / 图片字节流（例如 xm API 的 /videos/{id}/content）：
+        // 既没有 JSON、也没有「下载地址」字段，取件路径本身就是成片的地址。
+        // 这里直接把它当成素材地址返回，交给 saveResult → fetchMedia 去下载
+        //（那一步会带上通道鉴权，这类接口都要求 Bearer）。
+        // 放在最前面判：二进制流不该再拿去扫正则，白费力气还可能误抓。
+        if (!dl.json) return { url: dl.url };
         const direct = channels.pickByPath(dl.json, record.downloadUrlField || 'downloadUrl');
         if (typeof direct === 'string' && /^https?:\/\//i.test(direct.trim())) return { url: direct.trim() };
         const again = channels.extractResult(dl.text, dl.json, {});
@@ -1189,6 +1484,8 @@ async function runKind(config, kind, payload, ctx) {
   if (!channel.baseUrl) throw errorKinds.configError('通道「' + channel.name + '」还没填 Base URL');
   const spec = channel[kind];
   const model = resolveModel(channel, kind, input.model);
+  // 先核参数再读素材：参数不合法的话，连下载参考图那一步都省了
+  checkModelParams(model, kind, input, channel.id);
   const composed = composePrompt(config, input, kind);
   const prompt = composed.apiPrompt;
   if (!prompt) throw new Error('提示词是空的，先写点内容再生成');
@@ -1196,7 +1493,7 @@ async function runKind(config, kind, payload, ctx) {
   const refs = await prepareRefs(config, input.refs, channel, progress, {
     always: submitCompressEnabled(config),
   });
-  checkModelRefs(model, refs, kind);
+  checkModelRefs(model, refs, kind, channel.id);
   await uploadRefs(channel, refs, ctx, progress);
   // 视频按分辨率算像素，图片按 1K/2K/4K 算
   const size = channels.sizeFor(channel, kind === 'video' ? input.resolution : input.sizeKey, input.ratio, kind);
@@ -1224,7 +1521,7 @@ async function runKind(config, kind, payload, ctx) {
     }
   }
 
-  bodyText = pruneUnsupportedParams(bodyText, model);
+  bodyText = pruneUnsupportedParams(bodyText, model, channel.id);
   // 参考图人脸处理：勾了这个模型才带 faceProcessing，没勾就把字段删掉
   bodyText = applyFaceProcessing(bodyText, spec.contentType, vars.faceProcessing === true);
   if (spec.contentType === 'json' || spec.contentType === 'form') {
@@ -1234,6 +1531,24 @@ async function runKind(config, kind, payload, ctx) {
       throw errorKinds.configError('通道「' + channel.name + '」的请求体模板不是合法 JSON：' + error.message);
     }
   }
+  // 有的平台会把整份请求体读进内存（520ruo 的网关就是），超过 64 MB 直接 413。
+  // 内嵌 Base64 的通道最容易撞到这条：Base64 本身就要比原文件大 1/3。
+  // 在本地就算好体积并给出可操作的建议，别让用户等半天才看到一句 "413"。
+  //
+  // 只在通道里**显式配了** maxBodyMB 时才检查：别的通道可能有自己的规则，
+  // 不该因为我们给一个平台加的护栏而受影响。
+  const maxBodyMB = Number(spec.maxBodyMB);
+  if (Number.isFinite(maxBodyMB) && maxBodyMB > 0) {
+    const bodyBytes = Buffer.byteLength(bodyText, 'utf8');
+    if (bodyBytes > maxBodyMB * 1024 * 1024) {
+      const mb = (bodyBytes / 1024 / 1024).toFixed(1);
+      throw new Error(
+        '这次请求体有 ' + mb + ' MB，超过通道设的 ' + maxBodyMB +
+          ' MB 上限（参考素材是内嵌 Base64，会比原文件大 1/3）。先在卡片上减少参考图数量，或换成体积小一些的图再生成。'
+      );
+    }
+  }
+
   // multipart 通道：本地参考素材直接当文件发，不再走公网地址
   const isMultipart = spec.contentType === 'multipart';
   let submitFiles = [];
@@ -1345,6 +1660,8 @@ async function preflight(config, payload) {
     const model = resolveModel(channel, kind, payload && payload.model);
     out.model = model || '';
     out.channel = channel.name || '';
+    // 预检要跟真提交用同一套参数校验，否则会出现「预检说没问题、一点就 400」的落差
+    checkModelParams(model, kind, payload, channel.id);
     const submission = composeSubmission(config, payload, kind);
     out.promptLength = submission.apiPrompt.length;
     out.tailName = submission.tailPresetName || '';
@@ -1353,7 +1670,7 @@ async function preflight(config, payload) {
     const refs = await prepareRefs(config, (payload && payload.refs) || [], channel, null, {
       always: submitCompressEnabled(config),
     });
-    checkModelRefs(model, refs, kind);
+    checkModelRefs(model, refs, kind, channel.id);
     out.refCount = refs.length;
     const stats = refs.refStats || {};
     out.beforeBytes = Number(stats.beforeBytes) || 0;
@@ -1390,6 +1707,9 @@ async function resumeTask(config, task, ctx) {
     channelName: record.channelName,
     kind: kind,
     model: record.model,
+    // 这条任务早在停用之前就提交出去了，钱也花了；现在只是回来取结果，
+    // 通道状态不该影响取件。includeDisabled 让它照常命中。
+    includeDisabled: true,
   });
   if (!channel) throw new Error('这条任务用的通道已经删掉了，没法接着等结果');
   progress({ stage: '接着等重启前提交的任务…' });
@@ -1515,10 +1835,12 @@ module.exports = {
   applyFaceProcessing,
   faceWanted,
   checkModelRefs,
+  checkModelParams,
   buildVars,
   pruneEmptyMedia,
   pruneUnsupportedParams,
   promptForApi,
+  remapRefNamesInPrompt,
   normalizeTailChoice,
   // C5：三入口参数统一的收敛点，导出供测试直接比对前后端规则是否一致
   normalizePayload,
