@@ -1752,8 +1752,14 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
   height: 76px;
   overflow: auto;
   overscroll-behavior: contain;
-  /* 右侧多留一点：右上角浮着两个图标，正文不往那儿跑 */
-  padding: 7px 52px 7px 8px;
+  /* 右侧留白 = 图标右移量(15) + 两个图标(44) + 余量(5)，正文不往图标底下跑 */
+  padding: 7px 64px 7px 8px;
+  /* 滚动条永远占住右侧 10px 的车道：
+     · 不固定车道的话，内容一超长才突然冒出滚动条，正文会横着抖一下；
+     · 滚动条画在输入框最右边，正好是右上角那两个浮动图标的地盘 ——
+       原来是「图标 right:4px + 系统滚动条 15~17px」，展开图标被压住一半（截图里那个重叠）。
+       现在车道固定 10px，图标按 .prompt-bar 的 right 让开它。 */
+  scrollbar-gutter: stable;
   border: 0;
   border-radius: 8px 8px 0 0;
   background: transparent;
@@ -1768,6 +1774,27 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
 
 .node-prompt:focus { border: 0; box-shadow: none; }
 .node-prompt:empty:before { content: attr(data-placeholder); color: var(--placeholder); }
+
+/* 滚动条：固定 10px 宽，滑块再往里收 2px（不贴右边框），和 .prompt-bar 的让位对齐。
+   宽度必须是确定的 —— 系统默认（Windows 15~17px）比这里的 10px 宽，
+   图标就会重新压到滚动条上。 */
+.node-prompt::-webkit-scrollbar { width: 10px; height: 10px; }
+.node-prompt::-webkit-scrollbar-track { background: transparent; }
+.node-prompt::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 5px;
+}
+.node-prompt::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+
+/* Firefox 只认标准属性，不认 ::-webkit-scrollbar。
+   注意不能把 scrollbar-width 写在上面那条通用规则里：
+   Chromium 一旦看到它，就会改用系统滚动条、**忽略** ::-webkit-scrollbar 的 10px，
+   实测车道从 10px 变成 5px，图标让位的数值就全错了。所以用 @supports 只给 Firefox。 */
+@supports (-moz-appearance: none) {
+  .node-prompt { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+}
 
 /* 提示词区域：小标题 + 字数 + 两个纯图标按钮 */
 .prompt-block {
@@ -1788,7 +1815,8 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
 .prompt-bar {
   position: absolute;
   top: 3px;
-  right: 4px;
+  /* 让开右侧 10px 的滚动条车道，再留 5px 空隙；写 4px 会被滚动条压住（见 .node-prompt） */
+  right: 15px;
   z-index: 3;
   display: flex;
   align-items: center;

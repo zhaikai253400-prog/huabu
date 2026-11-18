@@ -220,7 +220,70 @@ check('贴面板期间有重入保护（placePanel 内部会调 applyViewport）
   assert(/!placingPanel/.test(viewportFn), 'applyViewport 没有跳过 placingPanel 期间的回调');
 });
 
-console.log('\n三、没有留下死代码');
+console.log('\n三、提示词框右上角图标不被滚动条压住');
+
+// 取某条 CSS 规则的完整声明块
+function cssRule(selector, from) {
+  // 前面加换行：'.node-prompt {' 会被 '.node.expanded.wide .node-prompt {' 抢先匹配
+  const at = cssSrc.indexOf('\n' + selector, from || 0) + 1;
+  if (at <= 0) return null;
+  if (at < 0) return null;
+  const open = cssSrc.indexOf('{', at);
+  const close = cssSrc.indexOf('}', open);
+  if (open < 0 || close < 0) return null;
+  return { selector: selector, at: at, body: cssSrc.slice(open + 1, close) };
+}
+function cssPx(body, prop) {
+  const m = body.match(new RegExp(prop + '\\s*:\\s*(-?[\\d.]+)px'));
+  return m ? Number(m[1]) : null;
+}
+
+check('输入框给滚动条留了固定车道（scrollbar-gutter: stable）', () => {
+  const rule = cssRule('.node-prompt {');
+  assert(rule, '找不到 .node-prompt 规则');
+  assert(/scrollbar-gutter:\s*stable/.test(rule.body), '没有 scrollbar-gutter: stable：长提示词一出滚动条，正文会横着抖一下');
+});
+
+check('滚动条宽度是写死的 10px（系统默认 15~17px 会把图标压住）', () => {
+  const rule = cssRule('.node-prompt::-webkit-scrollbar');
+  assert(rule, '找不到 .node-prompt::-webkit-scrollbar');
+  eq(cssPx(rule.body, 'width'), 10);
+});
+
+check('没有把 scrollbar-width 写给 Chromium（它会让 10px 车道失效，实测变成 5px）', () => {
+  const rule = cssRule('.node-prompt {');
+  assert(!/scrollbar-width/.test(rule.body), '.node-prompt 里出现了 scrollbar-width：Chromium 会忽略 ::-webkit-scrollbar 的宽度');
+  // 只允许写在只对 Firefox 生效的 @supports 块里
+  const supportAt = cssSrc.indexOf('@supports (-moz-appearance: none)');
+  assert(supportAt > 0, 'Firefox 的兜底块没了');
+  const block = cssSrc.slice(supportAt, cssSrc.indexOf('}', cssSrc.indexOf('.node-prompt {', supportAt)));
+  assert(/scrollbar-width/.test(block), 'Firefox 兜底块里没有 scrollbar-width');
+});
+
+check('图标条 right 让开了 10px 车道（不是原来的 4px）', () => {
+  const rule = cssRule('.prompt-bar {');
+  assert(rule, '找不到 .prompt-bar 规则');
+  const right = cssPx(rule.body, 'right');
+  assert(right !== null, '.prompt-bar 没有 right');
+  assert(right >= 14, 'right=' + right + 'px 太小：滚动条宽 10px，图标会压上去');
+});
+
+check('图标条本身不压在车道里：right + 图标总宽 ≤ 输入框右侧留白', () => {
+  const promptRule = cssRule('.node-prompt {');
+  const barRule = cssRule('.prompt-bar {');
+  // 右内边距写在 padding 简写里：padding: 上 右 下 左
+  const padRight = cssPx(promptRule.body, 'padding-right')
+    || Number((promptRule.body.match(/padding:\s*[\d.]+px\s+([\d.]+)px/) || [])[1]);
+  assert(padRight, '.node-prompt 的右内边距读不出来');
+  const right = cssPx(barRule.body, 'right');
+  // 两个 21px 图标 + 2px 间距 = 44px
+  const BTN = 21;
+  const GAP = 2;
+  const iconSpan = BTN * 2 + GAP;
+  assert(right + iconSpan <= padRight, '图标条右边界 ' + (right + iconSpan) + 'px 超过了输入框右内边距 ' + padRight + 'px：正文会跑到图标底下');
+});
+
+console.log('\n四、没有留下死代码');
 
 check('refreshPanelFlip / lastPlacedHost 已彻底删除', () => {
   assert(!canvasSrc.includes('refreshPanelFlip'), 'refreshPanelFlip 还在（面板不再翻转，这函数是死代码）');
