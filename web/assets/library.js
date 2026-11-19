@@ -16,6 +16,16 @@
   ];
 
   const state = { kind: 'all', q: '', sort: 'time', items: [], stats: null, selected: new Set() };
+  // 底部操作栏可以收起来：素材多的时候，把这一行让给列表
+  // 记住用户的选择，下次打开素材库还是这个状态
+  const FOOT_KEY = 'canvas.lib-foot-collapsed';
+  let footCollapsed = (() => {
+    try {
+      return window.localStorage.getItem(FOOT_KEY) === '1';
+    } catch (error) {
+      return false;
+    }
+  })();
   let host = null;
   let opts = {};
 
@@ -65,16 +75,26 @@
       '  <select id="lib-sort"></select>' +
       '</div>' +
       '<div class="lib-grid" id="lib-grid"></div>' +
-      '<div class="lib-foot">' +
-      '  <span class="lib-pick" id="lib-pick">没有选中</span>' +
-      '  <span class="grow"></span>' +
-      '  <button id="lib-all" title="把当前筛选出来的全部勾选（Ctrl+A）">全选</button>' +
-      '  <button id="lib-invert" title="勾选的取消、没勾的勾上">反选</button>' +
-      '  <button id="lib-clear" title="一个都不选">清空</button>' +
-      '  <button id="lib-recycle" title="看看删掉的素材，还能摆回去">回收站</button>' +
-      '  <button id="lib-orphan" title="清理没有被任何画布引用的素材">清理孤儿文件</button>' +
-      '  <button class="danger" id="lib-delete">删除选中（进回收站）</button>' +
-      '</div>'
+      '<div class="lib-foot" id="lib-foot">' +
+      '  <div class="lib-foot-bar">' +
+      '    <span class="lib-pick" id="lib-pick">没有选中</span>' +
+      '    <span class="grow"></span>' +
+      '    <button class="lib-foot-min" id="lib-foot-min" type="button" title="收起底部操作栏，素材区就能多显示几行" aria-label="收起操作栏">' +
+      '      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>' +
+      '    </button>' +
+      '  </div>' +
+      '  <div class="lib-foot-actions">' +
+      '    <button class="lib-act" id="lib-all" type="button" title="把当前筛选出来的全部勾选（Ctrl+A）">全选</button>' +
+      '    <button class="lib-act" id="lib-invert" type="button" title="勾选的取消、没勾的勾上">反选</button>' +
+      '    <button class="lib-act" id="lib-clear" type="button" title="一个都不选">清空</button>' +
+      '    <button class="lib-act" id="lib-recycle" type="button" title="看看删掉的素材，还能摆回去">回收站</button>' +
+      '    <button class="lib-act" id="lib-orphan" type="button" title="清理没有被任何画布引用的素材">清孤儿</button>' +
+      '    <button class="lib-act lib-act-danger" id="lib-delete" type="button" title="把选中的素材移到回收站，之后还能找回来">删除选中</button>' +
+      '  </div>' +
+      '</div>' +
+      '<button class="lib-foot-restore" id="lib-foot-restore" type="button" title="展开底部操作栏">' +
+      '  <span id="lib-foot-restore-text">操作栏</span>' +
+      '</button>'
     );
   }
 
@@ -332,16 +352,47 @@
     el.textContent = stats.count + ' 个 · 共 ' + formatBytes(stats.bytes);
   }
 
+  // 把折叠状态刷到 DOM 上：收起来时只留一条「展开操作栏」的小按钮
+  function paintFootCollapsed() {
+    const foot = host && host.querySelector('#lib-foot');
+    const restore = host && host.querySelector('#lib-foot-restore');
+    if (!foot || !restore) return;
+    const collapsed = footCollapsed;
+    foot.classList.toggle('collapsed', collapsed);
+    restore.classList.toggle('show', collapsed);
+    const text = host.querySelector('#lib-foot-restore-text');
+    if (text) {
+      const count = state.selected.size;
+      text.textContent = count ? '操作栏 · 已选 ' + count + ' 个' : '操作栏';
+    }
+  }
+
+  function setFootCollapsed(next) {
+    if (next === footCollapsed) return;
+    footCollapsed = next;
+    try {
+      window.localStorage.setItem(FOOT_KEY, next ? '1' : '0');
+    } catch (error) {
+      /* 存不下就只在本页生效，不影响使用 */
+    }
+    paintFootCollapsed();
+  }
+
   function renderFoot() {
     const el = host.querySelector('#lib-pick');
     if (!el) return;
     const count = state.selected.size;
     const total = state.items.length;
-    el.textContent = count ? '已选中 ' + count + ' / ' + total + ' 个' : '没有选中（当前 ' + total + ' 个）';
+    el.textContent = count ? '已选 ' + count + ' / ' + total : '共 ' + total + ' 个，未选择';
     const allBtn = host.querySelector('#lib-all');
     if (allBtn) allBtn.disabled = !total || count >= total;
     const clearBtn = host.querySelector('#lib-clear');
     if (clearBtn) clearBtn.disabled = !count;
+    const delBtn = host.querySelector('#lib-delete');
+    if (delBtn) delBtn.disabled = !count;
+    const invertBtn = host.querySelector('#lib-invert');
+    if (invertBtn) invertBtn.disabled = !total;
+    paintFootCollapsed();
   }
 
   // 全选 / 反选 / 清空：只作用于「当前筛选出来的这一批」，
@@ -637,6 +688,9 @@
     host.querySelector('#lib-clear').addEventListener('click', clearSelection);
     host.querySelector('#lib-delete').addEventListener('click', deleteSelected);
     host.querySelector('#lib-orphan').addEventListener('click', cleanOrphans);
+    host.querySelector('#lib-foot-min').addEventListener('click', () => setFootCollapsed(true));
+    host.querySelector('#lib-foot-restore').addEventListener('click', () => setFootCollapsed(false));
+    paintFootCollapsed();
     host.querySelector('#lib-recycle').addEventListener('click', () => {
       // 回收站面板在画布页那边实现；素材库单独用时退化成提示，不硬报错
       if (typeof window.openRecycleBin === 'function') window.openRecycleBin();

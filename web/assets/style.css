@@ -3425,8 +3425,89 @@ body.lib-dragging, body.lib-dragging * { cursor: grabbing !important; }
 .lib-sub { color: var(--muted); font-size: 0.76em; }
 .lib-empty { grid-column: 1 / -1; color: var(--muted); padding: 24px 8px; text-align: center; font-size: 0.9em; }
 .lib-empty.bad { color: var(--danger); }
-.lib-foot { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
-.lib-pick { color: var(--muted); font-size: 0.88em; }
+/* ---------- 素材库底部操作栏 ----------
+   以前是 6 个按钮挤在 400px 宽的抽屉里，中文标签被压成一字一行（竖排），
+   看着又乱又高。现在拆成两层：
+     第一层：选中计数 + 「收起」
+     第二层：操作按钮，等宽排成一行，标签短、不换行
+   收起后整条变成一个小按钮，素材列表能多显示几行。 */
+.lib-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 0 8px;
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.lib-foot-bar { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.lib-pick { color: var(--muted); font-size: 0.88em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-foot-min {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font-size: 0.8em;
+  border-radius: 999px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.lib-foot-min:hover { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+
+/* 按钮等宽排开：靠 grid 而不是 flex-wrap，保证永远一行，不会被挤成竖排 */
+.lib-foot-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+/* 宽屏（门户弹窗）下按钮不要被拉成一条条长条：每列最多 140px，整体靠左 */
+.modal-library .lib-foot-actions { grid-template-columns: repeat(3, minmax(0, 140px)); justify-content: start; }
+.lib-act {
+  padding: 7px 6px;
+  font-size: 0.84em;
+  line-height: 1.2;
+  border-radius: 7px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--text);
+}
+.lib-act:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.lib-act:disabled { opacity: 0.4; }
+.lib-act-danger:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--tint-bad-line);
+  background: var(--tint-bad-soft);
+}
+.lib-act-danger { grid-column: span 1; }
+.lib-act-danger:hover:not(:disabled) { border-color: var(--danger); color: #fff; background: var(--danger); }
+.lib-foot-sep { display: none; }
+
+/* 收起状态：操作区整块隐藏，只留一个小按钮 */
+.lib-foot.collapsed { display: none; }
+.lib-foot.collapsed .lib-foot-actions { display: none; }
+.lib-foot.collapsed .lib-foot-bar { display: none; }
+.lib-foot-restore {
+  display: none;
+  width: 100%;
+  margin: 2px 0 0;
+  padding: 6px 10px;
+  font-size: 0.82em;
+  border-radius: 8px;
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+}
+.lib-foot-restore.show { display: block; }
+
+/* 窄屏：素材库抽屉只有 400px（手机上更窄），按钮再收一档，三个字也放得下 */
+@media (max-width: 480px) {
+  .lib-foot-actions { gap: 5px; }
+  .lib-act { padding: 6px 4px; font-size: 0.78em; }
+}
+
+.lib-foot-restore:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 /* ---------- 画布右侧的素材库抽屉 ---------- */
 .library-drawer {
@@ -3446,6 +3527,19 @@ body.lib-dragging, body.lib-dragging * { cursor: grabbing !important; }
 .drawer-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .drawer-hint { color: var(--muted); font-size: 0.82em; line-height: 1.5; padding: 8px 14px 0; }
 .drawer-body { padding: 12px 14px; overflow: auto; flex: 1 1 auto; }
+/* 抽屉里的素材面板撑满整个高度：列表占满剩余空间，
+   底部操作栏才会稳稳贴在抽屉底部，而不是悬在半空。 */
+.library-drawer .drawer-body { display: flex; flex-direction: column; overflow: hidden; }
+.library-drawer .lib-panel { flex: 1 1 auto; min-height: 0; }
+.library-drawer .lib-grid { flex: 1 1 0; max-height: none; min-height: 90px; }
+/* 门户页的素材库是个弹窗：.modal-body 自己也会滚，会和里面的列表叠成两层滚动条，
+   最后一行还会溢到底部操作栏上。这里让它只做容器，滚动交给列表。 */
+.modal-library { width: min(1180px, 96vw); height: min(760px, 88vh); }
+.modal-library .modal-body { display: flex; flex-direction: column; overflow: hidden; min-height: 0; flex: 1 1 auto; }
+.modal-library .lib-panel { flex: 1 1 auto; min-height: 0; }
+.modal-library .lib-grid { flex: 1 1 0; max-height: none; min-height: 120px; }
+
+
 
 /* ---------- 历史版本 / 运行日志 ---------- */
 .backup-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
