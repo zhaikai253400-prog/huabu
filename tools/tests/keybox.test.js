@@ -278,6 +278,155 @@ check('密钥保护状态可上报，页面能据此提示', () => {
   eq(state.error, '');
 });
 
+﻿﻿﻿console.log('');
+console.log('【六】换电脑：同步 / 拷贝到另一台机器后，密钥必须还能用');
+
+// 这是 2026-11-19 用户报的问题：把整个程序目录搬到另一台电脑，
+// 每次同步更新之后接口通道的 key 就用不了，得重新输入。
+//
+// 根因：data\secret.key 原来只用 DPAPI(CurrentUser) 包着，而 DPAPI 绑定
+// 「这台电脑 + 这个 Windows 用户」。到了另一台电脑上 DPAPI 解不开，
+// 主密钥拿不到 → config.json 里的密钥虽然完好、却再也解不出来。
+//
+// 现在 secret.key 多存一份与机器无关的可移植副本。下面围着「旧机器那份
+// DPAPI 密文解不开」来验 —— 这正是换电脑时实际发生的事。
+
+// 每个用例都从零搭一套现场：删掉旧的 config.json / secret.key，
+// 再让 configStore.save 现造一份。这样用例之间不会互相污染。
+function freshPortableSite() {
+  keybox._reset();
+  const keyFile = keybox.keyPath(paths.DATA_DIR);
+  try { fs.unlinkSync(keyFile); } catch { /* 本来就没有 */ }
+  try { fs.unlinkSync(paths.CONFIG_FILE); } catch { /* 本来就没有 */ }
+
+  const cfg = configStore.defaultConfig();
+  cfg.channels = [{ id: 'ch_port', name: '可移植验证', apiKey: 'sk-portable-0001', kinds: ['image'] }];
+  configStore.save(cfg); // 这一步会生成全新的 secret.key（含 local + portable）
+  keybox._reset();
+  return JSON.parse(fs.readFileSync(keyFile, 'utf8'));
+}
+
+// 模拟「这份 secret.key 是另一台电脑写的」：把本机那份换成别的机器才有钥匙的密文。
+// portable 保持原样 —— 它才是换电脑后真正救命的东西。
+function pretendFromAnotherPc(parsed) {
+  const twisted = Object.assign({}, parsed);
+  twisted.local = Buffer.from('dpapi-blob-from-another-pc-' + Date.now()).toString('base64');
+  fs.writeFileSync(keybox.keyPath(paths.DATA_DIR), JSON.stringify(twisted, null, 2), 'utf8');
+  keybox._reset();
+}
+
+// 让 DPAPI 辅助程序必然失败：把真正的 exe 挪开、放一个不是 PE 的占位文件。
+function withBrokenDpapi(fn) {
+  const helper = path.join(ROOT, 'server', 'keybox-helper.exe');
+  const hidden = helper + '.real-' + process.pid;
+  let moved = false;
+  try {
+    fs.renameSync(helper, hidden);
+    moved = true;
+  } catch { /* 没有就算了，后面写占位文件一样会让它失败 */ }
+  try { fs.writeFileSync(helper, 'not-a-real-exe', 'utf8'); } catch { /* 忽略 */ }
+  keybox._reset();
+  try {
+    return fn();
+  } finally {
+    try { fs.unlinkSync(helper); } catch { /* 忽略 */ }
+    if (moved) { try { fs.renameSync(hidden, helper); } catch { /* 忽略 */ } }
+    keybox._reset();
+  }
+}
+
+check('密钥文件里同时有本机份和可移植份（缺一不可：本机快、可移植救命）', () => {
+  const parsed = freshPortableSite();
+  eq(parsed.version, 2, 'secret.key 应当是新格式');
+  ok(parsed.local && parsed.local.length > 40, '缺本机 DPAPI 份');
+  ok(parsed.portable && parsed.portable.length > 40, '缺可移植份');
+  ok(parsed.salt && parsed.salt.length > 10, '缺盐');
+});
+
+check('本机 DPAPI 那份解不开时（就是换电脑的情形），可移植份仍能解出原密钥', () => {
+  const parsed = freshPortableSite();
+  pretendFromAnotherPc(parsed);
+  const cfg = JSON.parse(fs.readFileSync(paths.CONFIG_FILE, 'utf8'));
+  const opened = keybox.decryptChannels(cfg.channels);
+  eq(opened.locked, 0, '换电脑后仍然出现了解不开的密钥');
+  eq(opened.list[0].apiKey, 'sk-portable-0001', '密钥没能解回明文');
+  eq(keybox.state().source, 'portable', '应当标明这次是用可移植副本解开的');
+  eq(keybox.state().error, '', '用可移植副本成功时不该留下错误');
+});
+
+check('换电脑后会用新电脑的 DPAPI 重包一份（下次启动走本机快路）', () => {
+  const parsed = freshPortableSite();
+  pretendFromAnotherPc(parsed);
+  // 第一次：这台电脑用可移植副本解开，并顺便把本机份重写成本机能解的
+  keybox.decryptChannels(JSON.parse(fs.readFileSync(paths.CONFIG_FILE, 'utf8')).channels);
+  eq(keybox.state().source, 'portable', '第一次应当是走可移植副本');
+  // 重启一次：本机份已经重写过，应当回到 local 这条路
+  keybox._reset();
+  const again = keybox.decryptChannels(JSON.parse(fs.readFileSync(paths.CONFIG_FILE, 'utf8')).channels);
+  eq(again.locked, 0);
+  eq(keybox.state().source, 'local', '重包之后应当回到本机 DPAPI 这条路');
+});
+
+check('新电脑上连 DPAPI 都不可用时，仅凭可移植份也能一直用', () => {
+  freshPortableSite();
+  withBrokenDpapi(() => {
+    const opened = keybox.decryptChannels(JSON.parse(fs.readFileSync(paths.CONFIG_FILE, 'utf8')).channels);
+    eq(opened.locked, 0, 'DPAPI 不可用时不该出现解不开的密钥');
+    eq(opened.list[0].apiKey, 'sk-portable-0001');
+    eq(keybox.state().source, 'portable');
+  });
+  keybox._reset();
+  eq(configStore.load().channels[0].apiKey, 'sk-portable-0001', '测试收尾后密钥应当完好');
+});
+
+check('老格式的 secret.key（纯 base64、只有本机份）会被自动升级成新格式', () => {
+  const parsed = freshPortableSite();
+  const keyFile = keybox.keyPath(paths.DATA_DIR);
+  // 退回成老版本格式：整个文件就是一串 DPAPI 密文
+  fs.writeFileSync(keyFile, parsed.local, 'utf8');
+  keybox._reset();
+  const cfg = configStore.load();
+  eq(cfg.channels[0].apiKey, 'sk-portable-0001', '升级过程中把密钥弄丢了');
+  const after = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
+  eq(after.version, 2, '没有升级成新格式');
+  ok(after.portable, '升级后仍然缺可移植份');
+});
+
+check('两份都坏掉时才报错，且密文原样留着（绝不抹掉用户密钥）', () => {
+  const parsed = freshPortableSite();
+  const twisted = Object.assign({}, parsed);
+  twisted.local = Buffer.from('garbage-local').toString('base64');
+  twisted.portable = Buffer.from('garbage-portable').toString('base64');
+  fs.writeFileSync(keybox.keyPath(paths.DATA_DIR), JSON.stringify(twisted), 'utf8');
+  keybox._reset();
+  const cfg = JSON.parse(fs.readFileSync(paths.CONFIG_FILE, 'utf8'));
+  const opened = keybox.decryptChannels(cfg.channels);
+  ok(opened.locked > 0, '两份都坏了却解出了东西？');
+  eq(opened.list[0].apiKey, cfg.channels[0].apiKey, '解不开时密文应当原样保留');
+  ok(keybox.state().error.length > 0, '应当给出错误说明');
+});
+
+check('可移植份的密码学约束：同一把主密钥 + 不同盐 → 不同密文，能各自解开', () => {
+  const master = Buffer.alloc(32, 7);
+  const saltA = Buffer.alloc(16, 1).toString('base64');
+  const saltB = Buffer.alloc(16, 2).toString('base64');
+  const a = keybox.portableWrap(master, saltA);
+  const b = keybox.portableWrap(master, saltB);
+  ok(a !== b, '不同盐却得到相同密文');
+  deep(Array.from(keybox.portableUnwrap(a, saltA)), Array.from(master));
+  deep(Array.from(keybox.portableUnwrap(b, saltB)), Array.from(master));
+  eq(keybox.portableUnwrap(a, saltB), null, '换盐应当解不开');
+});
+
+check('可移植份被篡改一个字节就解不开（GCM 带校验，不会解出乱码）', () => {
+  const master = Buffer.alloc(32, 3);
+  const salt = Buffer.alloc(16, 9).toString('base64');
+  const blob = keybox.portableWrap(master, salt);
+  const raw = Buffer.from(blob, 'base64');
+  raw[raw.length - 1] ^= 0xff;
+  eq(keybox.portableUnwrap(raw.toString('base64'), salt), null);
+});
+
 console.log('');
 console.log('【五】源码级约束');
 

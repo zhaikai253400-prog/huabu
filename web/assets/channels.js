@@ -480,7 +480,11 @@
     keyRow.appendChild(keyBox);
     body.appendChild(keyRow);
     body.appendChild(
-      hintRow('密钥加密后保存在这台电脑的 data\\config.json 里，不写进画布文件。加密钥匙（data\\secret.key）与当前 Windows 用户绑定：换个 Windows 账户或换台电脑就打不开，需要重新填一次密钥。')
+      hintRow(
+        '密钥加密后保存在这台电脑的 data\\config.json 里，不写进画布文件。' +
+          '解锁用的 data\\secret.key 带一份「可移植副本」：换电脑 / 换 Windows 账户 / 同步程序之后，' +
+          '原来的密钥照样能用，不用重新填。'
+      )
     );
 
     body.appendChild(buildBalanceRow(channel));
@@ -2086,6 +2090,28 @@
     if (replaceBtn) replaceBtn.addEventListener('click', () => doImport('replace'));
   }
 
+  // 密钥这次是怎么解开的：本机 DPAPI 解不出来、改用可移植副本时，
+  // 说明这份数据是从另一台电脑同步 / 拷贝过来的 —— 但密钥依然有效。
+  // 只在这两种情况之外保持沉默，别让一行字常驻在那里。
+  function showKeySource() {
+    Promise.resolve(window.api.status())
+      .then((data) => {
+        const seal = data && data.keyProtection;
+        if (!seal) return;
+        if (seal.error) {
+          saveStateEl.textContent = '密钥解不开：' + seal.error;
+          saveStateEl.className = 'hint bad';
+          return;
+        }
+        if (seal.source === 'portable') {
+          saveStateEl.textContent = '这些密钥是从另一台电脑带过来的，已自动接上，不用重填';
+          saveStateEl.className = 'hint ok';
+        }
+      })
+      .catch(() => {
+        /* 状态接口读不到不影响改通道 */
+      });
+  }
   async function mount(options) {
     hooks = options || {};
     bindToolbar();
@@ -2097,6 +2123,9 @@
       if (hooks.onLoaded) hooks.onLoaded();
       autoQueryBalances();
       autoQueryRides();
+      // 悄悄报一句「这次密钥是怎么解开的」：另一台电脑同步过来以后，
+      // 用户会担心「是不是又要重填」，这里先给个明确答复。
+      showKeySource();
     } catch (error) {
       listEl.textContent = '';
       listEl.appendChild(el('div', 'empty-inline', '读取通道配置失败：' + error.message));

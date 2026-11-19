@@ -98,7 +98,7 @@ function ensureHelper() {
 }
 
 // 只走 stdin/stdout，不落临时文件：密钥内容不会出现在任何目录里。
-function dpapi(mode, input) {
+function dpapi(mode, input, soft) {
   const helper = ensureHelper();
   if (!helper) return null;
   const run = spawnSync(helper, [mode], {
@@ -109,6 +109,13 @@ function dpapi(mode, input) {
   });
   if (run.error || run.status !== 0 || !run.stdout || !run.stdout.length) {
     const detail = String(run.stderr || (run.error && run.error.message) || '').trim().slice(0, 300);
+    // soft=true：调用方已经准备好后备方案（可移植副本），这里只作诊断，不往
+    // 状态里写「解不开」—— 否则 masterKey 好不容易用 portable 解开，
+    // 界面上还挂着一条吓人的红字。真正解不开时由 masterKey 统一报错。
+    if (soft) {
+      console.log('[密钥保护] DPAPI ' + (mode === 'protect' ? '加密' : '解密') + '没成功（改用可移植副本）：' + (detail || '退出码 ' + run.status));
+      return null;
+    }
     setError('DPAPI ' + (mode === 'protect' ? '加密' : '解密') + '失败：' + (detail || '退出码 ' + run.status));
     return null;
   }
@@ -142,46 +149,181 @@ function restrictAcl(file) {
   }
 }
 
+﻿// ---------------------------------------------------------------- 可移植副本
+//
+// 为什么要有它（2026-11-19 真实问题）：
+//   secret.key 原来只用 DPAPI(CurrentUser) 包了一层。DPAPI 与「这台电脑 + 这个
+//   Windows 用户」绑定，所以把程序目录整个搬到另一台电脑（或换个 Windows 账户）
+//   之后，那把主密钥就再也解不开了 —— 表现正好是「通道密钥全都用不了，
+//   得重新填一遍」。config.json 里的密钥本身是好的，缺的只是「解开它们的主密钥」。
+//
+// 所以现在 secret.key 里存两份包法：
+//   · local    —— DPAPI(CurrentUser)，本机优先用它，安全性最好；
+//   · portable —— AES-256-GCM，钥匙由固定常量 + 文件内随机盐经 scrypt 派生，
+//                 与机器无关，换电脑 / 换 Windows 用户都能解开。
+//
+// 代价说清楚（不藏着）：portable 这份本质上是「可计算的混淆」—— 同时拿到
+// secret.key 与 config.json 两个文件的人可以还原密钥。但只拿到 config.json 的人
+// （例如把配置贴出来求助、贴日志）依然只能看到密文，
+// 「配置里不留明文密钥」这条线守住了，同时换电脑不再需要重填密钥。
+const PORTABLE_LABEL = 'canvas-keybox-portable-v2';
+const PORTABLE_VERSION = 2;
+const PORTABLE_SALT_BYTES = 16;
+
+let cachedSource = ''; // 'local' | 'portable'：这次是用哪种方式解开的主密钥
+
+function portableKeyOf(saltB64) {
+  // 同一份盐 + 同一个常量必然派生出同一把钥匙，不依赖任何本机信息
+  return crypto.scryptSync(PORTABLE_LABEL, Buffer.from(String(saltB64 || ''), 'base64'), MASTER_BYTES);
+}
+
+function portableWrap(master, saltB64) {
+  const iv = crypto.randomBytes(IV_BYTES);
+  const cipher = crypto.createCipheriv('aes-256-gcm', portableKeyOf(saltB64), iv);
+  const body = Buffer.concat([cipher.update(master), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64');
+}
+
+function portableUnwrap(blob, saltB64) {
+  let packed;
+  try {
+    packed = Buffer.from(String(blob || ''), 'base64');
+  } catch {
+    return null;
+  }
+  if (packed.length < IV_BYTES + TAG_BYTES + 1) return null;
+  const iv = packed.subarray(0, IV_BYTES);
+  const tag = packed.subarray(IV_BYTES, IV_BYTES + TAG_BYTES);
+  const body = packed.subarray(IV_BYTES + TAG_BYTES);
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', portableKeyOf(saltB64), iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(body), decipher.final()]);
+  } catch {
+    return null;
+  }
+}
+
+// 读 secret.key，两种格式都认：
+//   v1：整个文件就是一串 base64（DPAPI 包好的主密钥）—— 老版本留下的；
+//   v2：JSON，同时带 local / portable 两份。
+// 读不出来返回 null（当作没有这个文件，绝不猜）。
+function readKeyFile(file) {
+  if (!fs.existsSync(file)) return null;
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8').trim();
+  } catch (error) {
+    setError('读取 ' + KEY_FILE_NAME + ' 失败：' + error.message);
+    return null;
+  }
+  if (!raw) return null;
+  if (raw.charAt(0) === '{') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      let localBytes = null;
+      if (parsed.local) {
+        try {
+          localBytes = Buffer.from(String(parsed.local), 'base64');
+        } catch {
+          localBytes = null;
+        }
+      }
+      return {
+        version: Number(parsed.version) || 2,
+        // 注意：这里给的是**字节**，不是 base64 字符串 —— DPAPI 辅助程序吃的是原始密文，
+        // 把 base64 文本喂进去会被它当成「损坏的密文」而解密失败。
+        local: localBytes,
+        portable: String(parsed.portable || ''),
+        salt: String(parsed.salt || ''),
+      };
+    } catch {
+      return null;
+    }
+  }
+  // 老格式：纯 base64，只有 DPAPI 这一份
+  let bytes = null;
+  try {
+    bytes = Buffer.from(raw, 'base64');
+  } catch {
+    bytes = null;
+  }
+  return { version: 1, local: bytes, portable: '', salt: '' };
+}
+
+// 写 secret.key：能拿 DPAPI 就用它包 local，同时永远写一份 portable。
+// 两份都做不成才算失败 —— 只做成 portable 也能用（有些机器上 DPAPI 辅助程序不可用）。
 function writeKeyFile(file, master) {
-  const wrapped = dpapi('protect', master);
-  if (!wrapped) return false;
+  const wrapped = dpapi('protect', master, true);
+  const salt = crypto.randomBytes(PORTABLE_SALT_BYTES).toString('base64');
+  const payload = {
+    version: 2,
+    local: wrapped ? wrapped.toString('base64') : '',
+    portable: portableWrap(master, salt),
+    salt: salt,
+  };
+  if (!payload.local && !payload.portable) return false;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, wrapped.toString('base64'), { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmp, file);
   restrictAcl(file);
   return true;
 }
 
-// 取主密钥。三种情况要分清楚：
-//   1) 有密钥文件、解得开  -> 正常；
-//   2) 没有密钥文件        -> 首次运行，生成一把；
-//   3) 有文件、解不开      -> 换了 Windows 用户 / 换了电脑，绝不能覆盖重生成
-//                              （覆盖等于把旧密文永久作废），只能报错让用户知道。
+// 取主密钥。四种情况要分清楚：
+//   1) 有密钥文件、DPAPI 解得开              -> 正常（本机）
+//   2) 有密钥文件、DPAPI 解不开但有 portable -> 这台电脑是新来的（同步 / 拷贝过来），
+//      用可移植副本解开，并顺手用本机 DPAPI 重包一份
+//   3) 没有密钥文件                          -> 首次运行，生成一把
+//   4) 有文件、两份都解不开                  -> 绝不能覆盖重生成（覆盖等于把旧密文永久作废）
 function masterKey(dir, allowCreate) {
   const file = keyPath(dir);
   if (cachedKey) return cachedKey;
 
-  if (fs.existsSync(file)) {
-    let wrapped;
-    try {
-      wrapped = Buffer.from(fs.readFileSync(file, 'utf8').trim(), 'base64');
-    } catch (error) {
-      setError('读取 ' + KEY_FILE_NAME + ' 失败：' + error.message);
-      return null;
+  const stored = readKeyFile(file);
+  if (stored) {
+    // (1) 先试本机 DPAPI —— 最稳的一条路，解开就不再碰别的
+    const raw = stored.local && stored.local.length ? dpapi('unprotect', stored.local, true) : null;
+    if (raw && raw.length === MASTER_BYTES) {
+      cachedKey = Buffer.from(raw);
+      cachedSource = 'local';
+      // 老格式（v1）顺手升级成 v2：补上可移植副本，免得下次换电脑又解不开
+      if (stored.version < 2 || !stored.portable) {
+        try {
+          writeKeyFile(file, cachedKey);
+        } catch {
+          /* 升级失败不影响本次运行，下次启动再试 */
+        }
+      }
+      return cachedKey;
     }
-    const raw = dpapi('unprotect', wrapped);
-    if (!raw) {
-      setError(KEY_FILE_NAME + ' 解不开 —— 通常是换了 Windows 用户或换了电脑；' +
-        '原来的平台密钥仍以密文留在配置里，换回原环境即可继续用');
-      return null;
+
+    // (2) DPAPI 不通：多半是从另一台电脑同步 / 拷贝过来的，试可移植副本
+    if (stored.portable) {
+      const plain = portableUnwrap(stored.portable, stored.salt);
+      if (plain && plain.length === MASTER_BYTES) {
+        cachedKey = Buffer.from(plain);
+        cachedSource = 'portable';
+        clearError();
+        console.log('[密钥保护] 已用可移植副本解开主密钥（这份数据来自另一台电脑 / 另一个 Windows 用户）');
+        // 用本机 DPAPI 重新包一份：以后启动走本机这条快路，portable 继续留着
+        try {
+          writeKeyFile(file, cachedKey);
+        } catch {
+          /* 写不回去也能用，只是下次还要走 portable */
+        }
+        return cachedKey;
+      }
     }
-    if (raw.length !== MASTER_BYTES) {
-      setError(KEY_FILE_NAME + ' 长度不对（' + raw.length + ' 字节），不敢用');
-      return null;
-    }
-    cachedKey = Buffer.from(raw);
-    return cachedKey;
+
+    // (4) 两份都解不开
+    setError(
+      KEY_FILE_NAME + ' 解不开 —— 本机 DPAPI 解不了，里面的可移植副本也解不开；' +
+        '原来的平台密钥仍以密文留在配置里，换回原环境即可继续用'
+    );
+    return null;
   }
 
   // 解密路径绝不允许顺手生成新钥匙：配置里已经躺着密文了，
@@ -191,14 +333,16 @@ function masterKey(dir, allowCreate) {
     return null;
   }
 
-  // 文件不存在：真正的新装才会走到这里。
+  // (3) 文件不存在：真正的新装才会走到这里。
   // 「配置里已有密文、钥匙却丢了」那种危险状态由 encryptChannels 提前拦住，
   // 因为只有它知道这次要写的内容里还有没有解不开的旧密文。
   const fresh = crypto.randomBytes(MASTER_BYTES);
   if (!writeKeyFile(file, fresh)) return null;
   cachedKey = fresh;
+  cachedSource = 'local';
   return cachedKey;
 }
+
 
 
 // ---------------------------------------------------------------- 字段加解密
@@ -385,6 +529,10 @@ function state() {
     enabled: Boolean(cachedKey) || helperReady(),
     error: cachedError,
     keyFile: KEY_FILE_NAME,
+    // 'local'    = 本机 DPAPI 解开（最稳）
+    // 'portable' = 从另一台电脑带过来的数据，用可移植副本解开的
+    source: cachedSource,
+    portable: PORTABLE_VERSION,
   };
 }
 
@@ -409,9 +557,13 @@ module.exports = {
   masterKey,
   keyPath,
   state,
+  portableWrap,
+  portableUnwrap,
+  PORTABLE_VERSION,
   // 测试用：清掉进程内缓存，模拟「重启」
   _reset: () => {
     cachedKey = null;
+    cachedSource = '';
     cachedError = '';
     helperChecked = false;
     clearError();
