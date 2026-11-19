@@ -3029,9 +3029,25 @@
     return size;
   }
 
+  // 卡片层级只活在 .world 这一个层叠上下文里（.world 带 transform，本身就是上下文），
+  // 所以这些数字只需要「比同一块画布上的任何一张卡都大」，不用去和界面浮层比大小。
+  //
+  // 为什么不能再用一个写死的小数字：卡片的基准层级是「10 + 卡片序号」，
+  // 序号按加入画布的顺序排。以前展开的那张是靠 CSS 的
+  //   .node.expanded { z-index: 120 !important; }
+  // 硬顶到 120 的，而 !important 又把这里算的加成盖掉了 ——
+  // 只要一块画布超过 110 张卡，序号 111 以后的卡层级就比 120 高，
+  // 点开的那张反而沉到它们底下（用户看到的就是「选中的卡跑到最底层」）。
+  // 现在按档位算，基数留到六位数，画布上有几万张卡也撞不上。
+  const Z_SELECTED = 1000000; // 选中的卡：压在所有普通卡之上
+  const Z_EXPANDED = 2000000; // 打开编辑面板的那一张：再压在所有选中之上
+  const Z_BOX_EXPANDED = 3000000; // 区域 / 定时组的设置面板：要盖住组里的成员
+
   // 组框永远压在组里的卡片下面，这样卡片才是「摆在框里」的；
-  // 展开设置窗口时整组临时浮到最上面，面板和遮罩才盖得住组里的卡片。
+  // 展开设置窗口时整块临时浮到最上面，面板和遮罩才盖得住组里的卡片。
   function zIndexOf(node) {
+    const expanded = node.id === expandedId;
+    const selected = selection.has(node.id);
     if (isSchedule(node)) {
       const members = scheduleMembersOf(node);
       let lowest = Infinity;
@@ -3039,7 +3055,9 @@
         lowest = Math.min(lowest, Number(member.z) || 0);
       });
       const base = Number.isFinite(lowest) ? 10 + lowest - 1 : 10 + (Number(node.z) || 0);
-      return base + (node.id === expandedId ? 30000 : 0);
+      // 框类的「选中」不提层：它是一块底板，提到成员上面会把卡片压暗、还会把点击吃掉。
+      // 只有展开设置面板时才整块浮上来（面板和遮罩要盖住成员）。
+      return expanded ? Z_BOX_EXPANDED + (Number(node.z) || 0) : base;
     }
     // 区域也是「框」：永远垫在它圈住的卡片底下，卡片才像是摆在框里
     if (isZone(node)) {
@@ -3049,9 +3067,11 @@
         lowest = Math.min(lowest, Number(member.z) || 0);
       });
       const base = Number.isFinite(lowest) ? 10 + lowest - 1 : 10 + (Number(node.z) || 0);
-      return base + (node.id === expandedId ? 30000 : 0);
+      return expanded ? Z_BOX_EXPANDED + (Number(node.z) || 0) : base;
     }
-    return 10 + (Number(node.z) || 0) + (node.id === expandedId ? 200 : 0);
+    const base = 10 + (Number(node.z) || 0);
+    if (expanded) return Z_EXPANDED + (Number(node.z) || 0);
+    return selected ? Z_SELECTED + base : base;
   }
 
   // 卡片大小只走固定的几档（按当前比例等比缩放），不会拉成任意长宽
@@ -9494,6 +9514,19 @@
       detail.className = 'st-submit-detail';
       box.appendChild(detail);
       // 生成中改了参数：轻提示 + 「用新参数再跑一次」按钮
+      // 平台那边已出片、本地却判了失败的任务：给个“重新拉取”的出口。
+      // 拿原来的任务号回去再取一次，不重新提交、不重复扣费。
+      const resume = document.createElement('div');
+      resume.className = 'st-resume';
+      const resumeText = document.createElement('div');
+      resumeText.className = 'st-resume-text';
+      resume.appendChild(resumeText);
+      const resumeBtn = document.createElement('button');
+      resumeBtn.type = 'button';
+      resumeBtn.className = 'st-resume-btn';
+      resumeBtn.textContent = '重新拉取结果';
+      resume.appendChild(resumeBtn);
+      box.appendChild(resume);
       const changed = document.createElement('div');
       changed.className = 'st-changed';
       const changedText = document.createElement('div');
@@ -9512,6 +9545,7 @@
     const submit = box.querySelector('.st-submit');
     const detail = box.querySelector('.st-submit-detail');
     const changed = box.querySelector('.st-changed');
+    const resume = box.querySelector('.st-resume');
     let titleText = '生成失败';
     let messageText = data.error || '';
     let adviceText = '';
@@ -9572,6 +9606,50 @@
         detail.appendChild(line);
       });
       detail.style.display = rows.length ? '' : 'none';
+    }
+    // 「重新拉取结果」：只在「失败 + 已经拿到过任务号」时出现。
+    // 没有任务号说明当时连提交都没成功，拿不回来，不能给一个点了也没用的按钮。
+    if (resume) {
+      const canResume = kind === 'error' && Boolean(data.taskId);
+      resume.style.display = canResume ? '' : 'none';
+      if (canResume) {
+        const text = resume.querySelector('.st-resume-text');
+        if (text) {
+          text.textContent = '平台那边可能已经出片，可以再取一次结果（不重新扣费）';
+        }
+        const btn = resume.querySelector('.st-resume-btn');
+        if (btn && !btn.dataset.bound) {
+          btn.dataset.bound = '1';
+          btn.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            const host = resume.closest('.node');
+            const id = host && host.dataset ? host.dataset.id : '';
+            const target = id ? nodeById(id) : null;
+            if (!target) return;
+            const d = nodeData(target);
+            const taskId = d.taskId;
+            if (!taskId) return;
+            btn.disabled = true;
+            btn.textContent = '正在拉取…';
+            try {
+              await window.api.resumeTask(taskId);
+              d.error = '';
+              d.errorInfo = null;
+              d.running = true;
+              d.progress = '重新拉取中…';
+              d.startedAt = Date.now();
+              refreshNode(target, ['status']);
+              scheduleSave();
+              watchTask(target.id, taskId);
+              toast('已重新拉取，正在等平台返回结果');
+            } catch (error) {
+              btn.disabled = false;
+              btn.textContent = '重新拉取结果';
+              toast('拉取失败：' + ((error && error.message) || error));
+            }
+          });
+        }
+      }
     }
     // 生成期间改了参数：提醒一句，并给个「用新参数再跑一次」的出口。
     // 判定放在这里（而不是各处改动入口）是因为所有改动最终都会走到重绘，

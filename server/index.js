@@ -1127,7 +1127,7 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { task: task, submission: submission });
   }
 
-  const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(cancel))?$/);
+  const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(cancel|resume))?$/);
   if (taskMatch) {
     const taskId = decodeURIComponent(taskMatch[1]);
     if (taskMatch[2] === 'cancel' && method === 'POST') {
@@ -1141,6 +1141,29 @@ async function handleApi(req, res, pathname, query) {
         current = store.getTask(taskId);
       }
       return sendJson(res, 200, { ok: ok, task: store.getTask(taskId) });
+    }
+    // 重新拉取：平台那边已经出片、本地却因为取件配置错而被判失败的任务，
+    // 不用重新花钱提交，拿原来的任务号回去再取一次结果。
+    if (taskMatch[2] === 'resume' && method === 'POST') {
+      const current = store.getTask(taskId);
+      if (!current) return sendJson(res, 404, { error: '任务不存在' });
+      if (current.status === 'queued' || current.status === 'running') {
+        return sendJson(res, 409, { error: '这条任务还在跑，不用重新拉取' });
+      }
+      const record = current.resume;
+      if (!record || !record.remoteId) {
+        return sendJson(res, 400, {
+          error: '这条任务没有留下任务号，没法回去取结果（当时可能连提交都没成功）',
+        });
+      }
+      try {
+        const task = tasks.resumeOne(config, taskId);
+        log('重新拉取任务：' + taskId + '（远程 ' + record.remoteId + '）');
+        return sendJson(res, 200, { ok: true, task: task });
+      } catch (error) {
+        log('重新拉取失败：' + taskId + ' ' + error.message);
+        return sendJson(res, 400, { error: error.message });
+      }
     }
     if (method === 'GET') {
       const task = store.getTask(taskId);
@@ -1747,6 +1770,10 @@ function lanLibraryReadOnly(pathname, method) {
 //     拿不出画布编号、或那块画布没开共享，都拒。
 function lanCollabDenied(pathname, method, body, query) {
   if (lanLibraryReadOnly(pathname, method)) return '';
+  // 程序代码同步的两个只读接口天生「不落在任何画布上」：另一台电脑要的是程序本身，
+  // 手里也没有本机钥匙。它们已经在 isLanShareablePath 里放开，这里必须同样放行，
+  // 否则会掉进下面的「说不清是哪块画布」——实测直接把同步功能堵死（403）。
+  if (isLanShareablePath(pathname)) return '';
   // 有几个端点的路径形状像「操作某一块画布」，其实不是，它们**不落在任何已有画布上**：
   //   · /api/share/list      —— 列出正开着共享的画布（只读，且只暴露本来就已共享的）
   //   · /api/canvases/import —— 导入一份备份，**新建**一块画布，不动任何已有画布

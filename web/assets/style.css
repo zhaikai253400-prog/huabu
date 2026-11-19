@@ -1289,6 +1289,42 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
 
 /* C4：生成期间改了参数。轻提示 + 一个出口按钮，别用红色 —— 这不是错误，
    只是提醒「你改的这版要等下次才生效」。 */
+.node-status .st-resume {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: 94%;
+}
+.node-status .st-resume-text {
+  font-size: 0.74em;
+  line-height: 1.4;
+  color: var(--tint-info-text, #58a6ff);
+  background: var(--tint-info-bg, rgba(88,166,255,.12));
+  border: 1px solid var(--tint-info-line, rgba(88,166,255,.3));
+  border-radius: 6px;
+  padding: 4px 8px;
+  word-break: break-word;
+}
+.node-status .st-resume-btn {
+  font: inherit;
+  font-size: 0.76em;
+  padding: 3px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  color: #fff;
+  background: #2f81f7;
+  border: 1px solid #2f81f7;
+}
+.node-status .st-resume-btn:hover:not(:disabled) {
+  background: #1f6feb;
+}
+.node-status .st-resume-btn:disabled {
+  opacity: .6;
+  cursor: default;
+}
+
 .node-status .st-changed {
   pointer-events: auto;
   display: flex;
@@ -1501,8 +1537,12 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
 
 .node.expanded .node-panel { display: flex; }
 
-/* 展开的面板要压在左下操作说明、缩放框、小地图之上，免得按钮被挡 */
-.node.expanded { z-index: 120 !important; }
+/* 卡片层级（普通 / 选中 / 展开）统一由 canvas.js 的 zIndexOf() 写在内联样式上。
+   这里以前有一条 `.node.expanded { z-index: 120 !important }`，本意是让面板压住浮层，
+   但 .world 自己带 transform、已是独立层叠上下文，卡片本来就不可能盖住外面的浮层；
+   那条 !important 实际只干了一件事：把 JS 算好的层级顶掉。
+   卡片基准是「10 + 序号」，所以画布超过 110 张时，125 号卡就会盖住打开面板的这张 ——
+   用户看到的正是「点中的卡片跑到最底层」。整条删掉，层级全交给 JS 一处算。 */
 
 /* 原地展开：面板本身加宽加高，卡片本身的大小和位置都不动 */
 .node.expanded.wide .node-panel {
@@ -4098,8 +4138,8 @@ input::placeholder { color: var(--placeholder); }
 
 .node[data-type="schedule"].expanded .schedule-scrim { display: block; }
 
-/* 展开设置窗口时整组浮到最上面，遮罩和面板才能盖住组里的卡片 */
-.node[data-type="schedule"].expanded { z-index: 30000 !important; }
+/* 展开设置窗口时整组浮到最上面，遮罩和面板才能盖住组里的卡片 —— 层级同样由
+   canvas.js 的 zIndexOf() 给（区域 / 定时组展开走最高一档），这里不再重复写。 */
 
 .schedule-head { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; }
 

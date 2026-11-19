@@ -828,6 +828,22 @@ function pickByPath(root, dotted) {
   return current;
 }
 
+// 同一份返回里，不同平台（甚至同一平台不同版本）字段名常常不一样。
+// 「结果地址」「取件号」这类配置允许用 | 分隔写多个候选路径，按顺序取第一个有值的。
+// 这样换一家通道、对方悄悄改了字段名，都不用整条链路重配一次。
+function pickByPaths(root, dotted) {
+  const raw = str(dotted);
+  if (!raw) return undefined;
+  const list = raw.split('|');
+  for (const one of list) {
+    const got = pickByPath(root, one);
+    if (got === undefined || got === null) continue;
+    if (typeof got === 'string' && !got.trim()) continue;
+    return got;
+  }
+  return undefined;
+}
+
 function looksLikeBase64(text) {
   const value = str(text).trim();
   return value.length > 256 && !/\s/.test(value) && /^[A-Za-z0-9+/=]+$/.test(value.slice(0, 256));
@@ -835,14 +851,14 @@ function looksLikeBase64(text) {
 
 // 从接口返回里把素材捞出来：先按配置的路径找，再退回整段文本里找
 function extractResult(rawText, json, spec) {
-  const direct = pickByPath(json, spec && spec.resultUrl);
+  const direct = pickByPaths(json, spec && spec.resultUrl);
   if (typeof direct === 'string' && direct.trim()) {
     const text = direct.trim();
     if (/^data:/i.test(text)) return { dataUrl: text };
     if (/^https?:\/\//i.test(text)) return { url: text };
     if (looksLikeBase64(text)) return { base64: text };
   }
-  const inline = pickByPath(json, spec && spec.resultB64);
+  const inline = pickByPaths(json, spec && spec.resultB64);
   if (typeof inline === 'string' && looksLikeBase64(inline)) return { base64: inline.trim() };
   const text = str(rawText);
   const dataHit = text.match(/data:(?:image|video|audio)\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/i);
@@ -1465,6 +1481,7 @@ module.exports = {
   fillTemplate,
   encodeBody,
   pickByPath,
+  pickByPaths,
   extractResult,
   splitModels,
   sizeFor,

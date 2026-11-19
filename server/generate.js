@@ -1337,12 +1337,14 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
     const status = String(statusRaw === undefined || statusRaw === null ? '' : statusRaw).trim().toLowerCase();
     // 拉列表时不能拿整个列表的原文去撮地址，否则会把别人的片子 / 封面当成自己的成品
     const scanText = record.listField ? JSON.stringify(taskNode) : data.text;
-    let found = record.downloadPath
-      ? null
-      : channels.extractResult(scanText, taskNode, {
-          resultUrl: record.resultUrl || '',
-          resultB64: record.resultB64 || '',
-        });
+    // 先按「结果地址路径」直接找。原来这里是 `record.downloadPath ? null : ...`：
+    // 只要配了取件路径就完全不看返回体，于是「平台明明给了 video_url、只是取件文件号没配」
+    // 这种组合会一路走到「任务完成了，但没找到结果文件号」——用户白等一场。
+    // 取件路径只是「拿不到直链时的兜底」，不该反过来屏蔽直链。
+    let found = channels.extractResult(scanText, taskNode, {
+      resultUrl: record.resultUrl || '',
+      resultB64: record.resultB64 || '',
+    });
     // 封面图 / 预览图不算出片：丢掉它，继续按状态往下走（失败了就报错，没完成就接着等）
     if (found && !kindMatches(kind, found)) {
       progress({ stage: '生成中…（' + (kind === 'video' ? '还在等成片' : '还在等图片') + '，已等 ' + stampMinute(Date.now() - startedAt) + '）' });
@@ -1359,12 +1361,16 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
     if (doneWords.length && doneWords.indexOf(status) >= 0) {
       // 有的平台在任务里只给「结果文件号」，要再走一次取件接口换下载地址
       if (record.downloadPath) {
-        const fileId = channels.pickByPath(taskNode, record.downloadIdPath);
+        // 取件号可以是多候选（downloadIdPath 写 `a|b`），也可以整段留空——
+        // 那种平台的取件地址就是 /videos/{{taskId}}/content，直接拿任务号当文件号。
+        const fileId =
+          channels.pickByPaths(taskNode, record.downloadIdPath) ||
+          (String(record.downloadPath).indexOf('{{taskId}}') >= 0 ? record.remoteId : undefined);
         if (!fileId) {
           throw errorKinds.makeError('BAD_FORMAT', '任务完成了，但返回里没找到结果文件号，检查「取件文件号路径」' + tail);
         }
         const dlPath = String(record.downloadPath).replace(
-          /\{\{\s*(fileId|file_id|id)\s*\}\}/g,
+          /\{\{\s*(fileId|file_id|id|taskId|task_id)\s*\}\}/g,
           encodeURIComponent(String(fileId))
         );
         progress({ stage: '生成完了，正在换取下载地址…' });
@@ -1382,7 +1388,7 @@ async function pollRemote(config, channel, kind, record, ctx, progress) {
         //（那一步会带上通道鉴权，这类接口都要求 Bearer）。
         // 放在最前面判：二进制流不该再拿去扫正则，白费力气还可能误抓。
         if (!dl.json) return { url: dl.url };
-        const direct = channels.pickByPath(dl.json, record.downloadUrlField || 'downloadUrl');
+        const direct = channels.pickByPaths(dl.json, record.downloadUrlField || 'downloadUrl');
         if (typeof direct === 'string' && /^https?:\/\//i.test(direct.trim())) return { url: direct.trim() };
         const again = channels.extractResult(dl.text, dl.json, {});
         if (again) return again;
@@ -1829,6 +1835,8 @@ async function extractLastFrame(config, source, label, sub) {
 }
 
 module.exports = {
+  // 仅供测试：直接跑轮询循环，不用真请求平台
+  __pollRemote: pollRemote,
   stripMediaUrlFields,
   refFilesOf,
 

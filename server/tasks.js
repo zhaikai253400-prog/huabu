@@ -113,6 +113,25 @@ function resumeAll(config) {
   return list.length;
 }
 
+// 重新拉取一条已结束（失败 / 已取消）的任务：不重新提交、不重新扣费，
+// 拿当初记下的任务号回去再查一次结果。平台那边已经出片、只是本地配置错导致判失败的场景，
+// 靠这个把片子捡回来。
+function resumeOne(config, id) {
+  const task = store.getTask(String(id));
+  if (!task) throw new Error('任务不存在');
+  if (active.has(String(id))) throw new Error('这条任务还在跑，不用重新拉取');
+  const record = task.resume;
+  if (!record || !record.remoteId) {
+    throw new Error('这条任务没有留下任务号，没法回去取结果');
+  }
+  // 先把状态拉回「跑着」，卡片才会重新轮询起来
+  store.updateTask(id, { status: 'running', stage: '重新拉取中…', error: '' });
+  runJob(task.id, Number(task.createdAt) || now(), function (ctx) {
+    return generate.resumeTask(config, store.getTask(id), ctx);
+  });
+  return store.getTask(id);
+}
+
 function cancel(id) {
   const controller = active.get(String(id));
   if (!controller) return false;
@@ -124,4 +143,4 @@ function isActive(id) {
   return active.has(String(id));
 }
 
-module.exports = { start, cancel, isActive, resumeAll };
+module.exports = { start, cancel, isActive, resumeAll, resumeOne };

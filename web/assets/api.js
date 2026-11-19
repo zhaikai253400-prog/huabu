@@ -366,6 +366,9 @@
       return request('GET', '/api/tasks' + (q.length ? '?' + q.join('&') : ''));
     },
     cancelTask: (id) => request('POST', '/api/tasks/' + encodeURIComponent(id) + '/cancel', {}),
+    // 平台已经出片、本地却判了失败的任务：拿原来的任务号回去再取一次结果，
+    // 不会重新提交、不会重复扣费
+    resumeTask: (id) => request('POST', '/api/tasks/' + encodeURIComponent(id) + '/resume', {}),
     listCanvases: () => request('GET', '/api/canvases'),
     createCanvas: (name) => request('POST', '/api/canvases', { name }),
     getCanvas: (id) => request('GET', '/api/canvases/' + encodeURIComponent(id)),
