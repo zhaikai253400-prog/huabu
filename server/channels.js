@@ -755,8 +755,8 @@ function assertUsableSecret(value, where) {
   if (typeof value === 'string' && value.indexOf('enc:v1:') === 0) {
     throw errorKinds.configError(
       '通道密钥没能解开，不能就这样发给平台。' +
-      '通常是 data\\secret.key 与当前 Windows 用户对不上（换用户 / 换电脑）；' +
-      '换回原来的环境即可，或在这个通道里重新填一次密钥。' +
+      '通常是 data\\secret.key 丢了、或与 data\\config.json 不是一对；' +
+      '把这两个文件一起找回（或从 data\\backups 恢复）即可，实在找不到就在这个通道里重新填一次密钥。' +
       (where ? '（' + where + '）' : '')
     );
   }

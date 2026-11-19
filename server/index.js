@@ -455,7 +455,14 @@ function selfCheck(tools) {
     key: 'keyProtect',
     label: '密钥加密',
     ok: seal.enabled && !seal.error,
-    detail: seal.error ? seal.error : '已启用（磁盘上只存密文，解封钥匙与当前 Windows 用户绑定）',
+    // 这里以前写的是「解封钥匙与当前 Windows 用户绑定」，换电脑那段修好之后这句话就成了反话：
+    // 现在 secret.key 里除了本机 DPAPI 那份，还带一份与机器无关的可移植副本，
+    // 所以换电脑 / 换 Windows 账户照样能解开，自检里得如实说。
+    detail: seal.error
+      ? seal.error
+      : seal.source === 'portable'
+        ? '已启用（磁盘上只存密文；这次是用「可移植副本」解开的，说明数据来自另一台电脑，密钥照样能用）'
+        : '已启用（磁盘上只存密文，本机 DPAPI + 可移植副本双份保存，换电脑不用重填）',
   });
   return list;
 }

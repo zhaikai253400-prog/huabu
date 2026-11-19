@@ -362,7 +362,7 @@ function assertRoundTrip(body, config) {
   if (broken.length) {
     throw new Error(
       '配置写盘前自检失败：' + broken.length + ' 处密钥回读不出来（' + broken[0][0] + ' 等）。' +
-      '常见原因是主密钥文件 data\\secret.key 与当前用户不匹配，这次没有保存。'
+      '常见原因是主密钥文件 data\\secret.key 丢了，或与 data\\config.json 不是一对；这次没有保存。'
     );
   }
 }

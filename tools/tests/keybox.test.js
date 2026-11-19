@@ -13,6 +13,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const box = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-keybox-'));
@@ -291,6 +292,21 @@ console.log('【六】换电脑：同步 / 拷贝到另一台机器后，密钥�
 // 现在 secret.key 多存一份与机器无关的可移植副本。下面围着「旧机器那份
 // DPAPI 密文解不开」来验 —— 这正是换电脑时实际发生的事。
 
+// 造一份「从另一台电脑拷过来的」secret.key 权限现场：
+// 断继承 + 把所有 ACE 清掉（相当于 ACL 里只剩旧机器的 SID，在这台机器上一条都不命中）。
+// 实测这种形态有两个后果，必须一起验：
+//   ① 读 → EPERM（连可移植副本都轮不到）
+//   ② 改名覆盖 → **仍然成功**（覆盖权看的是目录）→ 老逻辑会在这里把原文件静默销毁
+function makeOldPcAcl(keyFile) {
+  const user = process.env.USERNAME || 'Administrator';
+  const acl = (args) => spawnSync('icacls', [keyFile].concat(args), { encoding: 'utf8', windowsHide: true });
+  acl(['/inheritance:r']);
+  [user, 'Everyone', 'SYSTEM', 'Administrators', 'Users', 'Authenticated Users'].forEach((who) => {
+    if (who) acl(['/remove:g', who]);
+  });
+  return acl;
+}
+
 // 每个用例都从零搭一套现场：删掉旧的 config.json / secret.key，
 // 再让 configStore.save 现造一份。这样用例之间不会互相污染。
 function freshPortableSite() {
@@ -404,6 +420,152 @@ check('两份都坏掉时才报错，且密文原样留着（绝不抹掉用户�
   ok(opened.locked > 0, '两份都坏了却解出了东西？');
   eq(opened.list[0].apiKey, cfg.channels[0].apiKey, '解不开时密文应当原样保留');
   ok(keybox.state().error.length > 0, '应当给出错误说明');
+});
+
+check('换电脑时文件权限也挡住了：secret.key 上只有旧机器的 SID，连读都读不了', () => {
+  // 这是 2026-11-19 实测到的**第二层**原因，和可移植副本是两件事：
+  //   restrictAcl 把继承断掉、只授权「本机的这个用户名」。ACL 里记的是旧机器 SID，
+  //   换电脑以后新机器一条都不命中 —— 结果 readFileSync 直接 EPERM，可移植副本轮不到出场。
+  // 断言三件事：① 先复现「真的读不了」 ② 自救后能读、密钥解得出 ③ 原密钥没被换掉
+  const parsed = freshPortableSite();
+  const keyFile = keybox.keyPath(paths.DATA_DIR);
+  const before = fs.readFileSync(keyFile, 'utf8');
+  keybox._reset();
+
+  const user = process.env.USERNAME || 'Administrator';
+  const acl = makeOldPcAcl(keyFile);
+  // 连当前用户唯一那一份也给掉（清空 ACE 之后文件上一条都不剩）
+  acl(['/remove:g', user]);
+
+  let blocked = false;
+  try {
+    fs.readFileSync(keyFile, 'utf8');
+  } catch (error) {
+    blocked = error.code === 'EPERM' || error.code === 'EACCES';
+  }
+  try {
+    ok(blocked, '没复现出「读不了」—— 说明这个用例的前提已经不成立');
+    // 自救：不该抛错，应当自己把当前用户加回去并把密钥解出来
+    const cfg = configStore.load();
+    eq(cfg.channels[0].apiKey, 'sk-portable-0001', '权限自救没能救回密钥');
+    ok(fs.existsSync(keyFile), '自救过程中把 secret.key 弄丢了');
+    const after = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
+    eq(after.version, 2);
+    ok(after.portable, '重写之后可移植份不见了');
+    const opened = keybox.decryptChannels(after.channels || JSON.parse(fs.readFileSync(paths.CONFIG_FILE, 'utf8')).channels);
+    eq(opened.locked, 0);
+  } finally {
+    acl(['/reset']);
+    acl(['/grant:r', user + ':F']);
+    keybox._reset();
+  }
+  ok(fs.readFileSync(keyFile, 'utf8').length > 0, '收尾后 secret.key 应当还在');
+});
+
+check('readKeyFile 的三分类：没有文件 / 读不出来 / 内容认不出，绝不能混成一个 null', () => {
+  // 这是整条修复的地基：老代码把三种都返回 null，masterKey 就无法区分
+  // 「首次运行（可以造新钥）」和「文件在那儿只是打不开（绝不能造新钥）」。
+  // 直接调这个函数验分类，比在本机艰难地造出「读失败但覆盖能成功」的 ACL 组合可靠得多。
+  const parsed = freshPortableSite();
+  const keyFile = keybox.keyPath(paths.DATA_DIR);
+  const before = fs.readFileSync(keyFile, 'utf8');
+  ok(keybox._readKeyFile, 'keybox 没导出 _readKeyFile（测试钩子）');
+
+  const stash = keyFile + '.stash';
+  fs.writeFileSync(stash, before, 'utf8');
+  // ① 没有文件 → null（这才允许「首次运行」造新钥）
+  keybox._reset();
+  fs.unlinkSync(keyFile);
+  eq(keybox._readKeyFile(keyFile), null, '没有文件时应当返回 null');
+
+  // ② 是目录（读一定失败）→ broken，绝不能是 null
+  fs.mkdirSync(keyFile);
+  try {
+    const got = keybox._readKeyFile(keyFile);
+    ok(got && got.broken === true, '读不出来时应当返回 { broken: true }，实际拿到 ' + JSON.stringify(got));
+  } finally {
+    fs.rmdirSync(keyFile);
+  }
+
+  // ③ JSON 解析不了 → broken
+  fs.writeFileSync(keyFile, '{ 坏掉的 JSON', 'utf8');
+  const badJson = keybox._readKeyFile(keyFile);
+  ok(badJson && badJson.broken === true, 'JSON 坏了应当返回 broken，实际 ' + JSON.stringify(badJson));
+
+  // ④ 合法 JSON 但不是对象 → broken
+  fs.writeFileSync(keyFile, JSON.stringify([1, 2, 3]), 'utf8');
+  const notObject = keybox._readKeyFile(keyFile);
+  ok(notObject && notObject.broken === true, '合法 JSON 但不是对象也应当 broken，实际 ' + JSON.stringify(notObject));
+
+  // ⑤ 空文件 → broken（空文件同样不能当成「首次运行」，它有可能是写到一半被打断）
+  fs.writeFileSync(keyFile, '', 'utf8');
+  const empty = keybox._readKeyFile(keyFile);
+  ok(empty && empty.broken === true, '空文件应当 broken，实际 ' + JSON.stringify(empty));
+
+  // ⑥ 正常文件 → 正常读出
+  fs.writeFileSync(keyFile, before, 'utf8');
+  const good = keybox._readKeyFile(keyFile);
+  eq(good && good.version, 2);
+  ok(good && good.portable, '正常文件应当读出可移植份');
+
+  fs.unlinkSync(stash);
+  keybox._reset();
+  eq(configStore.load().channels[0].apiKey, 'sk-portable-0001');
+});
+
+check('secret.key 内容坏了 / 读不出来时，绝不新建钥匙覆盖它（否则旧密钥永久作废）', () => {
+  // 这条守的是「最坏的一种失败」：文件在、只是打不开。
+  // 老逻辑把「读不出来」和「没有文件」当成同一件事（readKeyFile 返回 null），
+  // 于是 masterKey 走了「首次运行」那条路，生成新钥匙并覆盖 secret.key ——
+  // 原来那份密文从此再也解不开，用户看到的就是「密钥又没了，只能重新填」。
+  //
+  // 用「内容坏掉的 JSON」来验，而不是「读不出来」：
+  //   读失败那条路在本机通常会被「补授权自救」修好（那才是换电脑的正常路径），
+  //   真正需要 broken 守卫的是**文件在、内容认不出** —— 这时自救帮不上忙，
+  //   一旦当成「没有文件」，就会当场把用户的密钥销毁（实测变异：返回一把新钥
+  //   并把原文件换成 version 2 的新内容）。两种形态共同点是「绝不能新建」。
+  const parsed = freshPortableSite();
+  const keyFile = keybox.keyPath(paths.DATA_DIR);
+  const before = fs.readFileSync(keyFile, 'utf8');
+  const garbage = '{ 这是坏掉的 JSON\n"local": "xxx"';
+  fs.writeFileSync(keyFile, garbage, 'utf8');
+  try {
+    keybox._reset();
+    // 启动路径（允许新建）最危险：它本来就有「造一把新钥」的权力
+    let freshResult = null;
+    let freshThrew = '';
+    try { freshResult = keybox.masterKey(null, true); } catch (error) { freshThrew = error.message; }
+    ok(!freshResult, '内容坏了却给出了钥匙（说明它新建了一把，把原文件覆盖了）' + (freshThrew ? '｜' + freshThrew : ''));
+    eq(fs.readFileSync(keyFile, 'utf8'), garbage, '原 secret.key 被覆盖了 —— 旧密钥已永久作废');
+    const why = keybox.state().error;
+    ok(/secret\.key/.test(why), '报错里应当点名 secret.key：' + why);
+    ok(/没有生成新钥匙/.test(why) || /不改动它/.test(why), '应当明确说「没生成新钥匙 / 没改动它」：' + why);
+  } finally {
+    fs.writeFileSync(keyFile, before, 'utf8');
+    keybox._reset();
+  }
+  eq(configStore.load().channels[0].apiKey, 'sk-portable-0001', '收尾后密钥应当完好');
+});
+
+check('secret.key 是合法 JSON 但不是对象（例如被改成了数组）也不许被覆盖', () => {
+  // 与上一条同一族：文件在、内容认不出。这条专门盯「JSON 解析成功但不是对象」那一支 ——
+  // 变异测试发现：只把「JSON 解析失败」改回 null 时能抓到，但这一支被漏掉了。
+  const parsed = freshPortableSite();
+  const keyFile = keybox.keyPath(paths.DATA_DIR);
+  const before = fs.readFileSync(keyFile, 'utf8');
+  const weird = JSON.stringify(['这不是密钥文件', 1, 2]);
+  fs.writeFileSync(keyFile, weird, 'utf8');
+  try {
+    keybox._reset();
+    const got = keybox.masterKey(null, true);
+    ok(!got, '内容不是对象却给出了钥匙（说明它新建了一把，把原文件覆盖了）');
+    eq(fs.readFileSync(keyFile, 'utf8'), weird, '原 secret.key 被覆盖了');
+    ok(/secret\.key/.test(keybox.state().error), '报错里应当点名 secret.key');
+  } finally {
+    fs.writeFileSync(keyFile, before, 'utf8');
+    keybox._reset();
+  }
+  eq(configStore.load().channels[0].apiKey, 'sk-portable-0001');
 });
 
 check('可移植份的密码学约束：同一把主密钥 + 不同盐 → 不同密文，能各自解开', () => {
