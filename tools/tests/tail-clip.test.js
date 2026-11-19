@@ -156,7 +156,9 @@ try {
   ], { stdio: 'pipe' });
 } catch (error) {
   console.log('  · 本机 ffmpeg 造不出测试片，跳过 C 段');
-  console.log('\n' + '─'.repeat(52));
+  
+
+console.log('\n' + '─'.repeat(52));
   console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
   process.exit(fail ? 1 : 0);
 }
@@ -208,6 +210,20 @@ const absOf = (rel) => path.join(assetRoot, String(rel).split('/').join(path.sep
       const files = fs.readdirSync(path.join(assetRoot, '视频', '尾段'));
       assert(files.length >= 3, '尾段目录里只有 ' + files.length + ' 个文件');
     });
+  check('右键菜单也有取尾段入口（上一版只加了底栏按钮，用户右键找不到）', () => {
+    // 底栏那个「尾段」按钮只在卡片展开时才出现，缩起来就看不见。
+    // 用户习惯右键找操作，所以右键菜单里必须有同样的入口。
+    const at = CANVAS_SRC.indexOf('function openNodeMenu(');
+    assert(at > 0, '找不到 openNodeMenu');
+    const body = CANVAS_SRC.slice(at, at + 4200);
+    assert(body.indexOf('startTailClip(node, 5)') >= 0, '右键菜单里没有「取尾段：后 5 秒」');
+    assert(body.indexOf('startTailClip(node, 10)') >= 0, '右键菜单里没有「取尾段：后 10 秒」');
+    assert(body.indexOf('startTailFrame(node)') >= 0, '「提取尾帧」被挤掉了');
+    // 没成片时留着但点不动，而不是整项消失
+    assert(/hasMovie\s*=\s*Boolean\(data\.result && data\.result\.url\)/.test(body), '没有判断有没有成片');
+    assert(/disabled:\s*!hasMovie/.test(body), '没成片时没有置灰，点下去会报错');
+  });
+
   } finally {
     fs.rmSync(box, { recursive: true, force: true });
   }

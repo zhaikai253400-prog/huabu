@@ -12466,7 +12466,16 @@
             label: data.running ? '取消这次生成' : '开始生成',
             run: () => (data.running ? cancelGenerate(node) : startGenerate(node)),
           });
-          if (node.type === 'video' || node.type === 'quick') items.push({ label: '提取尾帧', run: () => startTailFrame(node) });
+          if (node.type === 'video' || node.type === 'quick') {
+            items.push({ label: '提取尾帧', run: () => startTailFrame(node) });
+            // 取尾段：底栏「尾段」按钮只在展开面板里，缩起来就看不见；
+            // 右键菜单也给一份，跟底栏那个走同一套逻辑。
+            // 没有成片时留在菜单里但点不动：整项消失会让人以为功能没了。
+            const hasMovie = Boolean(data.result && data.result.url);
+            const whyNot = hasMovie ? '' : '这张卡片还没有生成成片';
+            items.push({ label: '取尾段：后 5 秒', disabled: !hasMovie, disabledHint: whyNot, run: () => startTailClip(node, 5) });
+            items.push({ label: '取尾段：后 10 秒', disabled: !hasMovie, disabledHint: whyNot, run: () => startTailClip(node, 10) });
+          }
           if (RESIZABLE_TYPES.indexOf(node.type) >= 0 && !data.thumb) {
             const fitSize = defaultSize(node.type, data.params);
             const fitGap = defaultBoxGapOf(node);
@@ -16831,6 +16840,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
         { name: '快速视频卡片', caps: ['新建快速视频'], note: '不用连线，提示词里 @ 谁就用谁' },
         { name: '把素材连到卡片上', caps: ['拖左侧圆点到目标'], note: '连上来就算参考，不用再选类型' },
         { name: '视频提取尾帧', caps: ['右键视频卡片'], note: '会新建一张图片卡片' },
+        { name: '视频取尾段', caps: ['右键视频卡片', '卡片底栏「尾段」'], note: '截出后 5 秒 / 后 10 秒，新建一张视频卡片给下一段接班' },
       ],
     },
   ];
