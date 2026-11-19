@@ -336,8 +336,15 @@
 
         const actions = document.createElement('div');
         actions.className = 'canvas-actions';
+        // 参数顺序固定为 (文案, 样式类, 处理函数, 悬停提示)。
+        // 之前把提示和函数传反了，字符串被当成处理函数，点一下就抛
+        // "handler is not a function"，这里用形参名 + 单测把顺序钉死。
         const makeButton = (label, className, handler, hint) => {
+          if (typeof handler !== 'function') {
+            throw new TypeError('makeButton: 第 3 个参数必须是处理函数，实际收到 ' + typeof handler);
+          }
           const button = document.createElement('button');
+          button.type = 'button';
           button.className = className || '';
           button.textContent = label;
           if (hint) button.title = hint;
@@ -347,34 +354,34 @@
           });
           return button;
         };
-        // 按钮排版：原来 7 个按钮平铺一行，卡片最窄只有 250px，每个被挤到 34px 宽，
-        // 中文就竖过来了（一字一行、72px 高）。改成「打开」独占一整行 + 其余两行三列，
-        // 所有按钮文字都能横着排；顺带把长标签缩短（复制一份→复制、导出备份→导出）。
+        // 按钮排版：原来是 7 个按钮平铺一行，卡片最窄只有 250px，每个被挤到 34px 宽，
+        // 中文就竖过来了（一字一行、72px 高）。现在「打开画布」独占一整行，
+        // 其余按三列网格铺开，所有文案都能横排。
         actions.appendChild(makeButton('打开画布', 'primary wide', () => openCanvas(canvas.id), '进入这块画布'));
         actions.appendChild(
-          makeButton('重命名', '', '改画布名字', async () => {
+          makeButton('重命名', '', async () => {
             const next = window.prompt('新的画布名字', canvas.name);
             if (next === null) return;
             if (!next.trim()) return;
             await window.api.renameCanvas(canvas.id, next.trim());
             refresh();
-          })
+          }, '改画布名字')
         );
         actions.appendChild(
-          makeButton('复制', '', '复制一份同样的画布', async () => {
+          makeButton('复制', '', async () => {
             await window.api.duplicateCanvas(canvas.id);
             refresh();
-          })
+          }, '复制一份同样的画布')
         );
         actions.appendChild(
-          makeButton('导出', '', '导出成 JSON 备份文件', async () => {
+          makeButton('导出', '', async () => {
             try {
               const payload = await window.api.exportCanvas(canvas.id);
               downloadJson('画布-' + canvas.name + '.json', payload);
             } catch (error) {
               window.alert('导出失败：' + error.message);
             }
-          })
+          }, '导出成 JSON 备份文件')
         );
         if (!isGuest) {
           actions.appendChild(
@@ -399,16 +406,16 @@
               } catch (error) {
                 window.alert((canvas.shared ? '关闭共享' : '开启共享') + '失败：' + error.message);
               }
-            })
+            }, canvas.shared ? '已开启共享，点一下关闭' : '开启局域网共享（最多 3 人同时编辑）')
           );
         }
-        actions.appendChild(makeButton('历史', '', '查看并回滚历史版本', () => openBackups(canvas)));
+        actions.appendChild(makeButton('历史', '', () => openBackups(canvas), '查看并回滚历史版本'));
         actions.appendChild(
-          makeButton('删除', 'danger', '删掉这块画布', async () => {
+          makeButton('删除', 'danger', async () => {
             if (!window.confirm('确定删除画布“' + canvas.name + '”吗？')) return;
             await window.api.deleteCanvas(canvas.id);
             refresh();
-          })
+          }, '删掉这块画布')
         );
 
         meta.appendChild(name);

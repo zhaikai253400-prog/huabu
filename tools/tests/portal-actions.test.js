@@ -123,6 +123,61 @@ check('按钮之间不再有 7 个都挤在一行的情况（结构上只有 1 �
   assert(wide.length === 1, 'wide 按钮应该正好 1 个，现在是 ' + wide.length);
 });
 
+
+check('makeButton 的第三个参数必须是处理函数（防止提示文案和函数传反）', () => {
+  // 上一版把签名改成 (label, className, handler, hint)，但调用处还按
+  // (label, className, hint, handler) 传，字符串被当成处理函数，
+  // 重命名/复制/导出/历史/删除这 5 个按钮点一下直接抛异常。
+  // 这里把每个 makeButton(...) 的实参切出来，逐个校验类型。
+  const calls = [];
+  let idx = -1;
+  while ((idx = PORTAL.indexOf('makeButton(', idx + 1)) >= 0) {
+    if (/const\s+$/.test(PORTAL.slice(Math.max(0, idx - 12), idx))) continue; // 跳过函数定义本身
+    let depth = 0;
+    let i = idx + 'makeButton'.length;
+    let quote = null;
+    let cur = '';
+    const args = [];
+    for (; i < PORTAL.length; i += 1) {
+      const ch = PORTAL[i];
+      if (quote) {
+        cur += ch;
+        if (ch === '\\') { cur += PORTAL[i + 1]; i += 1; continue; }
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') { quote = ch; cur += ch; continue; }
+      if (ch === '(' || ch === '[' || ch === '{') {
+        depth += 1;
+        if (depth === 1) continue;
+        cur += ch;
+        continue;
+      }
+      if (ch === ')' || ch === ']' || ch === '}') {
+        depth -= 1;
+        if (depth === 0) { args.push(cur.trim()); break; }
+        cur += ch;
+        continue;
+      }
+      if (ch === ',' && depth === 1) { args.push(cur.trim()); cur = ''; continue; }
+      cur += ch;
+    }
+    calls.push({ label: args[0], args: args });
+  }
+  assert(calls.length >= 6, '只解析到 ' + calls.length + ' 个 makeButton 调用，解析器可能失效');
+  for (const call of calls) {
+    assert(call.args.length >= 3, '按钮 ' + call.label + ' 只传了 ' + call.args.length + ' 个参数');
+    const third = call.args[2];
+    assert(
+      /^(async\s+)?(\(|function\b)/.test(third) || /=>/.test(third),
+      '按钮 ' + call.label + ' 的第 3 个参数不是处理函数，实际是：' + third.slice(0, 40)
+    );
+  }
+});
+
+check('点了按钮就地报错，不会静默失败（makeButton 内部有类型断言）', () => {
+  assert(/typeof handler !== 'function'/.test(PORTAL), 'makeButton 没有类型断言，参数传反时只会抛晦涩的错误');
+});
 console.log('\n' + '─'.repeat(52));
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 process.exit(fail ? 1 : 0);
