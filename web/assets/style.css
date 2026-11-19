@@ -364,8 +364,40 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   color: var(--muted);
 }
 .canvas-id-copy:hover { color: var(--accent); border-color: var(--accent); }
-.canvas-actions { display: flex; gap: 6px; margin-top: 10px; }
-.canvas-actions button { padding: 5px 10px; font-size: 0.84em; }
+/* 画布卡片的操作按钮。
+   原来 7 个按钮平铺一行，卡片最窄 250px，每个只剩 34px、中文竖成一字一行。
+   改成「打开画布」独占一整行 + 其余 3 列网格：全部按钮都能横排，
+   高度也从 72px 降到两行（约 66px），卡片信息密度更稳。 */
+.canvas-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.canvas-actions button {
+  padding: 6px 4px;
+  font-size: 0.8em;
+  /* 关键：不许折行。挤不下时宁可用省略号，也不能让中文竖过来 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+
+/* 主操作独占一整行，一眼就是最该点的那个 */
+.canvas-actions button.wide {
+  grid-column: 1 / -1;
+  padding: 7px 4px;
+  font-weight: 600;
+}
+
+/* 共享开着时给个明确的已启用态，别让人以为按钮是坏的 */
+.canvas-actions button.shared-on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 
 .empty {
   text-align: center;

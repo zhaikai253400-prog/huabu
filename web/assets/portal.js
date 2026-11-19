@@ -336,19 +336,23 @@
 
         const actions = document.createElement('div');
         actions.className = 'canvas-actions';
-        const makeButton = (label, className, handler) => {
+        const makeButton = (label, className, handler, hint) => {
           const button = document.createElement('button');
           button.className = className || '';
           button.textContent = label;
+          if (hint) button.title = hint;
           button.addEventListener('click', (event) => {
             event.stopPropagation();
             handler();
           });
           return button;
         };
-        actions.appendChild(makeButton('打开', 'primary', () => openCanvas(canvas.id)));
+        // 按钮排版：原来 7 个按钮平铺一行，卡片最窄只有 250px，每个被挤到 34px 宽，
+        // 中文就竖过来了（一字一行、72px 高）。改成「打开」独占一整行 + 其余两行三列，
+        // 所有按钮文字都能横着排；顺带把长标签缩短（复制一份→复制、导出备份→导出）。
+        actions.appendChild(makeButton('打开画布', 'primary wide', () => openCanvas(canvas.id), '进入这块画布'));
         actions.appendChild(
-          makeButton('重命名', '', async () => {
+          makeButton('重命名', '', '改画布名字', async () => {
             const next = window.prompt('新的画布名字', canvas.name);
             if (next === null) return;
             if (!next.trim()) return;
@@ -357,13 +361,13 @@
           })
         );
         actions.appendChild(
-          makeButton('复制一份', '', async () => {
+          makeButton('复制', '', '复制一份同样的画布', async () => {
             await window.api.duplicateCanvas(canvas.id);
             refresh();
           })
         );
         actions.appendChild(
-          makeButton('导出备份', '', async () => {
+          makeButton('导出', '', '导出成 JSON 备份文件', async () => {
             try {
               const payload = await window.api.exportCanvas(canvas.id);
               downloadJson('画布-' + canvas.name + '.json', payload);
@@ -374,7 +378,7 @@
         );
         if (!isGuest) {
           actions.appendChild(
-            makeButton(canvas.shared ? '关闭共享' : '共享', '', async () => {
+            makeButton(canvas.shared ? '已共享' : '共享', canvas.shared ? 'shared-on' : '', async () => {
               try {
                 await window.api.shareToggle(canvas.id, !canvas.shared);
                 if (!canvas.shared) {
@@ -398,9 +402,9 @@
             })
           );
         }
-        actions.appendChild(makeButton('历史版本', '', () => openBackups(canvas)));
+        actions.appendChild(makeButton('历史', '', '查看并回滚历史版本', () => openBackups(canvas)));
         actions.appendChild(
-          makeButton('删除', 'danger', async () => {
+          makeButton('删除', 'danger', '删掉这块画布', async () => {
             if (!window.confirm('确定删除画布“' + canvas.name + '”吗？')) return;
             await window.api.deleteCanvas(canvas.id);
             refresh();
