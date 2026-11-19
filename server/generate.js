@@ -6,8 +6,10 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const channels = require('./channels');
+const paths = require('./paths');
 const assets = require('./assets');
 const lastframe = require('./lastframe');
+const tailclip = require('./tailclip');
 const store = require('./store');
 const modelSpecs = require('./model-specs');
 const errorKinds = require('./error-kinds');
@@ -1834,6 +1836,90 @@ async function extractLastFrame(config, source, label, sub) {
   }
 }
 
+
+// 从一段视频的尾部截出后 N 秒，存进 素材\视频\尾段
+//
+// 用途：给下一段视频当衔接参考 —— 上一段最后几秒的运动趋势、镜头方向和节奏，
+// 直接喂给下一个模型，比只给一张尾帧更能把动作接上。
+//
+// 为什么重编码而不是 -c copy：
+//   流拷贝只能从关键帧切。实测库里视频的关键帧间隔平均 2.2 秒、最大 3 秒，
+//   末尾很容易多切出一截重复画面，正好毁掉衔接。重编码 5 秒只要 0.2 秒，
+//   10 秒约 1 秒，换来帧级精确的 5.000 / 10.000，这点开销值得。
+//
+// 比目标短怎么办：不报错，整段拿走，并在返回值里标明 truncated，
+//   让前端能直接说清楚「这段只有 5.2 秒，已取整段」。
+async function extractTailClip(config, source, label, sub, wantSeconds) {
+  const tools = paths.toolsInfo();
+  if (!tools.ffmpeg) {
+    throw new Error('还没放视频解码工具：把 ffmpeg.exe 放进 tools 目录，取尾段就能用');
+  }
+  const seconds = Number(wantSeconds) || 0;
+  if (!(seconds > 0)) throw new Error('没说清楚要取后面几秒');
+  const located = await sourceToFile(config, source);
+  const stamp = Date.now() + '-' + Math.random().toString(16).slice(2);
+  const tmp = path.join(os.tmpdir(), 'canvas-tail-' + stamp + '.mp4');
+  try {
+    const sourceInfo = tools.ffprobe ? await tailclip.probeVideo(tools.ffprobe, located.file) : { width: 0, height: 0, duration: 0, fps: 0 };
+    const duration = sourceInfo.duration || (tools.ffprobe ? await tailclip.probeDuration(tools.ffprobe, located.file) : 0);
+    if (!(duration > 0)) throw new Error('这段视频读不出时长，可能文件坏了，换一段再试');
+    // 视频本身比要的还短：整段取走，不报错
+    const truncated = duration < seconds - 0.05;
+    const grabbed = Math.min(seconds, duration);
+    const start = Math.max(0, duration - grabbed);
+    const args = [
+      '-y', '-v', 'error',
+      // -ss 放在 -i 前面：先跳到位置再解码，长视频也不用从头解一遍
+      '-ss', start.toFixed(3),
+      '-i', located.file,
+      '-t', grabbed.toFixed(3),
+      // 只留第一路视频 + 有就带上音频：参考视频带声音不影响模型，
+      // 但用户以后要剪成片时不用再补一遍
+      '-map', '0:v:0', '-map', '0:a?',
+      // 统一转成 yuv420p：浏览器和绝大多数平台都只认这个，
+      // 源视频本来就是 8bit yuv420p，等于无损延续
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '128k',
+      '-movflags', '+faststart',
+      tmp,
+    ];
+    await tailclip.runTool(tools.ffmpeg, args, 600000);
+    const buffer = fs.readFileSync(tmp);
+    if (!buffer.length) throw new Error('截出来的尾段是空的');
+    // 文件名带上真实时长：被截短时一眼就能看出来不是整 5 秒
+    const shown = (Math.round(grabbed * 10) / 10).toString().replace(/\.0$/, '');
+    const base = assets.stampName() + '_' + assets.safeName(label, '尾段', 30) + '_尾' + shown + 's';
+    // 归档：统一落在 视频\尾段 下；设置里如果还开了按日期 / 画布分子目录，就再往下落一层
+    const folderSub = sub ? '尾段/' + sub : '尾段';
+    const abs = assets.writeAsset(config.assetRoot, '视频', base, '.mp4', buffer, folderSub);
+    const rel = assets.relToRoot(abs, config.assetRoot);
+    return {
+      relPath: rel,
+      url: assets.mediaUrl(rel),
+      kind: 'video',
+      width: sourceInfo.width || 0,
+      height: sourceInfo.height || 0,
+      bytes: buffer.length,
+      seconds: Math.round(grabbed * 100) / 100,
+      sourceSeconds: Math.round(duration * 100) / 100,
+      truncated: truncated,
+    };
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch (error) {
+      /* 临时文件删不掉不影响结果 */
+    }
+    if (located.temp) {
+      try {
+        fs.unlinkSync(located.file);
+      } catch (error) {
+        /* 同上 */
+      }
+    }
+  }
+}
+
 module.exports = {
   // 仅供测试：直接跑轮询循环，不用真请求平台
   __pollRemote: pollRemote,
@@ -1866,6 +1952,7 @@ module.exports = {
   compressImage,
   uploadRefs,
   extractLastFrame,
+  extractTailClip,
   subFolderOf,
   resolveModel,
   runKind,

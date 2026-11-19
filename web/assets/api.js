@@ -342,6 +342,8 @@
     preflight: (payload) => request('POST', '/api/preflight', payload),
     generate: (payload) => request('POST', '/api/generate', payload),
     tailFrame: (payload) => request('POST', '/api/tailframe', payload),
+    // 取尾段：后 N 秒整段截出来，给下一段视频当衔接参考
+    tailClip: (payload) => request('POST', '/api/tailclip', payload),
     // mode 决定碰到重复文件时怎么办：
     //   'ask'（默认）—— 先不落盘，回 duplicate 让用户挑
     //   'reuse'      —— 直接用已有素材，不复制

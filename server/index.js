@@ -929,6 +929,24 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, 200, { task: task });
   }
 
+  // 取尾段：从视频尾部截出后 N 秒，存进 素材\视频\尾段
+  // 用途是给下一段视频当衔接参考 —— 上一段结尾的运动和镜头方向比一张静态尾帧更能接住动作。
+  if (pathname === '/api/tailclip' && method === 'POST') {
+    const body = await readBody(req);
+    const source = String(body.url || body.relPath || '').trim();
+    if (!source) return sendJson(res, 400, { error: '没给视频地址' });
+    const seconds = Number(body.seconds);
+    if (!(seconds > 0 && seconds <= 120)) return sendJson(res, 400, { error: '取的秒数要在 0 到 120 之间' });
+    const clip = await generate.extractTailClip(
+      config,
+      source,
+      String(body.name || '').trim(),
+      generate.subFolderOf(config, { canvasId: body.canvasId }),
+      seconds
+    );
+    log('尾段已截出：' + clip.relPath + '（' + clip.seconds + ' 秒）');
+    return sendJson(res, 200, { clip: clip });
+  }
   // 抽尾帧：给一段视频，抽出真正的最后一帧，存进 素材\尾帧
   if (pathname === '/api/tailframe' && method === 'POST') {
     const body = await readBody(req);
@@ -1578,6 +1596,7 @@ function isCollabPath(pathname) {
   if (pathname === '/api/export/assets') return true;
   if (pathname === '/api/preflight' || pathname === '/api/generate') return true;
   if (pathname === '/api/tailframe') return true;
+  if (pathname === '/api/tailclip') return true;
   if (pathname.indexOf('/api/tasks') === 0) return true;
   if (pathname.indexOf('/api/schedules') === 0) return true;
   if (pathname.indexOf('/api/canvases') === 0) return true;
@@ -1656,7 +1675,7 @@ function askedCanvasIdOf(body, query) {
 // 这几个路径的 canvasId 只写在请求体里，判权限时必须先把体读出来。
 // 注意别把 /api/assets/import 加进来：它的 canvasId 在查询串里，
 // 而它可能带着几百 MB 的文件体，为判权限把整个体读进内存不划算。
-const BODY_SCOPED_PATHS = ['/api/generate', '/api/preflight', '/api/tailframe'];
+const BODY_SCOPED_PATHS = ['/api/generate', '/api/preflight', '/api/tailframe', '/api/tailclip'];
 function needsBodyForScope(pathname) {
   if (BODY_SCOPED_PATHS.indexOf(pathname) >= 0) return true;
   return /^\/api\/schedules\/[^/]+\/start$/.test(pathname);

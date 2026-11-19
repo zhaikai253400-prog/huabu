@@ -9107,8 +9107,24 @@
         event.stopPropagation();
         startTailFrame(node);
       });
+      // 取尾段：点开只有两个选项（后 5 秒 / 后 10 秒），所以按钮文字不写死秒数
+      const clip = document.createElement('button');
+      clip.className = 'btn-clip';
+      clip.type = 'button';
+      clip.textContent = data.clipBusy ? '正在截取…' : '尾段';
+      clip.title = '取这段视频的后 5 秒 / 后 10 秒，单独存一张视频卡片，给下一段做衔接参考';
+      if (isLocked(node)) {
+        clip.disabled = true;
+        clip.title = '卡片已锁定，先解锁再操作';
+      }
+      clip.addEventListener('pointerdown', (event) => event.stopPropagation());
+      clip.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openTailClipMenu(node, event.clientX, event.clientY);
+      });
       wrap.appendChild(status);
       wrap.appendChild(tail);
+      wrap.appendChild(clip);
     } else {
       wrap.appendChild(status);
     }
@@ -10403,6 +10419,99 @@
         }
       });
   }
+  // 取尾段：从这段视频的尾部截出后 5 秒 / 后 10 秒，单独存成一张视频卡片。
+  //
+  // 为什么要新卡片而不是替换原卡：原片是「这一段」的成品，尾段只是给下一段用的
+  // 衔接参考料。替换掉就会丢掉原片，用户想再取一次还得重新生成。
+  //
+  // 为什么不自动连线到别的卡：用户明确说了只要按钮，连线自己拖。
+  function startTailClip(node, seconds) {
+    const data = nodeData(node);
+    if (!data.result || !data.result.url) {
+      toast('这张卡片还没有视频，先生成一段再取尾段');
+      return;
+    }
+    if (data.clipBusy) return;
+    const want = Number(seconds) || 0;
+    if (!(want > 0)) return;
+    data.clipBusy = true;
+    const el = elements.get(node.id);
+    const button = el ? el.querySelector('.btn-clip') : null;
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在截取…';
+    }
+    toast('正在截取后 ' + want + ' 秒，稍等一下…');
+    window.api
+      .tailClip({ url: data.result.url, name: data.text, seconds: want, canvasId: canvasId })
+      .then((res) => {
+        const clip = (res && res.clip) || {};
+        if (!clip.url) throw new Error('没拿到片段');
+        // 新卡片摆在源卡右边：和「提取尾帧」保持一致的习惯
+        const presetSize = defaultSize('video', PARAM_DEFAULTS.video);
+        const created = addNode('video', {
+          x: node.x + node.w + 80 + presetSize.w / 2,
+          y: node.y + presetSize.h / 2,
+        }, { collapsed: true, suppressTail: true });
+        const target = nodeData(created);
+        const srcTitle = String(data.title || data.text || '').trim();
+        target.text = srcTitle;
+        // 标题说清楚是哪一段的尾段，素材库里也一眼能认
+        target.title = (srcTitle ? srcTitle.slice(0, 40) + ' · ' : '') + '后 ' + clip.seconds + ' 秒';
+        target.result = {
+          url: clip.url,
+          file: clip.relPath || '',
+          kind: 'video',
+          width: Number(clip.width) || 0,
+          height: Number(clip.height) || 0,
+          model: '尾段',
+        };
+        refreshNode(created);
+        if (clip.width && clip.height) fitNodeToAspect(created, clip.width / clip.height);
+        scheduleSave();
+        // 原片本来就短：照实说，别让人以为只截了 2 秒是出 bug 了
+        if (clip.truncated) {
+          toast('这段只有 ' + clip.sourceSeconds + ' 秒，已把整段取回来，存进 素材\\视频\\尾段');
+        } else {
+          toast('后 ' + clip.seconds + ' 秒已截好，存进 素材\\视频\\尾段，右边多了一张视频卡片');
+        }
+      })
+      .catch((error) => {
+        toast('尾段没截出来：' + error.message);
+      })
+      .finally(() => {
+        data.clipBusy = false;
+        const back = elements.get(node.id);
+        const again = back ? back.querySelector('.btn-clip') : null;
+        if (again) {
+          again.disabled = false;
+          again.textContent = '尾段';
+        }
+      });
+  }
+
+  // 点「取尾段」先问一句要几秒：两个选项都常用，直接二选一比让人记键位简单
+  function openTailClipMenu(node, clientX, clientY) {
+    const data = nodeData(node);
+    if (!data.result || !data.result.url) {
+      toast('这张卡片还没有视频，先生成一段再取尾段');
+      return;
+    }
+    let x = clientX;
+    let y = clientY;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      const el = elements.get(node.id);
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      x = rect.left + rect.width / 2;
+      y = rect.bottom - 10;
+    }
+    openMenu(x, y, [
+      { label: '后 5 秒', run: () => startTailClip(node, 5) },
+      { label: '后 10 秒', run: () => startTailClip(node, 10) },
+    ]);
+  }
+
 
   // 只展开选中的那一张；展开的卡片临时浮到最上面，面板才不会被别的卡片压住
   function setExpanded(id) {
