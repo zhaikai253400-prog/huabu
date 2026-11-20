@@ -84,6 +84,14 @@
   };
   // 设置面板当前在编辑哪一组
   let tailEditingGroup = 'video';
+  // 新建卡片默认值：图片 / 视频 / 快速视频各自用哪个模型、哪些参数。
+  // 存在服务端 config.json 里（跟着 data/ 走，换电脑还在），这里只做前端缓存。
+  const EMPTY_CARD_DEFAULTS = {
+    image: { model: '', channelId: '', params: {} },
+    video: { model: '', channelId: '', params: {} },
+    quick: { model: '', channelId: '', params: {} },
+  };
+  let cardDefaults = JSON.parse(JSON.stringify(EMPTY_CARD_DEFAULTS));
   // 局域网访问：开关 + 这台电脑的网卡地址（服务端算好，前端只负责显示和复制）
   let lan = { enabled: false, addresses: [], port: 0 };
 
@@ -134,6 +142,29 @@
     return JSON.parse(JSON.stringify(normalizeTailPresets(value)));
   }
 
+  // 新建卡片默认值的归一化：规则在共享模块里（画布页与服务端同一份）。
+  // 老页面缓存里可能没有这个脚本，这里留一份等价的最小实现。
+  const cardDefaultsRules = window.CanvasCardDefaults || null;
+
+  function normalizeCardDefaults(value) {
+    if (cardDefaultsRules && typeof cardDefaultsRules.normalize === 'function') {
+      return cardDefaultsRules.normalize(value);
+    }
+    const out = JSON.parse(JSON.stringify(EMPTY_CARD_DEFAULTS));
+    const src = value && typeof value === 'object' ? value : {};
+    Object.keys(out).forEach((type) => {
+      const one = src[type] && typeof src[type] === 'object' ? src[type] : {};
+      out[type].model = String(one.model || '');
+      out[type].channelId = String(one.channelId || '');
+      out[type].params = one.params && typeof one.params === 'object' ? Object.assign({}, one.params) : {};
+    });
+    return out;
+  }
+
+  function cloneCardDefaults(value) {
+    return JSON.parse(JSON.stringify(normalizeCardDefaults(value)));
+  }
+
   function tailGroupOf(value) {
     return value === 'image' ? 'image' : 'video';
   }
@@ -166,6 +197,7 @@
     if (status.shortcuts) shortcuts = Object.assign({}, DEFAULT_SHORTCUTS, status.shortcuts);
     submitCompress = { enabled: !(status.submitCompress && status.submitCompress.enabled === false) };
     tailPrompts = normalizeTailPresets(status.tailPrompts);
+    cardDefaults = normalizeCardDefaults(status.cardDefaults);
     // 服务端没报版本号 = 它是改动前的旧进程；报了但不是 2 = 结构对不上
     tailSchemaMismatch = Number(status.tailSchemaVersion) !== TAIL_SCHEMA_VERSION;
     if (status.lan && typeof status.lan === 'object') {
@@ -197,6 +229,7 @@
     if (patch.shortcuts) body.shortcuts = Object.assign({}, shortcuts, patch.shortcuts);
     if (patch.submitCompress) body.submitCompress = Object.assign({}, submitCompress, patch.submitCompress);
     if (patch.tailPrompts) body.tailPrompts = cloneTailPrompts(patch.tailPrompts);
+    if (patch.cardDefaults) body.cardDefaults = cloneCardDefaults(patch.cardDefaults);
     if (patch.assetRoot) body.assetRoot = patch.assetRoot;
     if (patch.lan) body.lan = { enabled: Boolean(patch.lan.enabled) };
     const status = await window.api.saveSettings(body);
@@ -255,6 +288,13 @@
       FONT_SIZES.map((size) => '<option value="' + size + '">' + size + ' px</option>').join('') +
       '</select></div>' +
       '      <div class="set-hint">缩放管整体大小，字号管文字大小，两个一起调，2K / 4K 屏看着都不累。</div>' +
+      '    </div>' +
+
+      '    <div class="set-group"><div class="set-title">新建卡片默认值</div>' +
+      '      <div class="set-row"><label>图片 / 视频</label>' +
+      '        <span class="cd-summary" id="set-cd-summary">—</span>' +
+      '        <button class="ghost" id="set-cd-open">设置…</button></div>' +
+      '      <div class="set-hint">指定新建图片卡、视频卡默认用哪个模型、多少 K、什么比例。设好之后新建卡片就不用每次重选了；已有卡片不受影响。也可以直接在卡片上右键「设为新建默认」。</div>' +
       '    </div>' +
 
       '    <div class="set-group"><div class="set-title">素材与归档</div>' +
@@ -458,6 +498,30 @@
       if (!value) return;
       persist({ assetRoot: value }, '素材目录已改');
     });
+    const cdSummaryEl = mask.querySelector('#set-cd-summary');
+    const paintCdSummary = () => {
+      if (!cdSummaryEl) return;
+      const bits = [];
+      ['image', 'video'].forEach((type) => {
+        const one = cardDefaults[type] || {};
+        const params = Object.keys(one.params || {}).map((key) => one.params[key]);
+        if (!one.model && !params.length) return;
+        bits.push((type === 'image' ? '图片' : '视频') + ' ' + (one.model || '渠道默认') + (params.length ? ' · ' + params.join(' / ') : ''));
+      });
+      cdSummaryEl.textContent = bits.length ? bits.join('　｜　') : '还没设，新卡片跟着渠道默认走';
+    };
+    paintCdSummary();
+    const onCdChanged = () => paintCdSummary();
+    document.addEventListener('card-defaults-changed', onCdChanged);
+    // 面板关掉时解绑：否则开关几次就挂了一堆同样的监听
+    const unbindCd = () => document.removeEventListener('card-defaults-changed', onCdChanged);
+    mask.querySelector('[data-close]').addEventListener('click', unbindCd);
+    mask.addEventListener('click', (event) => {
+      if (event.target === mask) unbindCd();
+    });
+    const cdOpenBtn = mask.querySelector('#set-cd-open');
+    if (cdOpenBtn) cdOpenBtn.addEventListener('click', () => openCardDefaultsPanel());
+
     lanEl.addEventListener('change', async () => {
       lan = Object.assign({}, lan, { enabled: lanEl.checked });
       renderLan();
@@ -492,6 +556,299 @@
     mask.addEventListener('click', (event) => {
       if (event.target === mask) closePanel();
     });
+  }
+
+  // ---------- 新建卡片默认值 ----------
+  //
+  // 为什么单独做一个面板而不是塞进「显示与设置」：这里要选模型、还要让参数
+  // 跟着模型收敛（只开 1K 的模型就不该给 2K），属性多、交互重，
+  // 混在主题 / 字体那堆里会很长。入口还在设置面板里，点一下进来。
+  let cardDefaultsPanelEl = null;
+  let modelCache = null;
+
+  function closeCardDefaultsPanel() {
+    if (cardDefaultsPanelEl && cardDefaultsPanelEl.parentNode) {
+      cardDefaultsPanelEl.parentNode.removeChild(cardDefaultsPanelEl);
+    }
+    cardDefaultsPanelEl = null;
+  }
+
+  const CARD_TYPE_META = {
+    image: { label: '图片卡片', hint: '新建图片卡时默认用这套模型和参数。' },
+    video: { label: '视频卡片', hint: '新建视频卡时默认用这套模型和参数。快速视频默认跟这里走。' },
+    quick: { label: '快速视频卡片', hint: '留空就跟随上面的视频卡片设置；只有你想让它单独一套时才改这里。' },
+  };
+
+  function modelListOf(kind) {
+    const list = (modelCache && modelCache[kind === 'quick' ? 'video' : kind]) || [];
+    return list.filter((item) => item && item.id);
+  }
+
+  function specOfModel(kind, model, channelId) {
+    const list = modelListOf(kind);
+    const hit =
+      (channelId && list.find((item) => item.id === model && item.channelId === channelId)) ||
+      list.find((item) => item.id === model);
+    return (hit && hit.spec) || null;
+  }
+
+  function optionsOfParam(kind, key, spec) {
+    if (cardDefaultsRules && typeof cardDefaultsRules.optionsFor === 'function') {
+      const got = cardDefaultsRules.optionsFor(kind, key, spec);
+      if (got && got.length) return got;
+    }
+    const defs = (cardDefaultsRules && cardDefaultsRules.UI_OPTIONS_OF ? cardDefaultsRules.UI_OPTIONS_OF(kind) : []);
+    const def = defs.find((one) => one.key === key);
+    return def ? def.options.slice() : [];
+  }
+
+  function openCardDefaultsPanel() {
+    if (cardDefaultsPanelEl) return closeCardDefaultsPanel();
+    const draft = cloneCardDefaults(cardDefaults);
+
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML =
+      '<div class="modal modal-defaults">' +
+      '  <div class="modal-head"><b>新建卡片默认值</b>' +
+      '    <button class="ghost" data-close>关闭</button></div>' +
+      '  <div class="modal-body">' +
+      '    <div class="set-hint">只影响<b>之后新建</b>的卡片，画布上已有的卡片不会被改动。设置存在 data 里，换电脑、同步更新都还在。</div>' +
+      '    <div id="cd-sections"></div>' +
+      '  </div>' +
+      '  <div class="modal-foot">' +
+      '    <button id="cd-reset">全部恢复默认</button>' +
+      '    <span class="grow"></span>' +
+      '    <span class="set-saved" id="cd-saved"></span>' +
+      '    <button class="primary" id="cd-save">保存</button>' +
+      '  </div>' +
+      '</div>';
+    document.body.appendChild(mask);
+    cardDefaultsPanelEl = mask;
+
+    const sectionsEl = mask.querySelector('#cd-sections');
+    const savedEl = mask.querySelector('#cd-saved');
+    const flash = (text, bad) => {
+      savedEl.textContent = text;
+      savedEl.className = 'set-saved' + (bad ? ' bad' : '');
+    };
+
+    // 某一类当前可用的参数档位（跟着这个模型收敛）
+    const defsFor = (type) => {
+      const one = draft[type];
+      const spec = specOfModel(type, one.model, one.channelId);
+      const base = cardDefaultsRules && cardDefaultsRules.UI_OPTIONS_OF
+        ? cardDefaultsRules.UI_OPTIONS_OF(type)
+        : [{ key: 'size', label: '尺寸', options: ['1K', '2K', '4K'] }];
+      return base.map((def) => {
+        const options = optionsOfParam(type, def.key, spec);
+        return Object.assign({}, def, {
+          options: cardDefaultsRules && cardDefaultsRules.optionsFor
+            ? options.length ? options : def.options
+            : def.options,
+        });
+      });
+    };
+
+    // 这个模型对当前选择会做什么收敛（面板要提前说出来，不能等建完卡才发现变了）
+    const warnFor = (type) => {
+      if (!cardDefaultsRules || typeof cardDefaultsRules.explainPreset !== 'function') return '';
+      const one = draft[type];
+      const spec = specOfModel(type, one.model, one.channelId);
+      const got = cardDefaultsRules.explainPreset(type, one, spec);
+      return got.changed ? '按这个模型，新建时会调整：' + got.text : '';
+    };
+
+    const render = () => {
+      sectionsEl.textContent = '';
+      ['image', 'video', 'quick'].forEach((type) => {
+        const meta = CARD_TYPE_META[type];
+        const one = draft[type];
+        const box = document.createElement('div');
+        box.className = 'set-group cd-group';
+
+        const title = document.createElement('div');
+        title.className = 'set-title';
+        title.textContent = meta.label;
+        box.appendChild(title);
+
+        const hint = document.createElement('div');
+        hint.className = 'set-hint';
+        hint.textContent = meta.hint;
+        box.appendChild(hint);
+
+        // 模型下拉：第一个选项是「跟随渠道默认」
+        const row = document.createElement('div');
+        row.className = 'set-row';
+        const label = document.createElement('label');
+        label.textContent = '默认模型';
+        row.appendChild(label);
+        const select = document.createElement('select');
+        select.className = 'cd-model';
+        const follow = document.createElement('option');
+        follow.value = '';
+        follow.textContent = type === 'quick' ? '跟随视频卡片' : '跟随渠道默认';
+        select.appendChild(follow);
+        modelListOf(type).forEach((item) => {
+          const opt = document.createElement('option');
+          opt.value = item.channelId + '::' + item.id;
+          opt.textContent = item.label || item.id;
+          select.appendChild(opt);
+        });
+        if (!modelListOf(type).length) {
+          follow.textContent = '还没有配置模型（先去接口通道设置里配）';
+        }
+        // 回显：模型 + 通道都要对上才算选中
+        if (one.model) {
+          const want = one.channelId ? one.channelId + '::' + one.model : '';
+          let matched = '';
+          if (want && Array.from(select.options).some((o) => o.value === want)) matched = want;
+          else {
+            const byName = Array.from(select.options).find((o) => o.value.split('::').slice(1).join('::') === one.model);
+            if (byName) matched = byName.value;
+          }
+          select.value = matched;
+          if (!matched) {
+            // 模型已经不在清单里：仍然显示出来，让用户看到「这个模型没了」，而不是静默变成跟随默认
+            const ghost = document.createElement('option');
+            ghost.value = '__gone__';
+            ghost.textContent = one.model + '（当前渠道里找不到）';
+            select.insertBefore(ghost, select.firstChild);
+            select.value = '__gone__';
+          }
+        }
+        select.addEventListener('change', () => {
+          if (select.value === '__gone__') return;
+          const parts = select.value ? select.value.split('::') : [''];
+          one.channelId = select.value ? parts[0] : '';
+          one.model = select.value ? parts.slice(1).join('::') : '';
+          // 换模型后参数可能不适用：立刻按新模型收敛一遍
+          const spec = specOfModel(type, one.model, one.channelId);
+          defsFor(type).forEach((def) => {
+            const value = one.params[def.key];
+            if (value === undefined) return;
+            if (def.options.indexOf(value) >= 0) return;
+            one.params[def.key] = def.options[0];
+          });
+          if (spec) {
+            const seeded = cardDefaultsRules && cardDefaultsRules.seedParams
+              ? cardDefaultsRules.seedParams(type, one, spec).params
+              : null;
+            if (seeded) one.params = Object.assign({}, one.params, seeded);
+          }
+          render();
+        });
+        row.appendChild(select);
+        box.appendChild(row);
+
+        // 参数：每个键一行「标签 + 下拉」
+        defsFor(type).forEach((def) => {
+          const prow = document.createElement('div');
+          prow.className = 'set-row';
+          const plabel = document.createElement('label');
+          plabel.textContent = def.label;
+          prow.appendChild(plabel);
+          const psel = document.createElement('select');
+          const current = one.params[def.key] === undefined ? '' : one.params[def.key];
+          const empty = document.createElement('option');
+          empty.value = '';
+          empty.textContent = '跟随默认';
+          psel.appendChild(empty);
+          def.options.forEach((value, index) => {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = (def.texts && def.texts[index]) || value;
+            psel.appendChild(opt);
+          });
+          // 用户选的这一档这个模型不支持（例如设了 2K，但模型只开 1024*1024）：
+          // 不能默默显示成「跟随默认」—— 那会让用户以为设置没存上。
+          // 保留原值单列一项，并说清新建时会收敛成什么。
+          if (current && def.options.indexOf(current) < 0) {
+            const spec = specOfModel(type, one.model, one.channelId);
+            let willUse = def.options[0];
+            if (cardDefaultsRules && cardDefaultsRules.seedParams) {
+              const seeded = cardDefaultsRules.seedParams(type, one, spec);
+              if (seeded.params[def.key]) willUse = seeded.params[def.key];
+            }
+            const ghost = document.createElement('option');
+            ghost.value = current;
+            ghost.textContent = current + '（该模型不支持，新建时按 ' + willUse + '）';
+            psel.insertBefore(ghost, psel.children[1] || null);
+          }
+          psel.value = current && (def.options.indexOf(current) >= 0 || Array.from(psel.options).some((o) => o.value === current))
+            ? current
+            : '';
+          psel.addEventListener('change', () => {
+            if (!psel.value) delete one.params[def.key];
+            else one.params[def.key] = psel.value;
+            render();
+          });
+          prow.appendChild(psel);
+          box.appendChild(prow);
+        });
+
+        const warn = warnFor(type);
+        if (warn) {
+          const line = document.createElement('div');
+          line.className = 'cd-warn';
+          line.textContent = warn;
+          box.appendChild(line);
+        }
+
+        sectionsEl.appendChild(box);
+      });
+    };
+
+    render();
+
+    mask.querySelector('#cd-save').addEventListener('click', async () => {
+      // 把「当前渠道里找不到」的模型拦在保存前，避免下次新建卡片时才报错
+      const gone = ['image', 'video', 'quick'].filter((type) => draft[type].model && !modelListOf(type).some((item) => item.id === draft[type].model));
+      if (gone.length) {
+        flash('有模型在当前渠道里找不到了，先换个模型再保存', true);
+        return;
+      }
+      try {
+        await save({ cardDefaults: cloneCardDefaults(draft) });
+        cardDefaults = normalizeCardDefaults(draft);
+        flash('已保存，新建卡片会按这套来', false);
+        // 设置面板里的摘要、画布页的默认值缓存都靠这个事件刷新
+        document.dispatchEvent(new CustomEvent('card-defaults-changed'));
+      } catch (error) {
+        flash('保存失败：' + error.message, true);
+      }
+    });
+
+    mask.querySelector('#cd-reset').addEventListener('click', () => {
+      Object.keys(draft).forEach((type) => {
+        draft[type] = { model: '', channelId: '', params: {} };
+      });
+      render();
+      flash('已清空，点「保存」才会生效', false);
+    });
+
+    mask.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeCardDefaultsPanel));
+    mask.addEventListener('click', (event) => {
+      if (event.target === mask) closeCardDefaultsPanel();
+    });
+
+    // 模型清单是异步拉的：先画一版（可能只有「跟随渠道默认」），拿到再重画
+    if (!modelCache) {
+      const load = window.api && window.api.models ? window.api.models() : Promise.resolve(null);
+      load
+        .then((data) => {
+          if (!data) return;
+          modelCache = {
+            image: Array.isArray(data.image) ? data.image : [],
+            video: Array.isArray(data.video) ? data.video : [],
+            audio: Array.isArray(data.audio) ? data.audio : [],
+          };
+          if (cardDefaultsPanelEl === mask) render();
+        })
+        .catch(() => {
+          /* 拉不到就保持「跟随渠道默认」 */
+        });
+    }
   }
 
   // ---------- 尾部提示词预设管理 ----------
@@ -730,6 +1087,8 @@
     shortcuts: () => shortcuts,
     submitCompress: () => submitCompress,
     tailPrompts: () => tailPrompts,
+    cardDefaults: () => cardDefaults,
+    openCardDefaultsPanel: openCardDefaultsPanel,
     openTailPromptsPanel: openTailPromptsPanel,
     lan: () => lan,
     assetRoot: () => assetRoot,

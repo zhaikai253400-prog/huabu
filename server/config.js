@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { CONFIG_FILE, ROOT, ensureDir } = require('./paths');
 const keybox = require('./keybox');
+// 新建卡片默认值的归一化规则，与浏览器共用同一份（见 web/assets/card-defaults.js）
+const cardDefaults = require('../web/assets/card-defaults.js');
 
 function defaultConfig() {
   return {
@@ -32,6 +34,14 @@ function defaultConfig() {
       },
       defaultId: '',
       presets: [],
+    },
+    // 新建卡片默认值：图片 / 视频 / 快速视频各自用哪个模型、哪些参数。
+    // 空模型 = 跟随渠道默认（与从前「记住上次用过」的行为一致）。
+    // 这份配置跟着 data/ 走，换电脑后设置还在；不放在浏览器 localStorage 里。
+    cardDefaults: {
+      image: { model: '', channelId: '', params: {} },
+      video: { model: '', channelId: '', params: {} },
+      quick: { model: '', channelId: '', params: {} },
     },
     // 素材归档方式：none = 直接放类型文件夹；date = 再按日期分子文件夹；canvas = 再按画布名字分子文件夹
     store: {
@@ -292,6 +302,20 @@ function normalizeSubmitCompress(value) {
   return { enabled: !off };
 }
 
+// 新建卡片默认值：只认 image / video / quick 三类，参数键也各自受限。
+// 真正的规则在共享模块里（server 与浏览器同一份），这里只做入口包装，
+// 免得服务端又多出一份「哪些键算数」的判据慢慢和前端走偏。
+function normalizeCardDefaults(value) {
+  return cardDefaults.normalize(value);
+}
+
+// 取某一类的默认值（quick 没单独设就跟随 video）
+function cardDefaultsOf(configOrDefaults, type) {
+  const src = configOrDefaults && typeof configOrDefaults === 'object' ? configOrDefaults : {};
+  const base = src.cardDefaults && typeof src.cardDefaults === 'object' ? src.cardDefaults : src;
+  return cardDefaults.presetOf(base, type);
+}
+
 // 读配置：磁盘上是密文的密钥字段，在这里换回明文再交给上层。
 // 解密失败的字段保持密文原样（不抹成空串）——保存时会原样写回，用户换回原环境还能用。
 function load() {
@@ -308,6 +332,7 @@ function load() {
     merged.shortcuts = normalizeShortcuts(merged.shortcuts);
     merged.submitCompress = normalizeSubmitCompress(merged.submitCompress);
     merged.tailPrompts = normalizeTailPrompts(merged.tailPrompts);
+    merged.cardDefaults = cardDefaults.normalize(merged.cardDefaults);
     return merged;
   } catch (error) {
     console.log('[配置] 读取失败，先使用默认设置：' + error.message);
@@ -378,6 +403,9 @@ module.exports = {
   normalizeShortcuts,
   normalizeSubmitCompress,
   normalizeTailPrompts,
+  normalizeCardDefaults,
+  cardDefaultsOf,
+  CARD_DEFAULT_TYPES: cardDefaults.CARD_TYPES,
   tailPoolOfConfig,
   tailConfigOf,
   tailPromptsShapeOf,

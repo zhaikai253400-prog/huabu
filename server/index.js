@@ -397,6 +397,9 @@ function statusPayload() {
     shortcuts: config.shortcuts,
     submitCompress: config.submitCompress,
     tailPrompts: config.tailPrompts,
+    // 新建卡片默认值（模型 + 通道 + 参数）。前端拿它给新卡片打底，
+    // 设置面板也用它回显，两边看的是同一份数据。
+    cardDefaults: config.cardDefaults,
     // 尾部预设的结构版本：前端拿它跟自己的比对，不一致就提示"服务需要重启"。
     // 这是 2026-11-08 那次"预设被清空"事故的防线之一 —— 见 config.js 的注释。
     tailSchemaVersion: configStore.TAIL_SCHEMA_VERSION,
@@ -468,6 +471,64 @@ function selfCheck(tools) {
 }
 
 let startedAt = Date.now();
+
+// 新建默认值里「模型 / 通道」现在还能不能用？
+// 依据就是卡片模型下拉框的那份清单（modelsPayload），所以两边永远不会对不上。
+function cardDefaultChoices(kind) {
+  const payload = modelsPayload();
+  return payload[kind === 'quick' ? 'video' : kind] || [];
+}
+
+function validateCardDefaults(defaults) {
+  const problems = [];
+  configStore.CARD_DEFAULT_TYPES.forEach((type) => {
+    const one = (defaults && defaults[type]) || {};
+    const model = String(one.model || '');
+    if (!model) return; // 跟随渠道默认，永远可用
+    const list = cardDefaultChoices(type);
+    if (!list.length) return; // 还没配任何渠道：此时不拦，配好渠道自然生效
+    const hit = one.channelId
+      ? list.find((item) => item.id === model && item.channelId === one.channelId)
+      : list.find((item) => item.id === model);
+    if (hit) return;
+    // 同一个模型名挂在别的通道上也算「有」，只是通道要跟着改，不算错误。
+    if (list.some((item) => item.id === model)) return;
+    const label = type === 'quick' ? '快速视频' : type === 'video' ? '视频' : '图片';
+    problems.push(label + '默认模型「' + model + '」在当前渠道里找不到，先在「接口通道设置」里配上，或者换一个');
+  });
+  return problems;
+}
+
+// 模型 / 通道没了：把它降成「跟随渠道默认」，参数保留。
+// 为什么不整份清掉：用户调好的 2K / 16:9 跟模型无关，模型换了还想继续用。
+function pruneCardDefaults(defaults) {
+  const out = JSON.parse(JSON.stringify(defaults || {}));
+  const dropped = [];
+  configStore.CARD_DEFAULT_TYPES.forEach((type) => {
+    const one = out[type];
+    if (!one || !one.model) return;
+    const list = cardDefaultChoices(type);
+    if (!list.length) return;
+    const hit = one.channelId
+      ? list.find((item) => item.id === one.model && item.channelId === one.channelId)
+      : list.find((item) => item.id === one.model);
+    if (hit) {
+      // 通道对上了就顺手把 channelId 补准：用户只填了模型名时，
+      // 新卡片要靠它选对通道（同一个模型名可能挂在两个渠道上）。
+      if (!one.channelId) one.channelId = hit.channelId || '';
+      return;
+    }
+    const sameName = list.find((item) => item.id === one.model);
+    if (sameName) {
+      one.channelId = sameName.channelId || '';
+      return;
+    }
+    dropped.push(type === 'quick' ? '快速视频' : type === 'video' ? '视频' : '图片');
+    one.model = '';
+    one.channelId = '';
+  });
+  return { defaults: out, dropped: dropped };
+}
 
 // 把渠道里配置的模型摊平给前端，卡片上的模型下拉框直接用这份清单
 function modelsPayload() {
@@ -729,6 +790,34 @@ async function handleApi(req, res, pathname, query) {
       if (config.lan.enabled !== before) {
         changed.push('局域网访问');
         log('局域网访问已' + (config.lan.enabled ? '打开' : '关闭') + '，需要重启服务才会生效');
+      }
+    }
+    if (body.cardDefaults !== undefined) {
+      // 归一化只做结构清洗；**模型 / 参数是否真的可用**要下面单独校验，
+      // 否则用户设了一个后来被删掉的模型，新卡片就会生成到一半才报错。
+      const next = configStore.normalizeCardDefaults(body.cardDefaults);
+      const problems = validateCardDefaults(next);
+      if (problems.length) {
+        return sendJson(res, 400, {
+          error: '新建默认值没保存：' + problems.join('；'),
+        });
+      }
+      // 模型 / 通道被删掉时不能把用户设置清空：那等于「改了一次通道，默认值全丢」。
+      // 这种情况保留参数、只把不可用的模型降成「跟随渠道默认」。
+      const usable = pruneCardDefaults(next);
+      config.cardDefaults = usable.defaults;
+      changed.push('新建卡片默认值');
+      const summary = configStore.CARD_DEFAULT_TYPES
+        .map((type) => {
+          const one = usable.defaults[type] || {};
+          const params = Object.keys(one.params || {}).map((key) => one.params[key]);
+          const bits = [one.model || '跟随渠道默认'].concat(params);
+          return (type === 'quick' ? '快速视频' : type === 'video' ? '视频' : '图片') + '：' + bits.join(' / ');
+        })
+        .join('；');
+      log('新建卡片默认值已更新：' + summary);
+      if (usable.dropped.length) {
+        log('其中 ' + usable.dropped.join('、') + ' 的模型在当前渠道里已经找不到，已改为「跟随渠道默认」');
       }
     }
     if (body.image && typeof body.image === 'object') {

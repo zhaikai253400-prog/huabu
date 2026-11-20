@@ -4,6 +4,13 @@
   // C5：参数装配规则与前端其它入口、服务端共用同一份源码（web/assets/payload-rules.js）。
   // 兜底留一份等价实现：老页面缓存里可能还没这个脚本，缺了也不能让画布整个打不开。
   // 这里的取值规则必须与共享模块逐字一致 —— 两边一旦分叉，C5 就白做了。
+  // 新建卡片默认值（设置面板里指定的「A 模型 2K / 16:9」）：
+  // 规则在 web/assets/card-defaults.js，服务端与这里共用同一份，
+  // 所以「设置里显示什么、新卡片就长什么样」不会两边打架。
+  // 老页面缓存里可能还没有这个脚本，缺了也不能让画布打不开 —— 退回到原来的行为。
+  const cardDefaultsRules = window.CanvasCardDefaults || null;
+  let userDefaults = { image: { model: '', channelId: '', params: {} }, video: { model: '', channelId: '', params: {} }, quick: { model: '', channelId: '', params: {} } };
+
   const FALLBACK_MODES = ['reference', 'frames', 'text'];
   const FALLBACK_TAIL_KINDS = { video: 1, quick: 1 };
   const rules = window.CanvasPayloadRules || {
@@ -261,15 +268,69 @@
     return list.filter((item) => item && (typeof item === 'string' ? item : item.id));
   }
 
-  // 卡片没选过模型时，优先用上次用过的，其次用清单第一个
+  // 某一类的「新建默认」设置（模型 + 通道 + 参数）
+  function defaultPresetOf(type) {
+    const key = String(type || '');
+    const one = userDefaults && userDefaults[key];
+    if (!one || typeof one !== 'object') return { model: '', channelId: '', params: {} };
+    return one;
+  }
+
+  // 默认值里指定的模型还在这份清单里吗？在就返回清单里的那一项（带通道信息）
+  function defaultModelEntryOf(type) {
+    const preset = defaultPresetOf(type);
+    const model = String(preset.model || '');
+    if (!model) return null;
+    const list = modelsFor(type);
+    if (!list.length) return null;
+    const channelId = String(preset.channelId || '');
+    const hit = channelId
+      ? list.find((item) => item.id === model && item.channelId === channelId)
+      : null;
+    if (hit) return hit;
+    // 通道对不上（用户换了通道）时按模型名退一步找，仍然算可用
+    return list.find((item) => item.id === model) || null;
+  }
+
+  // 卡片没选过模型时，优先级：
+  //   ① 设置里明确指定的默认模型（用户的意思最明确）
+  //   ② 上次用过的（便利，但不能盖过显式设置）
+  //   ③ 渠道标了 isDefault 的
+  //   ④ 清单第一个
   function pickDefaultModel(type) {
     const list = modelsFor(type);
     if (!list.length) return '';
+    const preset = defaultModelEntryOf(type);
+    if (preset) return preset.id;
     const remembered = readModelMemo()[type === 'quick' ? 'video' : type];
     if (remembered && list.some((item) => item.id === remembered)) return remembered;
     const preferred = list.find((item) => item.isDefault);
     if (preferred) return preferred.id;
     return list[0].id;
+  }
+
+  // 新卡片的通道：默认值里指定了通道就用它（同名模型挂两个渠道时必须靠它选对），
+  // 否则留空，让服务端按模型名自己找。
+  function pickDefaultChannelId(type, modelId) {
+    const hit = defaultModelEntryOf(type);
+    if (hit && hit.id === modelId) return hit.channelId || '';
+    return '';
+  }
+
+  // 从 UITheme（服务端设置）同步一份「新建默认值」到本地缓存。
+  // 每次设置面板保存后都会再调一次，所以画布页不用刷新就能用上新默认。
+  function syncUserDefaults() {
+    const empty = { image: { model: '', channelId: '', params: {} }, video: { model: '', channelId: '', params: {} }, quick: { model: '', channelId: '', params: {} } };
+    if (!window.UITheme || typeof window.UITheme.cardDefaults !== 'function') {
+      userDefaults = empty;
+      return;
+    }
+    const raw = window.UITheme.cardDefaults();
+    if (cardDefaultsRules) {
+      userDefaults = cardDefaultsRules.normalize(raw);
+      return;
+    }
+    userDefaults = raw && typeof raw === 'object' ? JSON.parse(JSON.stringify(raw)) : empty;
   }
 
   // 当前这张卡片用的模型，能接受哪些参数（服务端随模型清单一起发过来）
@@ -343,16 +404,83 @@
     return data.params;
   }
 
-  // 新卡片的初始参数：全局默认打底，再用模型自己声明的默认值盖一层
+  // 新卡片的初始参数。
+  //
+  // 优先级（从低到高）：内置兜底 → 模型自己声明的默认 → 设置里指定的默认 → 模型档位收敛。
+  // 用户设置压在模型默认之上是有意的：用户说了「这个模型用 2K」，
+  // 而模型恰好声明了 1K 默认 —— 那该听用户的；只有模型根本不支持 2K 时才收敛。
+  //
+  // 收敛规则放在共享模块里（card-defaults.seedParams），设置面板用的是同一个函数，
+  // 所以面板上提示「会按 1K 建」，新卡片就真的是 1K。
   function seedParamsOf(type, modelId) {
-    const base = Object.assign({}, PARAM_DEFAULTS[type] || {});
-    const spec = modelId ? modelSpecOf(type, { model: modelId }) : null;
-    if (!spec) return base;
-    if (spec.defaultDuration !== undefined) base.duration = String(spec.defaultDuration);
-    if (spec.defaultResolution !== undefined && base.resolution !== undefined) {
-      base.resolution = String(spec.defaultResolution).toLowerCase();
+    const preset = defaultPresetOf(type);
+    const spec = modelId ? modelSpecOf(type, { model: modelId, channelId: pickDefaultChannelId(type, modelId) }) : null;
+    if (!cardDefaultsRules || typeof cardDefaultsRules.seedParams !== 'function') {
+      // 兜底：共享模块没加载时退回原来的行为
+      const base = Object.assign({}, PARAM_DEFAULTS[type] || {});
+      if (!spec) return base;
+      if (spec.defaultDuration !== undefined) base.duration = String(spec.defaultDuration);
+      if (spec.defaultResolution !== undefined && base.resolution !== undefined) {
+        base.resolution = String(spec.defaultResolution).toLowerCase();
+      }
+      return base;
     }
-    return base;
+    // 用户没设过这一类默认时，preset.params 是空对象，seedParams 自然只走模型默认
+    return cardDefaultsRules.seedParams(type, preset, spec).params;
+  }
+
+  // 「设为新建默认」：把这张卡片现在的模型 + 参数变成以后新卡片的默认。
+  //
+  // 为什么做成右键入口：用户是「已经在用某张卡调好了」才想固化，
+  // 这时让他去设置面板一项项点回来是最烦的。右键一下就把当前这套搬过去。
+  //
+  // 只搬「模型 + 通道 + 参数」，不搬提示词 / 素材 / 尾部预设 ——
+  // 那些是这张卡的内容，不是「新建长什么样」。
+  function saveAsCardDefault(node) {
+    const data = nodeData(node);
+    const type = node.type === 'quick' ? 'quick' : node.type === 'image' ? 'image' : 'video';
+    if (!window.UITheme || typeof window.UITheme.cardDefaults !== 'function') {
+      toast('这次没拿到设置面板，先刷新一下页面再试');
+      return;
+    }
+    const rules = cardDefaultsRules;
+    const spec = modelSpecOf(node.type, data);
+    // 参数按卡片现在真实的值收一遍，并且只收这个类型认识的键
+    const params = {};
+    const keys = rules ? rules.paramKeysOf(type) : Object.keys(data.params || {});
+    keys.forEach((key) => {
+      const value = data.params && data.params[key];
+      if (value === undefined || value === null || value === '') return;
+      params[key] = String(value);
+    });
+    // 模型自己的默认值不写进默认设置：那是「模型的默认」，写死进用户设置以后，
+    // 将来模型改了默认、这里还留着旧值，反而更难解释。
+    if (spec) {
+      const modelDefaults = {};
+      if (spec.defaultDuration !== undefined) modelDefaults.duration = String(spec.defaultDuration);
+      if (spec.defaultResolution !== undefined) modelDefaults.resolution = String(spec.defaultResolution).toLowerCase();
+      if (spec.defaultResolution !== undefined && type === 'image') modelDefaults.size = String(spec.defaultResolution);
+      Object.keys(modelDefaults).forEach((key) => {
+        if (params[key] === modelDefaults[key]) delete params[key];
+      });
+    }
+    const current = window.UITheme.cardDefaults();
+    const next = rules ? rules.normalize(current) : JSON.parse(JSON.stringify(current));
+    next[type] = {
+      model: String(data.model || ''),
+      channelId: String(data.channelId || ''),
+      params: params,
+    };
+    // 快速视频单独设了以后，就不该再被视频那套覆盖 —— normalize 会按「有没有内容」判断
+    const body = rules ? rules.normalize(next) : next;
+    const label = type === 'quick' ? '快速视频' : type === 'image' ? '图片' : '视频';
+    const bits = [data.model || '跟随渠道默认'].concat(Object.keys(params).map((key) => params[key]));
+    window.UITheme.save({ cardDefaults: body })
+      .then(() => {
+        syncUserDefaults();
+        toast('以后新建' + label + '卡片默认用：' + bits.join(' / '));
+      })
+      .catch((error) => toast('没设成默认值：' + error.message));
   }
 
   // 定时组「同时生成」：0 = 不限制，1~10 张；缺省或乱填按 2 张
@@ -11636,7 +11764,12 @@
     const connectFrom = opts && opts.connectFrom ? String(opts.connectFrom) : '';
     const keepExpanded = opts && opts.keepExpanded ? String(opts.keepExpanded) : '';
     const preset = presetOf(type);
-    const presetSize = defaultSize(type, PARAM_DEFAULTS[type]);
+    // 先定模型和参数，再定盒子：用户默认值里可能写了 9:16，
+    // 盒子就得按 9:16 摆，不能还按全局的 16:9。
+    const seedModel = pickDefaultModel(type);
+    const seedChannel = pickDefaultChannelId(type, seedModel);
+    const seedParams = seedParamsOf(type, seedModel);
+    const presetSize = defaultSize(type, seedParams);
     const point = center || centerOfView();
     const spot = freeSpot(Math.round(point.x - presetSize.w / 2), Math.round(point.y - presetSize.h / 2), presetSize.w, presetSize.h);
     const node = {
@@ -11648,10 +11781,13 @@
       h: presetSize.h,
       data: {
         text: '',
-        model: pickDefaultModel(type),
+        model: seedModel,
+        // 通道要一起记：同一个模型名可能挂在两个渠道上，
+        // 只记模型名的话新卡片会选错平台（尺寸契约都不一样）。
+        channelId: seedChannel,
         // 新卡片一出生就按模型的默认档位来（SD2.5 Flash 默认 5 秒 / 1080p），
-        // 否则会带着全局的 30 秒 / 720p，用户一上手就撞到「超出 5–30 秒」。
-        params: seedParamsOf(type, pickDefaultModel(type)),
+        // 然后再用设置里指定的默认（A 模型 2K / 16:9）盖一层。
+        params: seedParams,
         sized: false,
         // 新建的图片 / 视频 / 快速视频按默认盒子摆着，生成结果不再按原图比例拉高
         boxed: !(opts && opts.boxed === false) && (type === 'image' || type === 'video' || type === 'quick'),
@@ -12475,6 +12611,13 @@
             const whyNot = hasMovie ? '' : '这张卡片还没有生成成片';
             items.push({ label: '取尾段：后 5 秒', disabled: !hasMovie, disabledHint: whyNot, run: () => startTailClip(node, 5) });
             items.push({ label: '取尾段：后 10 秒', disabled: !hasMovie, disabledHint: whyNot, run: () => startTailClip(node, 10) });
+          }
+          // 把这张卡的模型 + 参数固化成新建默认（图片 / 视频 / 快速视频才有模型和参数）
+          if (node.type === 'image' || node.type === 'video' || node.type === 'quick') {
+            items.push({
+              label: '设为新建默认（' + (node.type === 'quick' ? '快速视频' : node.type === 'image' ? '图片' : '视频') + '卡）',
+              run: () => saveAsCardDefault(node),
+            });
           }
           if (RESIZABLE_TYPES.indexOf(node.type) >= 0 && !data.thumb) {
             const fitSize = defaultSize(node.type, data.params);
@@ -17589,6 +17732,9 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
   async function bootstrap() {
     // 字体 / 字号 / 缩放 / 主题：先套上再画，避免闪一下
     if (window.UITheme) await window.UITheme.load();
+    syncUserDefaults();
+    // 设置面板改了「新建卡片默认值」：立刻生效，不用刷新页面
+    document.addEventListener('card-defaults-changed', syncUserDefaults);
     if (!canvasId) {
       window.location.replace('/');
       return;

@@ -3350,6 +3350,29 @@ body.connecting .node.connect-target .port.in {
 .lan-warn { color: var(--warn, #b4791f); font-size: 0.88em; }
 .set-saved { color: var(--ok); font-size: 0.86em; }
 .set-saved.bad { color: var(--danger); }
+
+/* 新建卡片默认值：设置面板里的摘要 + 独立面板的每一类一节 */
+.cd-summary {
+  flex: 1 1 auto; min-width: 0; min-height: 1.4em;
+  color: var(--text); font-size: 0.9em; line-height: 1.5;
+  /* 一行放不下就折行：图片和视频两套摘要在窄窗口里会很长，
+     截断成省略号就看不出视频那套设成什么了 */
+  white-space: normal; word-break: break-word;
+}
+.modal.modal-defaults { width: min(620px, 96vw); }
+.modal-defaults .modal-body { max-height: min(70vh, 640px); overflow-y: auto; }
+.cd-group .set-row label { width: 76px; }
+.cd-group .cd-model { font-weight: 600; }
+/* 模型不支持用户选的那一档时，提前说明「新建时会调整成什么」 */
+.cd-warn {
+  margin-top: 6px; padding: 6px 10px; border-radius: 8px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 0.86em; line-height: 1.5;
+}
+.modal-defaults .modal-foot .primary {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+.modal-defaults .modal-foot .primary:hover { filter: brightness(1.06); }
 select {
   font-family: inherit;
   font-size: inherit;
