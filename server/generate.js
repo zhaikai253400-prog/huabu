@@ -1084,6 +1084,7 @@ const EMPTY_MEDIA_KEYS = [
   // xm API 的两个视频模型：bd-VIP 走 media[{type,url}]，sd25-1-pro 走 images/video_refs/audio_refs。
   // 空数组有的平台会当成「一个无效素材」直接拒单，所以一并按空清理掉。
   'media',
+  'image_refs',
   'video_refs',
   'audio_refs',
   'refs',

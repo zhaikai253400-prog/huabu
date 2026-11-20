@@ -1,6 +1,9 @@
 'use strict';
 
-// 通道 10 · 520ruo（api.520ruo.com）· seedance_2.5_flash
+// 「Base64 内嵌」视频契约 · 自包含夹具（原通道 10 · 520ruo · seedance_2.5_flash）
+//
+// 夹具不读 data/config.json：通道 10 已于 2026-11-20 改成公网直链契约，
+// 这里只守模板机制（refInlineImages 走 dataUrl、audio 走 {base64,mimeType}）。
 //
 // 这个模型的素材契约和本项目里其它通道都不一样，必须锁死：
 //   · images 必填 1–10 张，元素只能是 Base64 / data URI / {base64,mimeType}，**不接受 URL**
@@ -37,9 +40,56 @@ function check(name, fn) {
 }
 const eq = (a, b, msg) => assert.strictEqual(a, b, msg || (a + ' !== ' + b));
 
-const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'data', 'config.json'), 'utf8'));
-const ch = cfg.channels.find((c) => c.id === 'ch_ruo_520');
-if (!ch) throw new Error('配置里找不到 ch_ruo_520 通道');
+// 2026-11-20：通道 10 已改用 ruo-seedance-2.5 / seedance-2.5-premium-video（公网直链契约）。
+// 本文件守的是「Base64 内嵌」这套模板机制本身，所以改成自包含 fixture：
+// 不再读 data/config.json，通道被别人重配也不会误红。
+const cfg = { channels: [] };
+const ch = {
+  id: 'ch_inline_fixture',
+  name: '占位通道（Base64 内嵌契约 · 测试夹具）',
+  enabled: true,
+  kinds: ['video'],
+  baseUrl: 'https://example.invalid/v1',
+  auth: { style: 'bearer', header: 'Authorization', prefix: 'Bearer ', query: 'key' },
+  headers: {},
+  query: {},
+  models: { image: [], video: ['seedance_2.5_flash'], audio: [] },
+  defaults: { image: '', video: 'seedance_2.5_flash', audio: '' },
+  lists: { enabled: false, path: '/models', method: 'GET', resultPath: 'data', itemId: 'id' },
+  // 关键：关掉「先上传素材」，模板直接吃 {{refInlineImages}}
+  upload: { enabled: false, path: '', method: 'POST', contentType: 'form', field: 'file', extra: {}, headers: {}, resultUrl: '', resultId: '', timeoutSec: 180 },
+  directRefUrls: false,
+  refPromptIndex: true,
+  refPromptAt: false,
+  refLimits: { image: { maxCount: 10 }, video: { maxCount: 0 }, audio: { maxCount: 5 } },
+  video: {
+    path: '/videos',
+    method: 'POST',
+    contentType: 'json',
+    // 手写而不是 JSON.stringify：数组/数字占位符不能带引号，
+    // 否则会渲染成 "images": "[...]"，JSON 直接解析失败（这正是 2026-11-20 踩过的坑）。
+    body: [
+      '{',
+      '  "model": "{{model}}",',
+      '  "prompt": "{{prompt}}",',
+      '  "duration": {{duration}},',
+      '  "resolution": "{{resolutionLower}}",',
+      '  "ratio": "{{ratio}}",',
+      '  "images": {{refInlineImages}},',
+      '  "audio": {{refInlineAudios}}',
+      '}',
+    ].join('\n'),
+    framesBody: '',
+    extra: {},
+    headers: {},
+    resultUrl: '',
+    resultB64: '',
+    timeoutSec: 300,
+    maxBodyMB: 60,
+    poll: { enabled: false, path: '', method: 'GET', taskIdPath: 'id', listField: '', listIdField: 'id', statusField: 'status', doneValues: 'completed', failValues: 'failed', resultUrl: 'url', resultB64: '', errorField: 'message', downloadPath: '', downloadIdPath: '', downloadUrlField: 'url', intervalSec: 10, maxWaitSec: 1800 },
+  },
+};
+cfg.channels.push(ch);
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AF+g6wAAAAASUVORK5CYII=',
@@ -213,10 +263,8 @@ check('非法分辨率收敛成模型支持的档位，不会原样发出去', (
 });
 
 console.log('\nR7 · 请求体体积护栏（平台 64 MB 网关上限）');
-check('本通道设了 60 MB 护栏，其它通道不受影响', () => {
-  eq(ch.video.maxBodyMB, 60, '通道 10 的 video.maxBodyMB 应该是 60');
-  const others = cfg.channels.filter((c) => c.id !== 'ch_ruo_520');
-  assert(others.every((c) => !c.video || !c.video.maxBodyMB), '其它通道不该带上这个护栏');
+check('夹具照样带 60 MB 护栏（模板机制不变）', () => {
+  eq(ch.video.maxBodyMB, 60, 'maxBodyMB 应该是 60');
 });
 
 console.log('\nR8 · 提示词素材名映射（图45 → 图片1）');

@@ -250,6 +250,60 @@ const VIDEO_SPECS = {
     maxRefVideos: 0,
     maxRefAudios: 5,
   },
+  // 通道 10 · 520ruo 的两个按条视频模型（2026-11-20 实测 + 官方文档）。
+  //
+  // 与旧的 seedance_2.5_flash 完全不同的一套契约，别照抄：
+  //   · 参考素材走 image_refs / video_refs / audio_refs，元素是**公网 HTTP(S) 直链**
+  //     （旧那个只收 Base64、不收 URL，正好相反）；
+  //   · 纯文生可以直接跑（不需要参考图），也没有「必须至少一张图」的限制；
+  //   · 任务提交返回 { id, status }，查询 GET /v1/videos/{id}，完成的地址在 url，
+  //     兜底下载 GET /v1/videos/{id}/content。
+  //
+  // 实测记录（2026-11-20，真实提交，本账号）：
+  //   ruo-seedance-2.5        纯文生 200 / 带 image_refs 200 / 空数组 200
+  //   seedance-2.5-premium-video 空数组 403（insufficient_user_quota，说明参数校验已通过，
+  //                              只是余额 1 元不够 3 元的单条预扣）
+  // 两家都接受空数组，所以模板里保留 image_refs: [] 是安全的。
+  //
+  // 素材上限（文档 4.4 / 各模型小节）：
+  //   ruo-seedance-2.5：30 图、10 音频（每段 2–30 秒、合计 ≤30 秒）、**不收参考视频**；
+  //     比例额外支持 adaptive。
+  //   seedance-2.5-premium-video：30 图、10 视频、10 音频；比例不含 adaptive。
+  //   两者画布素材合计上限都是 60 MiB（走 URL 时不占这个额度，但本通道仍按 URL 走）。
+  'ruo-seedance-2.5': {
+    label: 'ruo Seedance 2.5 · 480P/720P/1080P · 4–30秒 · 2/3/5元每条',
+    resolutions: ['480p', '720p', '1080p'],
+    durations: Array.from({ length: 27 }, (_, i) => String(i + 4)),
+    ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', 'adaptive'],
+    modes: ['reference', 'text'],
+    frames: false,
+    defaultResolution: '720P',
+    // 文档：默认 5 秒（不是 30）
+    defaultDuration: 5,
+    maxDurationSec: 30,
+    minDurationSec: 4,
+    maxRefs: 30,
+    maxRefVideos: 0,
+    maxRefAudios: 10,
+    maxRefTotal: 40,
+  },
+  'seedance-2.5-premium-video': {
+    label: 'Seedance 2.5 Pro 按条 · 480P/720P/1080P · 4–30秒 · 3/4/6元每条',
+    resolutions: ['480p', '720p', '1080p'],
+    durations: Array.from({ length: 27 }, (_, i) => String(i + 4)),
+    ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+    modes: ['reference', 'text'],
+    frames: false,
+    defaultResolution: '720P',
+    // 文档：2.5 默认 30 秒
+    defaultDuration: 30,
+    maxDurationSec: 30,
+    minDurationSec: 4,
+    maxRefs: 30,
+    maxRefVideos: 10,
+    maxRefAudios: 10,
+    maxRefTotal: 50,
+  },
   // 通道 11 · 星光 API（xingapi.top）· Seedance 2.5 系列三个公开模型。
   // 平台契约（对接文档 2026-10-30，第 4 节「视频：创建生成任务」）：
   //   · POST /v1/videos/generations 建任务，返回 { id, object, status }；
