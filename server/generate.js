@@ -703,15 +703,22 @@ async function uploadOnce(channel, spec, item) {
   return { ok: Boolean(url || id), url: url ? String(url) : '', id: id ? String(id) : '', reason: reason, data: data };
 }
 
-// 通道开了「先上传素材」就挨个传一遍，拿到平台给的地址 / 编号
+// 通道开了「先上传素材」就挨个传一遍，拿到平台给的地址 / 编号。
+// 另有一条自动兜底：通道要求公网 HTTPS 直链（directRefUrls）却没开上传时，
+// 本地文件会以 data URL 发过去被平台一律拒——这种情况先把本地文件传公共图床。
 async function uploadRefs(channel, refs, ctx, progress) {
   const base = channel && channel.upload;
-  if (!base || !base.enabled || !refs.length) return refs;
+  const autoSpec = !(base && base.enabled === true) ? channels.autoUploadSpecFor(channel) : null;
+  if ((!base || !base.enabled) && !autoSpec) return refs;
+  if (!refs.length) return refs;
+  if (autoSpec) {
+    progress({ stage: '这个通道只认公网地址，先把本地素材传上去…' });
+  }
   for (let index = 0; index < refs.length; index += 1) {
     const item = refs[index];
     // 每个素材按自己的类型取上传设置：图片图床常常只收图片，
     // 音频 / 视频要另配一个（见 channels.uploadSpecFor）。
-    const spec = channels.uploadSpecFor(channel, item.kind);
+    const spec = autoSpec || channels.uploadSpecFor(channel, item.kind);
     if (!spec || !String(spec.path || '').trim()) {
       throw errorKinds.configError(
         '通道「' + channel.name + '」开了「先上传素材」，但没填上' +
@@ -966,6 +973,7 @@ async function saveResult(config, found, channel, prompt, kind, sub) {
 }
 
 // 上传过就用平台给的地址，没上传就用 data URL（很多平台的图生图能直接吃）
+// 注：通道 directRefUrls = true 时，uploadRefs 会自动把本地文件传成公网地址。
 function refUrlOf(item) {
   return item.remoteUrl || item.dataUrl;
 }

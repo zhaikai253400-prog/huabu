@@ -506,6 +506,90 @@ function assert(cond, msg) {
     }
   });
 
+  console.log('\nU7 · 只认公网直链、又没开上传开关时自动补传');
+
+  check('directRefUrls + 上传开关关着 → 给出自动上传规格', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c13',
+      name: '星光视频',
+      kinds: ['video'],
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      directRefUrls: true,
+      upload: { enabled: false, path: '/files/upload' },
+    });
+    const auto = channels.autoUploadSpecFor(ch);
+    assert(auto, '应该给出自动上传规格');
+    eq(auto.path, 'https://kappa.lol/api/upload');
+    eq(auto.enabled, true);
+    eq(Object.keys(auto.headers).length, 0, '不该带主通道密钥');
+  });
+
+  check('上传开关已打开 → 不插手（照常走自己的图床）', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c14',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      directRefUrls: true,
+      upload: { enabled: true, path: 'https://picui.cn/api/v1/upload', resultUrl: 'data.links.url' },
+    });
+    eq(channels.autoUploadSpecFor(ch), null);
+  });
+
+  check('通道不要求公网直链 → 不插手（继续用 data URL）', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c15',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      directRefUrls: false,
+      upload: { enabled: false, path: '/files/upload' },
+    });
+    eq(channels.autoUploadSpecFor(ch), null);
+  });
+
+  check('兜底关掉时也不自动补传', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c16',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      directRefUrls: true,
+      upload: { enabled: false, path: '/files/upload', fallback: false },
+    });
+    eq(channels.autoUploadSpecFor(ch), null);
+  });
+
+  await checkAsync('uploadRefs 在「开关关着 + 只认公网」时真的补传一次', async () => {
+    const AUTO = channels.autoUploadSpecFor;
+    channels.autoUploadSpecFor = function () {
+      return { enabled: true, path: base + '/spare', method: 'POST', contentType: 'form', field: 'file', resultUrl: 'link', resultId: '', appendExt: true, timeoutSec: 60, extra: {}, headers: {} };
+    };
+    try {
+      seen.length = 0;
+      const ch = channelWith({ enabled: false, path: '/files/upload' });
+      ch.directRefUrls = true;
+      const refs = [audioRef()];
+      await generate.uploadRefs(ch, refs, null, function () {});
+      eq(seen.length, 1, '应该自动传一次');
+      assert(seen[0].url.indexOf('/spare') === 0, '应走自动图床，实际 ' + seen[0].url);
+      assert(refs[0].remoteUrl.indexOf('/f/ok.bin') > 0, '没写回地址：' + refs[0].remoteUrl);
+    } finally {
+      channels.autoUploadSpecFor = AUTO;
+    }
+  });
+
+  await checkAsync('降级：不要求公网直链时，开关关着就照常走 data URL（不多传）', async () => {
+    seen.length = 0;
+    const ch = channelWith({ enabled: false, path: '/files/upload' });
+    ch.directRefUrls = false;
+    const refs = [audioRef()];
+    await generate.uploadRefs(ch, refs, null, function () {});
+    eq(seen.length, 0, '不该上传');
+    assert(!refs[0].remoteUrl, '不该写远程地址，实际 ' + refs[0].remoteUrl);
+  });
+
   console.log('\n────────────────────────────────────────────────────');
   server.close();
   if (fail) {

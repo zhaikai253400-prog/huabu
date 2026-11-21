@@ -446,6 +446,35 @@ function fallbackUploadSpec(channel, kind) {
   return spec;
 }
 
+// 通道根本没开「先上传素材」，但平台只认公网 HTTPS 素材（directRefUrls = true）：
+// 本地文件会以 data URL 发过去，平台一律拒。这种组合下自动把本地文件传到公共图床，
+// 免得用户以为是「通道没接好」。同样受「自动兜底」开关控制。
+function autoUploadSpecFor(channel) {
+  const upload = channel && channel.upload;
+  if (!upload || upload.fallback === false) return null;
+  // 已经开了「先上传素材」就走正常的那套，这里不插手
+  if (upload.enabled === true) return null;
+  if (channel.directRefUrls !== true) return null;
+  // 直接取第一个预设（目前就是 kappa.lol）：这里不看主图床是谁，只看「三类都收」。
+  const keys = Object.keys(FALLBACK_UPLOAD_HOSTS);
+  const preset = keys.length ? FALLBACK_UPLOAD_HOSTS[keys[0]] : null;
+  if (!preset) return null;
+  return {
+    enabled: true,
+    path: preset.path,
+    method: (preset.method || 'POST').toUpperCase(),
+    contentType: preset.contentType || 'form',
+    field: preset.field,
+    extra: {},
+    headers: {},
+    resultUrl: preset.resultUrl,
+    resultId: '',
+    appendExt: preset.appendExt === true,
+    timeoutSec: preset.timeoutSec,
+    auto: true,
+  };
+}
+
 // 只收图片的常见图床：配置里选中它们却又要传音频 / 视频时，提前提醒一句，
 // 别等生成时才看到「不支持的文件类型」。
 const IMAGE_ONLY_UPLOAD_HOSTS = ['picui.cn'];
@@ -1634,6 +1663,7 @@ module.exports = {
   defaultUploadKind,
   uploadSpecFor,
   fallbackUploadSpec,
+  autoUploadSpecFor,
   IMAGE_ONLY_UPLOAD_HOSTS,
   normalizeLimits,
   defaultChannel,
