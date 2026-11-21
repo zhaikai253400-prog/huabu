@@ -304,6 +304,42 @@ async function runBrowser() {
       if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails).slice(0, 300));
       return r.result.value;
     };
+    // 真实鼠标事件：dispatchEvent 造的合成 PointerEvent 会绕过命中测试（elementFromPoint），
+    // 掩盖「点到的其实是卡片内部空隙」这类问题。用户报的就是这种场景，必须用真事件。
+    const clickAt = async (x, y) => {
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1, buttons: 1 });
+      await sleep(60);
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, buttons: 0 });
+      await sleep(450);
+    };
+    const rectOf = (sel) =>
+      evalJs(
+        '(() => { const e = document.querySelector(' + JSON.stringify(sel) + '); if (!e) return null;' +
+          ' const r = e.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2),' +
+          ' y: Math.round(r.top + Math.min(24, r.height / 2)), left: Math.round(r.left),' +
+          ' right: Math.round(r.right), top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; })()'
+      );
+    const findBlankPoint = () =>
+      evalJs(
+        '(() => { for (const y of [120, 200, 320, 460, 620]) { for (const x of [120, 240, 380]) {' +
+          ' const el = document.elementFromPoint(x, y); if (el && (el.id === "viewport" || el.id === "world")) return { x, y }; } }' +
+          ' return { x: 20, y: 20 }; })()'
+      );
+    const measurePanel = () =>
+      evalJs(`(() => {
+        const node = document.querySelector('#world .node[data-id="a1"]');
+        if (!node) return null;
+        const panel = node.querySelector('.node-panel');
+        const boxEl = node.querySelector('.node-prompt');
+        return {
+          expanded: node.classList.contains('expanded'),
+          wide: node.classList.contains('wide'),
+          panelW: panel ? Math.round(panel.getBoundingClientRect().width) : 0,
+          panelH: panel ? Math.round(panel.getBoundingClientRect().height) : 0,
+          boxH: boxEl ? Math.round(boxEl.getBoundingClientRect().height) : 0,
+          boxInlineH: boxEl ? boxEl.style.height : '',
+        };
+      })()`);
     await send('Page.enable');
     await send('Runtime.enable');
     await send('Emulation.setDeviceMetricsOverride', { width: 1500, height: 950, deviceScaleFactor: 1, mobile: false });
@@ -329,33 +365,22 @@ async function runBrowser() {
       return s(600);
     })();`;
 
-    const state = await evalJs(
-      `(async () => {${openCard}
-        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-        const node = document.querySelector('#world .node[data-id="a1"]');
-        return { expanded: node.classList.contains('expanded'), wide: node.classList.contains('wide'), panel: !!node.querySelector('.node-panel') };
-      })()`
-    );
+    const cardRect = await rectOf('#world .node[data-id="a1"]');
+    await clickAt(cardRect.x, cardRect.top + 24);
+    const state = await measurePanel();
 
     await checkAsync('C1 · 点卡片能展开编辑面板', async () => {
       assert(state.expanded, '点卡片后没有展开');
-      assert(state.panel, '没有出现编辑面板');
+      assert(state.panelW > 400, '没有出现编辑面板');
       assert(!state.wide, '一打开就是大面板（说明展开状态被持久化了）');
     });
 
-    // 点「展开」按钮 → 应该变大
-    const afterExpand = await evalJs(
-      `(async () => {${openCard}
-        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-        const node = document.querySelector('#world .node[data-id="a1"]');
-        const btn = node.querySelector('.prompt-expand');
-        btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerId: 2, isPrimary: true }));
-        btn.click();
-        await sleep(600);
-        const after = document.querySelector('#world .node[data-id="a1"]');
-        return { wide: after.classList.contains('wide'), pressed: btn.getAttribute('aria-pressed'), panelW: after.querySelector('.node-panel').getBoundingClientRect().width };
-      })()`
-    );
+    // 点「展开」按钮 → 应该变大（真实鼠标）
+    const btnRect = await rectOf('#world .node[data-id="a1"] .prompt-expand');
+    await clickAt(btnRect.x, btnRect.y);
+    const afterExpand = await measurePanel();
+    const pressedNow = await evalJs('document.querySelector(\'#world .node[data-id="a1"] .prompt-expand\').getAttribute("aria-pressed")');
+    afterExpand.pressed = pressedNow;
 
     await checkAsync('C2 · 点「展开」后确实变成大面板', async () => {
       assert(afterExpand.wide, '点了展开但 wide 没加上');
@@ -363,42 +388,35 @@ async function runBrowser() {
       assert(afterExpand.panelW > 700, '面板没变宽：' + afterExpand.panelW);
     });
 
-    // 点画布空白 → 收起；再点回卡片 → 必须是常规大小
-    const backAgain = await evalJs(
-      `(async () => {${openCard}
-        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-        const node = document.querySelector('#world .node[data-id="a1"]');
-        const btn = node.querySelector('.prompt-expand');
-        btn.click();
-        await sleep(400);
-        // 点画布空白（视口左上角一块空白处）
-        const vp = document.getElementById('viewport') || document.querySelector('.viewport');
-        vp.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 40, clientY: 40, button: 0, buttons: 1, pointerId: 3, isPrimary: true }));
-        window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: 40, clientY: 40, button: 0, buttons: 0, pointerId: 3, isPrimary: true }));
-        await sleep(500);
-        const collapsed = document.querySelector('#world .node[data-id="a1"]');
-        const collapsedState = { expanded: collapsed.classList.contains('expanded'), wide: collapsed.classList.contains('wide') };
-        // 再点回同一张卡
-        const r = collapsed.getBoundingClientRect();
-        const x = Math.round(r.left + r.width / 2);
-        const y = Math.round(r.top + 30);
-        const fire = (target, type, buttons) => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons: buttons, pointerId: 4, isPrimary: true }));
-        fire(collapsed, 'pointerdown', 1);
-        fire(collapsed, 'pointerup', 0);
-        await sleep(700);
-        const back = document.querySelector('#world .node[data-id="a1"]');
-        return { collapsedState, expandedAfter: back.classList.contains('expanded'), wideAfter: back.classList.contains('wide'), panelW: back.querySelector('.node-panel').getBoundingClientRect().width };
-      })()`
-    );
+    // 点画布空白 → 收起；再点回卡片 → 必须是常规大小（全程真实鼠标）
+    const blank = await findBlankPoint();
+    await clickAt(blank.x, blank.y);
+    const collapsedState = await measurePanel();
+    const cardRect2 = await rectOf('#world .node[data-id="a1"]');
+    await clickAt(cardRect2.x, cardRect2.top + 24);
+    const backAgain = await measurePanel();
+    backAgain.collapsedState = collapsedState;
 
     await checkAsync('C3 · 点空白后面板收起', async () => {
       assert(!backAgain.collapsedState.expanded, '点空白后面板还开着');
     });
 
     await checkAsync('C4 · 再点回同一张卡是常规大小（核心要求）', async () => {
-      assert(backAgain.expandedAfter, '点回来没有展开');
-      assert(!backAgain.wideAfter, '点回来还是大面板 —— 展开状态被记住了');
+      assert(backAgain.expanded, '点回来没有展开');
+      assert(!backAgain.wide, '点回来还是大面板 —— 展开状态被记住了');
       assert(backAgain.panelW < 640, '面板仍是宽面板：' + backAgain.panelW);
+    });
+
+    // 用户第二轮反馈「没有收回，而是收缩了宽度」：
+    // 面板 DOM 是复用的，宽度每次贴面板时重算，但提示词框的内联高度是上一次写死的。
+    // 只把 .wide 去掉，框还停在 532px —— 看着就是「只变窄、没收起」。
+    await checkAsync('C6 · 点回来后提示词框高度也回到初始（不能只收宽度）', async () => {
+      assert(typeof state.boxH === 'number' && state.boxH > 0, '没量到初始框高');
+      assert(typeof backAgain.boxH === 'number', '没量到点回来后的框高');
+      assert(
+        Math.abs(backAgain.boxH - state.boxH) <= 12,
+        '框高没回到初始：初始 ' + state.boxH + 'px，现在 ' + backAgain.boxH + 'px（内联 ' + backAgain.boxInlineH + '）'
+      );
     });
 
     // D：面板内部操作不应误收起
@@ -433,6 +451,40 @@ async function runBrowser() {
       assert(inside.wide, '在面板内点一下大面板就没了');
     });
 
+    // E：展开状态下拖框底改高度，只影响这次显示，不能写进这张卡的自定义高度
+    //    （写了以后收起大面板，框会停在 500+px 下不来 —— 还是「只变窄没收起」）
+    const dragState = await evalJs(
+      `(async () => {
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const node = document.querySelector('#world .node[data-id="a1"]');
+        const btn = node.querySelector('.prompt-expand');
+        if (btn.getAttribute('aria-pressed') !== 'true') btn.click();
+        await sleep(500);
+        const box = node.querySelector('.node-prompt');
+        const before = Math.round(box.getBoundingClientRect().height);
+        const g = node.querySelector('.prompt-grip');
+        const r = g.getBoundingClientRect();
+        const x = Math.round(r.left + r.width / 2);
+        const y = Math.round(r.top + r.height / 2);
+        const fire = (el, type, cx, cy, buttons) =>
+          el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0, buttons: buttons, pointerId: 21, isPrimary: true }));
+        fire(g, 'pointerdown', x, y, 1);
+        fire(g, 'pointermove', x, y - 50, 1);
+        fire(g, 'pointerup', x, y - 50, 0);
+        await sleep(400);
+        const key = 'canvas.promptHeights.' + new URLSearchParams(location.search).get('id');
+        let saved = null;
+        try { saved = localStorage.getItem(key); } catch { saved = 'err'; }
+        return { before, after: Math.round(box.getBoundingClientRect().height), saved };
+      })()`
+    );
+
+    await checkAsync('E1 · 大面板里拖框底不会把高度写进这张卡（否则收起后下不来）', async () => {
+      const saved = dragState.saved;
+      const polluted = Boolean(saved) && Object.prototype.hasOwnProperty.call(JSON.parse(saved), 'a1');
+      assert(!polluted, '大面板拖出来的高度被记成本卡长期高度了：' + saved);
+    });
+
     // 刷新页面后也不该是展开的（不持久化的另一半）
     const afterReload = await evalJs(
       `(async () => {
@@ -446,13 +498,9 @@ async function runBrowser() {
       await sleep(300);
     }
     await sleep(1200);
-    const reloadState = await evalJs(
-      `(async () => {${openCard}
-        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-        const node = document.querySelector('#world .node[data-id="a1"]');
-        return { wide: node.classList.contains('wide'), expanded: node.classList.contains('expanded') };
-      })()`
-    );
+    const cardRect3 = await rectOf('#world .node[data-id="a1"]');
+    await clickAt(cardRect3.x, cardRect3.top + 24);
+    const reloadState = await measurePanel();
 
     await checkAsync('C5 · 刷新页面后再打开卡片，仍是常规大小', async () => {
       assert(!afterReload ? false : true, '');

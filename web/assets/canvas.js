@@ -5146,6 +5146,22 @@
     promptWideId = null;
   }
 
+  // 面板 DOM 是复用的：同一张卡收起大面板后再点回来，里面的提示词框还留着
+  // 上一次 wide 状态的**内联高度**（style.height = 620px），而宽度是每次贴面板时
+  // 现算的。结果就是「宽度收回来了、框还是大面板那么高」，看着像没收起。
+  // 所以每次把某张卡设成展开态时，都按它**当前**的展开状态重贴一次高度与按钮高亮。
+  function syncExpandedPromptState() {
+    // 用户正拖着提示词框的下沿改高度：这时候重贴会把高度拽回去
+    if (promptResizing) return;
+    const node = expandedId ? byId(expandedId) : null;
+    const el = node ? elements.get(node.id) : null;
+    if (!node || !el) return;
+    const box = el.querySelector('.node-prompt');
+    if (box) applyPromptHeight(box, node);
+    const expand = el.querySelector('.prompt-expand');
+    if (expand) paintPromptWideButton(expand, node);
+  }
+
   // 大面板的提示词高度：尽量占满可视高度，但不超过 620
   function promptWideHeight() {
     return clamp(Math.round(window.innerHeight * 0.56), 240, 620);
@@ -5411,7 +5427,9 @@
       const height = box.offsetHeight;
       stop();
       promptResizing = false;
-      setPromptCustomHeight(node, height);
+      // 大面板里拖出来的高度只是这次看着舒服，不能记成这张卡的长期高度：
+      // 记了以后收起大面板，框还停在 500+px 的高度下不来。
+      if (!promptWideOn(node)) setPromptCustomHeight(node, height);
       paintPromptSizeButtonOf(node);
       rememberPromptScroll(node, box);
       placePanel();
@@ -5421,7 +5439,7 @@
       stop();
       if (!wasDragging) return;
       promptResizing = false;
-      setPromptCustomHeight(node, box.offsetHeight);
+      if (!promptWideOn(node)) setPromptCustomHeight(node, box.offsetHeight);
       paintPromptSizeButtonOf(node);
       placePanel();
     });
@@ -10634,6 +10652,8 @@
       const same = expandedId ? elements.get(expandedId) : null;
       if (same) same.classList.toggle('wide', promptWideOn(byId(expandedId)));
       applyZOrder();
+      // 同一张卡再点一次：宽/高也要按当前状态对齐（宽高是两处逻辑，别只对齐宽度）
+      syncExpandedPromptState();
       placePanel();
       return;
     }
@@ -10650,6 +10670,8 @@
     });
     viewportEl.classList.toggle('has-expanded', Boolean(expandedId));
     applyZOrder();
+    // 复用回来的面板要按「这次」的展开状态重贴提示词框高度（否则会停在旧的大面板高度）
+    syncExpandedPromptState();
     placePanel();
     // 面板再打开时回到上次看到的位置，几千字的提示词不用重新找
     const openEl = expandedId ? elements.get(expandedId) : null;
@@ -10744,6 +10766,9 @@
     });
     viewportEl.classList.toggle('has-expanded', Boolean(expandedId));
     applyZOrder();
+    // 有的路径是直接改 expandedId 再调这里（连完线恢复、新建卡保留原面板、筛选后清选中），
+    // 也要保证框的高度跟当前展开状态一致
+    syncExpandedPromptState();
     placePanel();
   }
 
