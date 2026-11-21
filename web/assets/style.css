@@ -1702,8 +1702,9 @@ button:disabled:hover { border-color: var(--line-strong); color: var(--text); }
   .node-panel { min-width: 260px; }
 }
 
-/* 编辑面板永远在卡片正下方（不再翻到上方）。
-   下方空间不够时由 canvas.js 的 placePanel 把画布整体往上挪，
+/* 编辑面板永远在卡片正下方（不翻到上方，也不为了塞进屏幕而挪画布）。
+   下方空间不够时（例如卡片贴着屏幕底边），超出屏幕的部分就让它超出，
+   由用户自己平移画布查看 —— 见 canvas.js 的 placePanelVertical。
    所以这里只需要声明「向下」这一种定位，不再有上下两套。 */
 
 .node-model {

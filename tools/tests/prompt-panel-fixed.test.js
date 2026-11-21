@@ -2,10 +2,13 @@
 
 // 提示词框固定高度 + 编辑面板永远向下（不再自适应翻转）。
 //
-// 这两条是用户明确要求的「不要自适应」：
+// 三条都是用户明确要求的「不要自适应」：
 //   · 提示词框点进去不高、点出去不矮，永远从 220px 起步；
-//   · 编辑面板永远贴在卡片正下方，下面放不下就把画布往上让一点，
-//     而不是翻到卡片上方 —— 翻上去以后同一个按钮时上时下，用起来要重新找。
+//   · 编辑面板永远贴在卡片正下方，**绝不翻到卡片上方** ——
+//     翻上去以后同一个按钮时上时下，用起来要重新找；
+//   · **点开卡片时画布一点都不许动**。以前面板放不下会把 viewport.y 顶走
+//     几百像素（实测贴底卡片点一下跳 402px），视角被打乱、怎么点都回不到原位。
+//     卡片贴着屏幕底边时，超出屏幕的面板部分就不管，用户自己平移画布看。
 //
 // 前端是 IIFE，函数拿不出来，所以这里用「源码片段抽取 + vm 沙箱」直接跑真函数：
 // 改坏了（比如有人把焦点判断又加回 promptHeightFor）测试会立刻红。
@@ -177,17 +180,53 @@ check('普通卡片的面板不再改 panel.style.top（会和 CSS 的 margin-to
   eq(bad.length, 0, '又在给 panel.style.top 赋非空值：' + bad.join(' | '));
 });
 
-check('竖直方向只有一份「一次算完」的位移逻辑，且有向下/向上的上限', () => {
-  const body = pickFunction('placePanelVertical');
-  assert(/viewport\.y \+= dy;/.test(body), '没有把算出来的 dy 落到 viewport.y 上');
-  // 只允许出现一次 applyViewport（多份位移会互相抵消 → 面板抖）
-  eq((body.match(/applyViewport\(\)/g) || []).length, 1, 'placePanelVertical 里出现了多次 applyViewport');
-  assert(/maxUp/.test(body) && /maxDown/.test(body), '缺少向上 / 向下的位移上限，画布会把卡片推出视野');
+// 用户 2026-11-21 的原话：
+//   「卡片贴到屏幕最底边的时候，面板超出的部分不用管，我会自行移动画布来查看。」
+// 所以这一条从「一次算完的位移」反转成「一个像素都不许动」。
+check('**点开卡片绝不平移画布**：placePanel 相关的函数里没有一处写 viewport', () => {
+  const vertical = pickFunction('placePanelVertical');
+  const inner = pickFunction('placePanelInner');
+  const both = vertical + '\n' + inner;
+  assert(!/viewport\.[xy]\s*(\+=|-=|=)/.test(both),
+    '贴面板的代码又在改 viewport 了 —— 点一下卡片画布就会跳走');
+  assert(!/applyViewport\(\)/.test(vertical), 'placePanelVertical 里还调 applyViewport（说明还在挪画布）');
+  assert(!/autoShift|shiftCap|maxUp|maxDown/.test(both), '还留着旧的「让位」位移逻辑（autoShift / shiftCap / maxUp）');
 });
 
-check('缩放触发重贴时不允许动画布（否则边缩边被顶走）', () => {
+check('贴底卡片：空间不够时保持自然高度、允许溢出，不压成小缝', () => {
+  const body = pickFunction('placePanelVertical');
+  // 关键：只在「空间够用」时才收高度；不够就完全不动 maxHeight
+  assert(/minUsable/.test(body), '没有「够不够用」的阈值判断');
+  // 直接盯语句本身，别在注释里找（注释里先出现这个词，会误判）
+  assert(/if \(space >= minUsable &&/.test(body),
+    '空间够用的判断不是 space >= minUsable（贴底时会被误判成够用）');
+});
+
+check('「够用」的下限按底栏真实高度算（不能写死一个数）', () => {
+  const body = pickFunction('placePanelVertical');
+  // 不同卡片底栏高度差很多（参考素材 / 版本条），写死数值会出现按钮被挤出面板
+  assert(/node-footer/.test(body), '没有量底栏高度');
+  assert(/footerH/.test(body) && /minUsable/.test(body), '下限没有参与判断');
+  // 但绝不能再出现旧那种「按底栏高度硬压 maxHeight」的写法
+  const compressAt = body.indexOf('panel.style.maxHeight = toCssPx');
+  assert(compressAt > 0, '找不到收高度的语句');
+  const compressLine = body.slice(compressAt, body.indexOf('\n', compressAt));
+  assert(/toCssPx\(space\)/.test(compressLine),
+    '收高度不是按剩余空间算的（会压成一条窄缝）：' + compressLine.trim());
+});
+
+check('空间够用时收到刚好贴住屏幕下沿（不等于放任溢出）', () => {
+  const body = pickFunction('placePanelVertical');
+  assert(/panel\.style\.maxHeight = toCssPx\(space\)/.test(body), '没有按剩余空间收高度');
+});
+
+check('缩放触发重贴时也不会动画布（贴面板本身已不挪视口）', () => {
   const body = pickFunction('applyViewport');
-  assert(/placePanel\(false\)/.test(body), 'applyViewport 里重贴面板没有传 false');
+  assert(/placePanel\(/.test(body), 'applyViewport 里没有重贴面板');
+  const at = body.indexOf('placePanel(');
+  const seg = body.slice(at, at + 40);
+  assert(!/viewport\.y\s*(\+=|=)/.test(body), 'applyViewport 里不该写 viewport.y（那是平移的活儿）');
+  assert(seg.length > 0, '取不到 placePanel 调用');
 });
 
 check('拖动途中完全不动面板（只写 transform），松手后才落位一次', () => {
@@ -205,12 +244,6 @@ check('拖动途中完全不动面板（只写 transform），松手后才落位
 check('平移画布松手时不推画布（用户刚挪的视角不能再被推回去）', () => {
   const body = pickFunction('startPan');
   assert(/placePanel\(false\)/.test(body), 'startPan 松手时重贴面板没传 false');
-});
-
-check('面板放不下时兜底压高度，且下限不低于底栏高度', () => {
-  const body = pickFunction('placePanelVertical');
-  assert(/maxHeight/.test(body), '兜底没有压 maxHeight');
-  assert(/node-footer/.test(body), '下限没有按底栏高度算，压太矮时「生成」按钮会丢');
 });
 
 check('贴面板期间有重入保护（placePanel 内部会调 applyViewport）', () => {
@@ -295,5 +328,151 @@ check('提示词高度的死参数 focusedOverride 已删除', () => {
   assert(!canvasSrc.includes('PROMPT_SHORT_H'), 'PROMPT_SHORT_H 还留着');
 });
 
-console.log('\n共 ' + (pass + fail) + ' 项，失败 ' + fail + ' 项');
-process.exit(fail ? 1 : 0);
+// check() 是同步的；这里包一层，好在端到端里 await 真正的断言结果
+async function checkAsync(name, fn) {
+  try { await fn(); pass += 1; console.log('  ✓ ' + name); }
+  catch (error) { fail += 1; console.log('  ✗ ' + name + ' —— ' + error.message); }
+}
+console.log('\n五、端到端：贴底卡片点开时，画布一个像素都不动');
+
+// 这一段守的是用户真正看到的那一下：真实鼠标点卡片，真实浏览器量 transform。
+// 只查源码不够 —— 位移是运行时算出来的，注释写得再好也可能算错。
+async function runE2E() {
+  const os = require('node:os');
+  const http = require('node:http');
+  const { spawn } = require('node:child_process');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function localGet(url, method) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: method || 'GET' }, (res) => {
+        let b = ''; res.setEncoding('utf8'); res.on('data', (c) => (b += c));
+        res.on('end', () => resolve({ status: res.statusCode, body: b }));
+      });
+      req.on('error', reject); req.setTimeout(15000, () => req.destroy(new Error('timeout'))); req.end();
+    });
+  }
+  const edge = [
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  ].find((x) => fs.existsSync(x));
+  if (!edge) { console.log('  · 本机没有 Chrome / Edge，跳过端到端（上面的源码断言已覆盖规则）'); return; }
+
+  const box = fs.mkdtempSync(path.join(os.tmpdir(), 'panelpos-'));
+  const dataDir = path.join(box, 'data');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const cdpPort = 9511;
+  const cdp = 'http://127.0.0.1:' + cdpPort;
+  const server = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js'), '--no-browser'], {
+    cwd: ROOT,
+    env: Object.assign({}, process.env, { CANVAS_DATA_DIR: dataDir, http_proxy: '', https_proxy: '', HTTP_PROXY: '', HTTPS_PROXY: '' }),
+    stdio: 'ignore',
+  });
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'panelpos-chrome-'));
+  const chrome = spawn(edge, ['--headless=new', '--disable-gpu', '--remote-debugging-port=' + cdpPort,
+    '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore' });
+  let ws = null;
+  try {
+    let port = 0;
+    for (let i = 0; i < 140; i += 1) {
+      try { port = JSON.parse(fs.readFileSync(path.join(dataDir, 'runtime.json'), 'utf8')).port; } catch { port = 0; }
+      if (port) { try { if ((await localGet('http://127.0.0.1:' + port + '/api/health')).status === 200) break; } catch {} }
+      await sleep(250);
+    }
+    if (!port) throw new Error('隔离服务没起来');
+    let token = '';
+    for (let i = 0; i < 40 && !token; i += 1) {
+      try { token = fs.readFileSync(path.join(dataDir, 'admin-token.txt'), 'utf8').trim(); } catch { await sleep(150); }
+    }
+    const api = (method, urlPath, body) => new Promise((resolve, reject) => {
+      const data = body == null ? null : JSON.stringify(body);
+      const req = http.request({
+        hostname: '127.0.0.1', port, path: urlPath, method,
+        headers: Object.assign({ 'x-local-token': token }, data ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } : {}),
+      }, (res) => {
+        let b = ''; res.setEncoding('utf8'); res.on('data', (c) => (b += c));
+        res.on('end', () => resolve({ status: res.statusCode, body: b }));
+      });
+      req.on('error', reject); req.end(data || undefined);
+    });
+
+    const longText = ('## 视频编号 02 | 望穿秋水\n\n场景：破败药店内（白日｜四向空景）\n\n出场人物：\n- 虞里月\n- 徐青\n\n').repeat(12);
+    const created = JSON.parse((await api('POST', '/api/canvases', { name: '贴底卡片' })).body);
+    await api('PUT', '/api/canvases/' + created.canvas.id, {
+      nodes: [
+        // 竖直摆在屏幕最底边：视口高 900，卡片 h=280，viewport.y=320 → 卡片下沿正好在 900
+        { id: 'bot', type: 'image', x: 300, y: 300, w: 420, h: 280, z: 0, createdAt: 1000, data: { v: 3, text: longText, model: '', params: {}, no: 1 } },
+      ],
+      edges: [],
+      viewport: { x: 0, y: 320, zoom: 1 },
+    });
+
+    for (let i = 0; i < 60; i += 1) { try { if ((await localGet(cdp + '/json/version')).status === 200) break; } catch {} await sleep(250); }
+    const info = JSON.parse((await localGet(cdp + '/json/new?' + encodeURIComponent('about:blank'), 'PUT')).body);
+    ws = new WebSocket(info.webSocketDebuggerUrl);
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+    let seq = 0; const pending = new Map();
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.id && pending.has(msg.id)) {
+        const p = pending.get(msg.id); pending.delete(msg.id);
+        if (msg.error) p.reject(new Error(JSON.stringify(msg.error))); else p.resolve(msg.result);
+      }
+    };
+    const send = (m, p) => new Promise((res, rej) => {
+      seq += 1; pending.set(seq, { resolve: res, reject: rej });
+      ws.send(JSON.stringify({ id: seq, method: m, params: p || {} }));
+    });
+    const evalJs = async (e) => {
+      const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true });
+      if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails).slice(0, 400));
+      return r.result.value;
+    };
+    await send('Page.enable');
+    await send('Runtime.enable');
+    await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: 'http://127.0.0.1:' + port + '/canvas?id=' + created.canvas.id });
+    for (let i = 0; i < 120; i += 1) {
+      if (await evalJs('document.querySelectorAll("#world .node").length > 0')) break;
+      await sleep(250);
+    }
+    await sleep(1600);
+
+    const SNAP = '(() => { const n = document.querySelector(\'#world .node[data-id="bot"]\'); const r = n.getBoundingClientRect(); const p = n.querySelector(".node-panel"); const pr = (p && n.classList.contains("expanded")) ? p.getBoundingClientRect() : null; return { world: document.getElementById("world").style.transform, nodeTop: Math.round(r.top), vh: innerHeight, expanded: n.classList.contains("expanded"), panel: pr ? { top: Math.round(pr.top), bottom: Math.round(pr.bottom), h: Math.round(pr.height) } : null, maxH: p ? p.style.maxHeight : null }; })()';
+    const snap = () => evalJs(SNAP);
+    const clickCard = async () => {
+      const pt = await evalJs('(() => { const n = document.querySelector(\'#world .node[data-id="bot"]\'); const r = n.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(Math.max(4, Math.min(innerHeight - 4, r.top + 40))) }; })()');
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1, buttons: 1 });
+      await sleep(50);
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1, buttons: 0 });
+      await sleep(1400);
+    };
+
+    const before = await snap();
+    await clickCard();
+    const after = await snap();
+    await checkAsync('① 贴底卡片点开：画布 transform 完全没变', () => assert(before.world === after.world, before.world + ' -> ' + after.world));
+
+    await checkAsync('② 卡片本身也没被挪动', () => assert(before.nodeTop === after.nodeTop, before.nodeTop + ' -> ' + after.nodeTop));
+
+    await checkAsync('③ 面板保持自然高度（不被压成窄缝，超出屏幕就让它超出）', () => assert(!!after.panel && after.panel.h > 280, JSON.stringify(after.panel)));
+
+    // 再开合两次，确认不会累积漂移
+    await clickCard();
+    await clickCard();
+    const third = await snap();
+    await checkAsync('④ 反复开合后画布仍没有漂移', () => assert(third.world === before.world, before.world + ' -> ' + third.world));
+  } finally {
+    try { if (ws) ws.close(); } catch {}
+    try { chrome.kill(); } catch {}
+    try { server.kill(); } catch {}
+  }
+}
+
+(async () => {
+  try { await runE2E(); }
+  catch (error) { console.log('  ✗ 端到端没跑完 —— ' + error.message); fail += 1; }
+  console.log('\n共 ' + (pass + fail) + ' 项，失败 ' + fail + ' 项');
+  process.exit(fail ? 1 : 0);
+})();

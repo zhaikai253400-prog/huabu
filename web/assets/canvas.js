@@ -1428,10 +1428,9 @@
     scheduleMinimap();
     placeAlignBar();
     // 编辑面板是固定屏幕尺寸的界面元素：缩放变了要重新贴一次，平移不用。
-    // 这里传 false：缩放是用户在调视角，面板放不下也不能把画布顶走，
-    // 否则缩小时画布会自己往一个方向滑，越缩越偏。
-    // placingPanel 期间跳过 —— placePanel 内部本来就会 applyViewport。
-    if (expandedId && !placingPanel && viewport.zoom !== panelZoom) placePanel(false);
+    // 贴面板本身已经绝不动画布（见 placePanel），所以这里多调一次也不会把视角顶走；
+    // placingPanel 期间跳过，避免自己触发自己。
+    if (expandedId && !placingPanel && viewport.zoom !== panelZoom) placePanel();
   }
 
   // 一轮手势（拖动 / 平移 / 缩放）期间：关掉流光等重特效，松手后再恢复
@@ -2973,25 +2972,28 @@
 
   // 把展开卡片的编辑面板贴到卡片正下方。
   //
-  // allowShift（默认 true）：放不下时要不要自动平移画布。
-  //   传 false 的只有两处：画布缩放、平移画布松手。
-  //   那两种都是用户在主动调视角，画布自己往回跑会让人永远挪不动。
-  //   （拖动卡片途中根本不调 placePanel —— 面板跟着卡片走，松手后才统一落位。）
+  // **绝不移动画布**（用户 2026-11-21 明确要求）。
+  //   以前面板放不下时会把 viewport.y 顶走几百像素（实测点一下卡片画布跳 402px），
+  //   视角被打乱、而且怎么点都回不到原来的位置。现在的规则是：
+  //     · 面板永远贴卡片下沿；卡片贴着屏幕底边时，超出屏幕的那部分就不管，
+  //       用户自己平移画布看（无限画布，挪一下没有任何代价）；
+  //     · 只保留一条自动约束 —— 面板顶边不能跑到视口上边之外（见 placePanelVertical）。
+  //
+  // 参数仍保留（老调用点还在传 false），但**任何取值都不会平移画布**。
   function placePanel(allowShift) {
-    const autoShift = allowShift !== false;
-    // 重入保护：内部会调 applyViewport()，而 applyViewport 在「缩放变了」时会回头
-    // 再调 placePanel。不拦着就一层套一层，外层还会拿上一轮量到的旧尺寸继续算。
+    // 重入保护：贴面板时会写 style，触发布局；某些路径会回头再调 placePanel。
+    // 不拦着就一层套一层，外层还会拿上一轮量到的旧尺寸继续算。
     if (placingPanel) return;
     placingPanel = true;
     try {
-      placePanelInner(autoShift);
+      placePanelInner();
     } finally {
       placingPanel = false;
       panelZoom = viewport.zoom || 1;
     }
   }
 
-  function placePanelInner(autoShift) {
+  function placePanelInner() {
     const el = expandedId ? elements.get(expandedId) : null;
     const id = expandedId;
     const panel = el && el.querySelector('.node-panel');
@@ -3037,10 +3039,9 @@
     panel.style.width = width + 'px';
     panel.style.minWidth = width + 'px';
 
-    // ② 永远贴在卡片**正下方**，不再按空位翻到上方。
+    // ② 永远贴在卡片**正下方**，不按空位翻到上方、也不为了塞进屏幕而挪画布。
     // 翻上去以后，同一个操作有时在上、有时在下，手指和眼睛都要重新找位置；
-    // 而下方空间不够是可以解决的 —— 见第 ⑤ 步，把画布整体往上挪一点就行，
-    // 反正是无限画布，挪一下没有任何代价。
+    // 下方空间不够时**不动画布**，面板超出屏幕多少就超出多少 —— 用户自己平移看。
     // 定位完全交给 CSS 的 top:100% + margin-top，这里只清掉历史内联值，
     // 千万别再写 panel.style.top —— 会和 CSS 的 margin-top 叠成双份间距。
     panel.style.top = '';
@@ -3062,27 +3063,25 @@
     if (rect0.left + dx < view.left + pad) dx = view.left + pad - rect0.left;
     if (dx) panel.style.marginLeft = -width / 2 + dx + 'px';
 
-    placePanelVertical(panel, view, box, autoShift, pad);
+    placePanelVertical(panel, view, pad);
   }
 
-  // ⑤ 竖直方向：面板永远往下画，绝不翻到卡片上方。
+  // ⑤ 竖直方向：面板永远往下画，绝不翻到卡片上方，也**绝不平移画布**。
   //
-  // 处理顺序（不能颠倒）：
-  //   ① 面板比整屏还高 —— 先压到整屏内让它自己滚。底栏是 sticky 的，
-  //      压完「生成」按钮仍然贴着面板下沿，不会丢。
-  //   ② 整块塞进视口 —— **一次**算出唯一偏移，平移画布。
-  //      面板挂在卡片下面，跟卡片同在 .world 里；viewport.y 就是屏幕像素，
-  //      挪多少面板就跟着挪多少，一比一，不存在误差累积。
-  //      上下两个方向都设了上限：卡片顶部不许掉出视口上边、也不许掉出下边，
-  //      否则卡片被推出视野，用户会以为卡片丢了 —— 那比面板矮一截更糟。
-  //   ③ 挪到极限还差一点 —— 兜底压 maxHeight，面板内部滚动。
+  // 用户 2026-11-21 的明确要求：
+  //   「卡片贴到屏幕最底边的时候，面板超出的部分不用管，我会自行移动画布来查看。」
   //
-  // 为什么第 ② 步必须一次算完：
-  //   如果先「往下挪让面板顶进屏」、再「往上挪让面板底进屏」，两步方向相反，
-  //   同一轮里互相抵掉；下一轮又从新位置重算，画布就在两处之间来回跳，
-  //   看起来是面板在抖。合成一个 dy 之后位移是单调的：要么刚好放下，
-  //   要么被「卡片不出视野」卡住，下一轮算出的 dy 只会更小。
-  function placePanelVertical(panel, view, box, autoShift, pad) {
+  // 所以这里**只有一条**规则：
+  //   · 卡片下方能腾出「够用」的空间（至少装得下底栏）时，把面板高度收到刚好贴住
+  //     屏幕下沿 —— 这样面板不会有一截吊在屏幕外，底栏的「生成」按钮也一直看得见；
+  //   · 腾不出够用的空间（卡片贴着屏幕底边 / 更靠下）时，**保持面板的自然高度、整块溢出**。
+  //     这时绝不能压成一个小滚动框 —— 压了以后用户平移过来只能看到一条 120px 的窄缝，
+  //     还得在缝里滚，比让他拖一下画布难用得多。
+  //
+  // 任何情况下都不写 viewport.x / viewport.y：placePanel 会在切卡、拖卡片松手、改参数等
+  // 很多时机被调用，一旦这里平移画布，用户每点一次视角就被推一次，永远回不到原来的位置
+  //（实测卡片贴底时点一下会跳 402px）。
+  function placePanelVertical(panel, view, pad) {
     // 写 maxHeight 用 CSS 像素，量 rect 拿到屏幕像素。面板被 .world 的 scale
     // 缩过、又用自身 zoom 抵消，两者乘起来 ≈1 但不正好是 1（zoom 有 0.35 下限），
     // 所以要按实测比例换算；不换算的话反复压缩会越压越矮。
@@ -3091,62 +3090,30 @@
       const scale = panel.offsetHeight > 0 ? live.height / panel.offsetHeight : 1;
       return Math.max(1, Math.round(screenPx / (scale || 1)));
     };
-    const topPad = view.top + pad;
     const bottomPad = view.bottom - pad;
-    const roomH = Math.max(160, bottomPad - topPad);
 
-    // ① 面板本身比整屏高：先压到整屏内
-    let rect = panel.getBoundingClientRect();
-    if (rect.height > roomH) {
-      panel.style.maxHeight = toCssPx(roomH) + 'px';
-      rect = panel.getBoundingClientRect();
-    }
+    // 每次都先清掉上一轮的内联上限，否则用过一次之后会一直沿用那个高度，
+    // 换一张卡 / 换个位置都不会重新长回来。
+    panel.style.maxHeight = '';
+    const rect = panel.getBoundingClientRect();
 
-    // ② 一次算出唯一偏移 dy（dy>0 画布下移，dy<0 画布上移）
-    if (autoShift) {
-      // 只有卡片本身还在视野里才动画布。卡片整个被拖出视野时，用户是故意在看别处，
-      // 这时候把画布拽回来只会让人莫名其妙（而且可能是上千像素的大跳）。
-      const cardOnScreen = box.bottom > topPad && box.top < bottomPad;
-      // 1 像素以内的差不算差：rect 是小数，平移后又会有缩放取整，
-      // 不留这点容差的话每次重贴都会再挪 0.x 像素，看着就是面板在微微游走。
-      const EPS = 1;
-      let dy = 0;
-      // 让位幅度上限：半屏。
-      //
-      // 为什么不"能挪多少挪多少"：卡片被拖到屏幕外时，面板要整个人塞进视口可能得挪
-      // 上千像素，那一下画面剧变，用户会以为点错了。半屏以内是「滚动到可视区」
-      // 的量级，看上去像画面滑了一段，不会失去方向感。
-      // 半屏又足够让「贴着屏幕底边的卡片」把 384px 的面板整个腾出来 ——
-      // 这是最常见的一档，再小就只剩压缩、看不了提示词。
-      const shiftCap = Math.round(view.height * 0.5);
-      if (cardOnScreen) {
-        if (rect.top < topPad - EPS) {
-          // 面板顶部跑到视口上边之外：画布往下挪。
-          // 上限除了半屏，还有「卡片顶边别掉出视口下边」—— 否则等于把卡片推出屏幕。
-          const maxDown = Math.min(shiftCap, Math.max(0, bottomPad - box.top));
-          dy = Math.min(topPad - rect.top, maxDown);
-        } else if (rect.bottom > bottomPad + EPS) {
-          // 面板底边超出视口：画布往上挪，最多挪到「卡片顶部贴住视口上边」
-          const maxUp = Math.min(shiftCap, Math.max(0, box.top - view.top));
-          dy = Math.min(0, Math.max(bottomPad - rect.bottom, -maxUp));
-        }
-      }
-      if (dy) {
-        viewport.y += dy;
-        applyViewport();
-        rect = panel.getBoundingClientRect();
-      }
-    }
+    // 卡片下方（面板从 top 开始算）到屏幕下沿之间还有多少地方
+    const space = bottomPad - rect.top;
 
-    // ③ 兜底：还超出底边就压高度（面板内部滚，底栏 sticky 住按钮不会丢）。
-    //    下限取「底栏（模型+参数+生成）有多高」，而不是随手写个 160：
-    //    压得比底栏还矮时，底栏会被挤出面板可视区，按钮照样丢。
-    const restOver = rect.bottom - bottomPad;
-    if (restOver > 0) {
-      const footerEl = panel.querySelector('.node-footer');
-      const footerH = footerEl ? footerEl.getBoundingClientRect().height : 0;
-      const floorH = Math.max(96, Math.min(200, Math.round(footerH) || 160));
-      panel.style.maxHeight = toCssPx(Math.max(floorH, rect.height - restOver)) + 'px';
+    // 「够用」的下限：至少能把底栏（模型 + 参数 + 生成）整个装下。
+    // 不按固定数值写死 —— 不同卡片底栏高度差很多（有没有参考素材、有没有版本条），
+    // 写死一个数会出现「大卡片按钮被挤出面板」或者「小卡片白白溢出屏幕」。
+    const footerEl = panel.querySelector('.node-footer');
+    const footerH = footerEl ? Math.round(footerEl.getBoundingClientRect().height) : 0;
+    const minUsable = footerH ? Math.max(160, footerH + 24) : 200;
+
+    // 空间够用：把面板收到刚好贴住屏幕下沿。这样面板不会有半截吊在屏幕外，
+    // 底栏按钮也一直看得见 —— 这是最常见的档位，绝大多数卡片走的都是这条路。
+    // 空间不够（卡片贴着屏幕底边甚至更靠下）：**什么都不做**，保持自然高度让它溢出。
+    // 此时压成一个小滚动框反而是坏主意：用户平移过来只能看到一条窄缝，
+    // 还得在缝里滚，比让他拖一下画布难用得多。
+    if (space >= minUsable && rect.height > space) {
+      panel.style.maxHeight = toCssPx(space) + 'px';
     }
   }
 
