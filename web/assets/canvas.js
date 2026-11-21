@@ -2309,7 +2309,7 @@
     nodes = nodes.filter((one) => one.id !== id);
     edges = edges.filter((edge) => edge.sourceId !== id && edge.targetId !== id);
     selection.delete(id);
-    if (expandedId === id) expandedId = null;
+    if (expandedId === id) { expandedId = null; resetPromptWide(); }
     if (editingId === id) editingId = null;
     shareBaseline.delete(id);
     dropped.forEach((edge) => shareEdgeBaseline.delete(edge.id));
@@ -5111,48 +5111,39 @@
   const PROMPT_MIN_H = 60;
   // 每张卡片各自记住的高度：{ [nodeId]: 高度 }
   let promptHeights = readPromptHeights();
-  // 原地展开（大面板）：点「展开」把卡片面板本身加宽加高，不再另开一个窗口
-  const PROMPT_WIDE_KEY = 'canvas.promptWide.' + canvasId;
+  // 原地展开（大面板）：点「展开」把卡片面板本身加宽加高，不再另开一个窗口。
+  //
+  // 这是**一次性**状态，不写进 localStorage：
+  //   · 面板一收起（点空白 / 点别的卡 / 点工具栏 / Esc），展开态立刻作废；
+  //   · 下次再点回这张卡，是常规大小——想看大面板再点一次按钮。
+  // 为什么不做成「每张卡各记一份」：那等于让展开变成长期偏好，用户会以为
+  // 「这卡被打开坏了」，而且卡片一多根本记不清哪些是展开过的。
+  // 注意别和「加高 / 拖高提示词框」混为一谈：那是高度偏好，仍然记着。
   const PROMPT_WIDE_W = 780;
-  let promptWide = readPromptWide();
+  const PROMPT_WIDE_LEGACY_KEY = 'canvas.promptWide.' + canvasId;
+  // 当前唯一处于展开态的那张卡；null = 没有任何卡片展开成大面板
+  let promptWideId = null;
 
-  function readPromptWide() {
-    const out = {};
-    try {
-      const raw = window.localStorage.getItem(PROMPT_WIDE_KEY);
-      const parsed = raw ? JSON.parse(raw) : null;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        Object.keys(parsed).forEach((id) => {
-          if (parsed[id]) out[id] = true;
-        });
-      }
-    } catch {
-      /* 读不到就按默认 */
-    }
-    return out;
-  }
-
-  function savePromptWide() {
-    try {
-      if (Object.keys(promptWide).length) {
-        window.localStorage.setItem(PROMPT_WIDE_KEY, JSON.stringify(promptWide));
-      } else {
-        window.localStorage.removeItem(PROMPT_WIDE_KEY);
-      }
-    } catch {
-      /* 记不住也不影响用 */
-    }
+  // 老版本把展开状态存在 localStorage 里，升级后这份记录会一直生效。
+  // 打开画布时清一次，免得用户「刚改完还是展开的」。
+  try {
+    window.localStorage.removeItem(PROMPT_WIDE_LEGACY_KEY);
+  } catch {
+    /* 清不掉也不影响用 */
   }
 
   function promptWideOn(node) {
-    return Boolean(node && promptWide[node.id]);
+    return Boolean(node && promptWideId && node.id === promptWideId);
   }
 
   function setPromptWide(node, on) {
     if (!node) return;
-    if (on) promptWide[node.id] = true;
-    else delete promptWide[node.id];
-    savePromptWide();
+    promptWideId = on ? node.id : promptWideId === node.id ? null : promptWideId;
+  }
+
+  // 面板要收起了 / 换到别的卡了：展开态跟着作废（这就是「不再保存展开状态」的落点）
+  function resetPromptWide() {
+    promptWideId = null;
   }
 
   // 大面板的提示词高度：尽量占满可视高度，但不超过 620
@@ -5215,13 +5206,8 @@
       changed = true;
     });
     if (changed) savePromptHeights();
-    let wideChanged = false;
-    Object.keys(promptWide).forEach((id) => {
-      if (byId(id)) return;
-      delete promptWide[id];
-      wideChanged = true;
-    });
-    if (wideChanged) savePromptWide();
+    // 展开态只剩「当前那一张」：卡片被删掉时顺手清掉，不留悬空 id
+    if (promptWideId && !byId(promptWideId)) promptWideId = null;
   }
 
   function promptCustomHeight(node) {
@@ -7151,7 +7137,7 @@
     if (!list.length) {
       // 最后一张也走了：组框没有意义，直接收掉
       nodes = nodes.filter((item) => item.id !== node.id);
-      if (expandedId === node.id) expandedId = null;
+      if (expandedId === node.id) { expandedId = null; resetPromptWide(); }
       selection.delete(node.id);
       try {
         window.api.forgetSchedule(node.id).catch(() => {});
@@ -7295,7 +7281,7 @@
     }
     scheduleRuns.delete(node.id);
     nodes = nodes.filter((item) => item.id !== node.id);
-    if (expandedId === node.id) expandedId = null;
+    if (expandedId === node.id) { expandedId = null; resetPromptWide(); }
     selection.delete(node.id);
     refreshScheduleMemberMap();
     renderAll();
@@ -8224,7 +8210,7 @@
     // 之后按 Delete 会莫名其妙删掉的东西，很吓人
     if (next) {
       zoneMembersOf(zone).forEach((member) => selection.delete(member.id));
-      if (expandedId && zoneMembersOf(zone).some((member) => member.id === expandedId)) expandedId = null;
+      if (expandedId && zoneMembersOf(zone).some((member) => member.id === expandedId)) { expandedId = null; resetPromptWide(); }
     }
     renderNodes();
     renderEdges();
@@ -8274,7 +8260,7 @@
     });
     if (soloZoneId === zone.id) soloZoneId = '';
     nodes = nodes.filter((node) => node.id !== zone.id);
-    if (expandedId === zone.id) expandedId = null;
+    if (expandedId === zone.id) { expandedId = null; resetPromptWide(); }
     selection.delete(zone.id);
     renderAll();
     refreshSelection();
@@ -9045,7 +9031,7 @@
     pushHistory();
     relinkGroupEdges(group);
     nodes = nodes.filter((node) => node.id !== group.id);
-    if (expandedId === group.id) expandedId = null;
+    if (expandedId === group.id) { expandedId = null; resetPromptWide(); }
     selection.delete(group.id);
     renderAll();
     refreshSelection();
@@ -10651,6 +10637,9 @@
       placePanel();
       return;
     }
+    // 展开的卡换了 / 收起了：上一张的大面板状态一并作废，
+    // 这样「点别处 → 再点回来」看到的是常规面板，不是上次的大面板。
+    if (promptWideId && promptWideId !== next) resetPromptWide();
     expandedId = next;
     elements.forEach((el, nodeId) => {
       const node = nodeId === expandedId ? byId(nodeId) : null;
@@ -10721,7 +10710,11 @@
 
   function refreshSelection() {
     // 展开的卡片必须是选中的那一张；一旦不再是选中状态就自动收起
-    if (expandedId && !selection.has(expandedId)) expandedId = null;
+    if (expandedId && !selection.has(expandedId)) {
+      expandedId = null;
+      // 面板收起了，大面板状态跟着作废：下次点回来是常规大小
+      resetPromptWide();
+    }
     // 选中的组合，把它组里的卡片也圈一下，一眼看出这几张是一组
     const groupMemberIds = new Set();
     selection.forEach((id) => {
@@ -10773,6 +10766,7 @@
     selection.clear();
     selectedEdgeId = null;
     expandedId = null;
+    resetPromptWide();
     refreshSelection();
   }
 
@@ -11545,6 +11539,7 @@
     if (connectFrom && created.length) {
       created.forEach((card) => addEdge(connectFrom, card.id));
       if (opts && opts.keepExpanded && byId(opts.keepExpanded)) {
+        resetPromptWide();
         expandedId = opts.keepExpanded;
         selection.clear();
         selection.add(opts.keepExpanded);
@@ -11808,6 +11803,7 @@
     nodes.push(node);
     if (kind) renumberAll();
     const collapsed = Boolean(opts && opts.collapsed);
+    resetPromptWide();
     if (!collapsed) expandedId = node.id;
     renderNodes();
     selection.clear();
@@ -11815,6 +11811,7 @@
     refreshSelection();
     if (connectFrom && byId(connectFrom)) addEdge(connectFrom, node.id);
     if (keepExpanded && byId(keepExpanded)) {
+      resetPromptWide();
       expandedId = keepExpanded;
       selection.clear();
       selection.add(keepExpanded);
@@ -11977,7 +11974,7 @@
       nodeData(node).hidden = true;
     });
     const changed = pending.length;
-    if (expandedId && list.some((node) => node.id === expandedId)) expandedId = null;
+    if (expandedId && list.some((node) => node.id === expandedId)) { expandedId = null; resetPromptWide(); }
     selection.clear();
     selectedEdgeId = null;
     // 隐藏就是「从画布上摘掉，但数据和素材都还在」。只摘这几张，
@@ -13254,6 +13251,7 @@
       }
       // 连线成功或弹出菜单后：把原来正在编辑的那张重新展开，别打断写提示词
       if (!handled.force && resumeId && byId(resumeId)) {
+        resetPromptWide();
         expandedId = resumeId;
         selection.clear();
         selection.add(resumeId);
@@ -14396,10 +14394,13 @@
         }
         const el = elements.get(expandedId);
         if (el && el.contains(target)) {
-          // 卡片内部：拖右下角改尺寸先收起提示词栏，其余区域保持展开
+          // 卡片内部：拖右下角改尺寸先收起提示词栏，其余区域保持展开。
+          // 这里也算「离开」，大面板状态一并作废。
           if (target.closest('.resize-handle')) setExpanded(null);
           return;
         }
+        // 点到画布空白 / 别的卡片 / 工具栏：收起面板，同时作废大面板状态，
+        // 这样下次再点回这张卡时是常规大小（用户明确要求的行为）。
         setExpanded(null);
       },
       true
