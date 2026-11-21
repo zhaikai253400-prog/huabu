@@ -647,13 +647,39 @@ async function prepareRefs(config, list, channel, progress, options) {
   return out;
 }
 
+const KIND_REF_NAME = { image: '图片', video: '视频', audio: '音频' };
+
+// 图床把失败原因写在 JSON 里（picui.cn 是 {status:false,message:"不支持的文件类型"}），
+// HTTP 状态码却还是 200。这里把这类「看起来成功、其实是拒绝」的原因抠出来，
+// 否则用户只会看到一句「没拿到素材地址」，完全猜不到是图床不收这个格式。
+function uploadFailReason(data) {
+  const json = data && data.json;
+  if (!json || typeof json !== 'object') return '';
+  const picked =
+    json.message || json.msg || json.error_description || json.reason ||
+    (json.error && (typeof json.error === 'string' ? json.error : json.error.message)) ||
+    json.detail || '';
+  const text = String(picked || '').trim();
+  if (text) return text;
+  if (json.status === false || json.success === false || json.code === 1) return '图床返回失败（没写原因）';
+  return '';
+}
+
 // 通道开了「先上传素材」就挨个传一遍，拿到平台给的地址 / 编号
 async function uploadRefs(channel, refs, ctx, progress) {
-  const spec = channel && channel.upload;
-  if (!spec || !spec.enabled || !refs.length) return refs;
-  if (!String(spec.path || '').trim()) throw errorKinds.configError('通道「' + channel.name + '」开了「先上传素材」，但没填上传路径');
+  const base = channel && channel.upload;
+  if (!base || !base.enabled || !refs.length) return refs;
   for (let index = 0; index < refs.length; index += 1) {
     const item = refs[index];
+    // 每个素材按自己的类型取上传设置：图片图床常常只收图片，
+    // 音频 / 视频要另配一个（见 channels.uploadSpecFor）。
+    const spec = channels.uploadSpecFor(channel, item.kind);
+    if (!spec || !String(spec.path || '').trim()) {
+      throw errorKinds.configError(
+        '通道「' + channel.name + '」开了「先上传素材」，但没填上' +
+          (KIND_REF_NAME[item.kind] || '参考素材') + '的上传路径'
+      );
+    }
     // 已经是公网 https 地址了（通道允许直连）：平台收的就是这种地址，不用再传一次
     if (item.remoteUrl && /^https:\/\//i.test(item.remoteUrl)) continue;
     if (ctx && ctx.signal && ctx.signal.aborted) throw new Error('已取消');
@@ -662,18 +688,166 @@ async function uploadRefs(channel, refs, ctx, progress) {
     const stem = String(item.name || '').replace(/\.[A-Za-z0-9]{1,5}$/, '');
     item.fileName = assets.safeName(stem, 'ref', 40) + (item.ext || '');
     const data = await channels.callUpload(channel, spec, item);
-    const url = spec.resultUrl ? channels.pickByPath(data.json, spec.resultUrl) : '';
+    let url = spec.resultUrl ? channels.pickByPath(data.json, spec.resultUrl) : '';
     const id = spec.resultId ? channels.pickByPath(data.json, spec.resultId) : '';
+    const reason = uploadFailReason(data);
     if (!url && !id) {
+      const kindName = KIND_REF_NAME[item.kind] || '参考素材';
+      const host = (function () {
+        try {
+          return new URL(String(spec.path)).host;
+        } catch (error) {
+          return '';
+        }
+      })();
       throw errorKinds.configError(
-        '上传「' + item.name + '」之后没拿到素材地址或编号',
-        '检查通道的「上传结果取值路径」。返回片段：' + snippet(data.text, 200)
+        '上传' + kindName + '「' + item.name + '」失败' + (reason ? '：' + reason : '，没拿到素材地址或编号'),
+        (reason
+          ? '这是上传图床' + (host ? '（' + host + '）' : '') + '返回的原文，不是生成平台报的错。' +
+            '多半是这个图床不收' + kindName + '，到通道的「参考素材：先上传再引用」里给' + kindName +
+            '单独填一个支持它的上传地址（那里有 kappa.lol 的一键预设，图片 / 视频 / 音频都收，单文件 100 MB）。'
+          : '检查通道的「上传结果取值路径」。') +
+          '返回片段：' + snippet(data.text, 200)
       );
+    }
+    // 图床给的地址没有扩展名时，有的平台会当成未知格式；按真实后缀补上。
+    if (url && spec.appendExt && item.ext && !/\.[A-Za-z0-9]{1,5}(?:[?#].*)?$/.test(String(url))) {
+      url = String(url) + item.ext;
     }
     item.remoteUrl = url ? String(url) : '';
     item.remoteId = id ? String(id) : '';
   }
   return refs;
+}
+
+// 生成一份极小的样例素材，用来「试传」——只验图床收不收这个格式，不碰用户的文件。
+// 图片用内置 1x1 PNG；音频 / 视频用 ffmpeg 现场压一个 1 秒的，没有 ffmpeg 就退回
+// 一段最小可用的文件头（有的图床只看后缀和 MIME，这样也能验出「不支持该类型」）。
+const SAMPLE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AF+g6wAAAAASUVORK5CYII=',
+  'base64'
+);
+
+async function sampleRef(kind) {
+  const tools = paths.toolsInfo();
+  // 图片也尽量用 ffmpeg 现画一张 320x240 的：有的图床（picui 就是）
+  // 会拒掉 1x1 这种「明显不是照片」的图，用它试传会得到误导性的「服务异常」。
+  if (kind === 'image' && !tools.ffmpeg) return { buffer: SAMPLE_PNG, ext: '.png', mime: 'image/png' };
+  if (tools.ffmpeg) {
+    if (kind === 'image') {
+      const work = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-sample-'));
+      try {
+        const out = path.join(work, 'sample.png');
+        await lastframe.runTool(
+          tools.ffmpeg,
+          ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=gray:s=320x240:d=1', '-frames:v', '1', out],
+          60000
+        );
+        return { buffer: fs.readFileSync(out), ext: '.png', mime: 'image/png' };
+      } catch (error) {
+        return { buffer: SAMPLE_PNG, ext: '.png', mime: 'image/png' };
+      } finally {
+        try {
+          fs.rmSync(work, { recursive: true, force: true });
+        } catch (error) {
+          /* 临时目录清不掉不影响结果 */
+        }
+      }
+    }
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-sample-'));
+    try {
+      if (kind === 'audio') {
+        const out = path.join(work, 'sample.mp3');
+        await lastframe.runTool(
+          tools.ffmpeg,
+          ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono', '-t', '1', '-q:a', '9', out],
+          60000
+        );
+        return { buffer: fs.readFileSync(out), ext: '.mp3', mime: 'audio/mpeg' };
+      }
+      const out = path.join(work, 'sample.mp4');
+      await lastframe.runTool(
+        tools.ffmpeg,
+        [
+          '-y', '-v', 'error',
+          '-f', 'lavfi', '-i', 'color=c=black:s=320x240:d=1:r=10',
+          '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-t', '1', out,
+        ],
+        120000
+      );
+      return { buffer: fs.readFileSync(out), ext: '.mp4', mime: 'video/mp4' };
+    } catch (error) {
+      // 编不出来就走下面的兜底，别把「试传」本身变成一次失败
+    } finally {
+      try {
+        fs.rmSync(work, { recursive: true, force: true });
+      } catch (error) {
+        /* 临时目录清不掉不影响结果 */
+      }
+    }
+  }
+  if (kind === 'audio') {
+    // 一帧 MP3 头 + 静音帧，够图床判类型
+    return {
+      buffer: Buffer.from('SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMCAAAAAAAAAAAAAAAAAAAAAA', 'base64'),
+      ext: '.mp3',
+      mime: 'audio/mpeg',
+    };
+  }
+  return { buffer: Buffer.from('00000018667479706d703432000000006d703432', 'hex'), ext: '.mp4', mime: 'video/mp4' };
+}
+
+// 试传一次：让用户在通道设置里当场知道「这个图床收不收音频 / 视频」，
+// 不用等到生成时才撞上「不支持的文件类型」。
+// 返回 { ok, url, id, host, reason, kindName }，不抛错（失败也是一种结果）。
+async function testRefUpload(channel, kind) {
+  const wanted = kind === 'video' || kind === 'audio' ? kind : 'image';
+  const spec = channels.uploadSpecFor(channel, wanted);
+  const kindName = KIND_REF_NAME[wanted] || '参考素材';
+  const host = (function () {
+    try {
+      return new URL(String((spec && spec.path) || '')).host;
+    } catch (error) {
+      return '';
+    }
+  })();
+  if (!spec || !spec.enabled) {
+    return { ok: false, host: host, kindName: kindName, reason: '这个通道没有打开「先上传素材」' };
+  }
+  if (!String(spec.path || '').trim()) {
+    return { ok: false, host: '', kindName: kindName, reason: '没填' + kindName + '的上传路径' };
+  }
+  const sample = await sampleRef(wanted);
+  const item = {
+    kind: wanted,
+    name: '试传' + kindName + sample.ext,
+    fileName: 'upload-test' + sample.ext,
+    ext: sample.ext,
+    mime: sample.mime,
+    buffer: sample.buffer,
+    dataUrl: dataUrlOf(sample.buffer, sample.mime),
+  };
+  let data;
+  try {
+    data = await channels.callUpload(channel, spec, item);
+  } catch (error) {
+    return { ok: false, host: host, kindName: kindName, reason: (error && error.message) || String(error) };
+  }
+  let url = spec.resultUrl ? channels.pickByPath(data.json, spec.resultUrl) : '';
+  const id = spec.resultId ? channels.pickByPath(data.json, spec.resultId) : '';
+  if (!url && !id) {
+    return {
+      ok: false,
+      host: host,
+      kindName: kindName,
+      reason: uploadFailReason(data) || '没拿到素材地址或编号（检查「地址取值路径」）',
+      snippet: snippet(data.text, 160),
+    };
+  }
+  if (url && spec.appendExt && sample.ext && !/\.[A-Za-z0-9]{1,5}(?:[?#].*)?$/.test(String(url))) {
+    url = String(url) + sample.ext;
+  }
+  return { ok: true, host: host, kindName: kindName, url: url ? String(url) : '', id: id ? String(id) : '' };
 }
 
 async function fetchMedia(config, found, channel) {
@@ -1952,6 +2126,7 @@ module.exports = {
   submitCompressEnabled,
   compressImage,
   uploadRefs,
+  testRefUpload,
   extractLastFrame,
   extractTailClip,
   subFolderOf,

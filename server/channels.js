@@ -217,6 +217,47 @@ function defaultUpload() {
     resultUrl: 'data.url',
     resultId: 'data.id',
     timeoutSec: 300,
+    // 图床返回的地址不带扩展名时（kappa.lol 这类），可以按素材真实后缀补上。
+    // 有的平台要求 URL 末尾的扩展名和真实格式一致，不补就会被当成未知类型。
+    appendExt: false,
+    // 按类型单独指定上传接口（空 = 跟随上面的通用设置）。
+    // 现实里很常见：图片走图床 A，但 A 只收图片，音频 / 视频得换 B。
+    audio: defaultUploadKind(),
+    video: defaultUploadKind(),
+  };
+}
+
+// 「按类型单独上传」的空白模板：空字符串 / 0 都表示「跟随通用设置」
+function defaultUploadKind() {
+  return {
+    path: '',
+    method: '',
+    contentType: '',
+    field: '',
+    appendExt: null,
+    extra: {},
+    headers: {},
+    resultUrl: '',
+    resultId: '',
+    timeoutSec: 0,
+  };
+}
+
+function normalizeUploadKind(input) {
+  const source = input && typeof input === 'object' ? input : {};
+  const contentType =
+    ['form', 'base64', 'binary', 'session'].indexOf(str(source.contentType)) >= 0 ? str(source.contentType) : '';
+  return {
+    path: str(source.path).trim(),
+    method: str(source.method).toUpperCase(),
+    contentType: contentType,
+    field: str(source.field).trim(),
+    appendExt: source.appendExt === undefined || source.appendExt === null ? null : source.appendExt === true,
+    extra: strMap(source.extra),
+    headers: strMap(source.headers),
+    resultUrl: str(source.resultUrl),
+    resultId: str(source.resultId),
+    timeoutSec: Number(source.timeoutSec) > 0 ? Math.max(10, Math.min(3600, Number(source.timeoutSec))) : 0,
   };
 }
 
@@ -318,7 +359,70 @@ function normalizeUpload(input) {
     resultUrl: source.resultUrl === undefined ? base.resultUrl : str(source.resultUrl),
     resultId: source.resultId === undefined ? base.resultId : str(source.resultId),
     timeoutSec: Math.max(10, Math.min(3600, Number(source.timeoutSec) || base.timeoutSec)),
+    appendExt: source.appendExt === true,
+    audio: normalizeUploadKind(source.audio),
+    video: normalizeUploadKind(source.video),
   };
+}
+
+// 这次要传的这个素材，该用哪一套上传设置。
+// 按类型单独配了路径就用它（没填的字段回落到通用设置），否则整套都用通用的。
+// 为什么要这么分：图片图床（picui.cn 之类）只收图片，音频 / 视频会直接
+// 返回「不支持的文件类型」，可图片走它又确实比别的图床稳。
+function uploadSpecFor(channel, kind) {
+  const base = channel && channel.upload;
+  if (!base || base.enabled !== true) return base;
+  const one = base[kind];
+  if (!one || typeof one !== 'object') return base;
+  const path = str(one.path).trim();
+  if (!path) return base;
+  const merged = Object.assign({}, base, {});
+  ['path', 'method', 'contentType', 'field', 'resultUrl', 'resultId'].forEach(function (key) {
+    const value = one[key];
+    if (value === undefined || value === null || value === '' || value === 0) return;
+    merged[key] = value;
+  });
+  if (one.timeoutSec > 0) merged.timeoutSec = one.timeoutSec;
+  if (one.appendExt === true || one.appendExt === false) merged.appendExt = one.appendExt;
+  merged.extra = Object.assign({}, base.extra || {}, one.extra || {});
+  merged.headers = Object.assign({}, base.headers || {}, one.headers || {});
+  return merged;
+}
+
+// 只收图片的常见图床：配置里选中它们却又要传音频 / 视频时，提前提醒一句，
+// 别等生成时才看到「不支持的文件类型」。
+const IMAGE_ONLY_UPLOAD_HOSTS = ['picui.cn'];
+
+function uploadHostKindWarning(channel) {
+  const upload = channel && channel.upload;
+  if (!upload || upload.enabled !== true) return '';
+  const path = str(upload.path);
+  if (!/^https?:\/\//i.test(path)) return '';
+  let host = '';
+  try {
+    host = new URL(path).host;
+  } catch (error) {
+    return '';
+  }
+  const imageOnly = IMAGE_ONLY_UPLOAD_HOSTS.some(function (one) {
+    return host === one || host.endsWith('.' + one);
+  });
+  if (!imageOnly) return '';
+  const limits = channel.refLimits || {};
+  const wants = ['audio', 'video'].filter(function (kind) {
+    const one = limits[kind] || {};
+    const max = one.maxCount === undefined ? -1 : Number(one.maxCount);
+    if (max === 0) return false;
+    const own = upload[kind];
+    const ownPath = own && typeof own === 'object' ? str(own.path).trim() : '';
+    return !ownPath;
+  });
+  if (!wants.length) return '';
+  const label = wants.map(function (kind) { return kind === 'audio' ? '音频' : '视频'; }).join(' / ');
+  return (
+    '上传图床 ' + host + ' 只收图片，参考' + label + '会被拒（返回「不支持的文件类型」）。' +
+    '请在「参考素材：先上传再引用」里给' + label + '单独填一个支持' + label + '的上传地址。'
+  );
 }
 
 function defaultModels() {
@@ -606,6 +710,12 @@ function inspectChannel(channel) {
       });
     }
   });
+  // 图床只收图片却要传音频 / 视频：能存下来，但一带音频生成就会失败
+  const uploadWarning = uploadHostKindWarning(c);
+  if (uploadWarning) {
+    notices.push({ field: 'upload.path', label: '上传图床', detail: uploadWarning });
+  }
+
   // 列表接口开着却没写路径
   const lists = c.lists && typeof c.lists === 'object' ? c.lists : {};
   if (lists.enabled !== false && !str(lists.path).trim()) {
@@ -1454,6 +1564,9 @@ module.exports = {
   normalizeFaceProcessing,
   faceProcessingFor,
   normalizeUpload,
+  normalizeUploadKind,
+  defaultUploadKind,
+  uploadSpecFor,
   normalizeLimits,
   defaultChannel,
   defaultApiSpec,

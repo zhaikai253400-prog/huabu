@@ -43,6 +43,10 @@ const SECRET_MAPS = [
   'video.headers',
   'audio.headers',
   'upload.headers',
+  // 「按类型单独上传」里也能填请求头（多半是图床的 token），同样按密钥处理，
+  // 否则 config.json 里会留下一条明文 token。
+  'upload.audio.headers',
+  'upload.video.headers',
 ];
 
 let cachedKey = null;

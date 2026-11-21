@@ -79,6 +79,35 @@
     resultUrl: 'data.url',
     resultId: 'data.id',
     timeoutSec: 300,
+    appendExt: false,
+    audio: DEFAULT_UPLOAD_KIND(),
+    video: DEFAULT_UPLOAD_KIND(),
+  };
+  // 「按类型单独上传」的空白模板：路径留空 = 跟随上面的通用设置
+  function DEFAULT_UPLOAD_KIND() {
+    return {
+      path: '',
+      method: '',
+      contentType: '',
+      field: '',
+      appendExt: null,
+      extra: {},
+      headers: {},
+      resultUrl: '',
+      resultId: '',
+      timeoutSec: 0,
+    };
+  }
+  // 常被用到的图床预设：一键把「路径 / 取值路径 / 字段名」填对。
+  // 只填调用方指定的那几个字段，别的保持原样（用户可能已经配了附加参数）。
+  const UPLOAD_PRESETS = [
+    { value: '', label: '（不用预设，自己填）' },
+    { value: 'picui', label: 'PicUI（只收图片）' },
+    { value: 'kappa', label: 'kappa.lol（图片 / 视频 / 音频，100 MB）' },
+  ];
+  const UPLOAD_PRESET_VALUES = {
+    picui: { path: 'https://picui.cn/api/v1/upload', field: 'file', resultUrl: 'data.links.url', resultId: '', appendExt: false },
+    kappa: { path: 'https://kappa.lol/api/upload', field: 'file', resultUrl: 'link', resultId: '', appendExt: true },
   };
   const DEFAULT_SIZE_MAP = {
     '1K': { '16:9': '1280x720', '9:16': '720x1280', '1:1': '1024x1024', '4:3': '1152x864', '3:4': '864x1152' },
@@ -1277,6 +1306,122 @@
         '传完之后下单模板里可以用 {{refIds}} {{refUploadUrls}} {{refImageIds}} {{refVideoIds}} {{refAudioIds}}；没上传或没拿到地址时，{{refs}} 系列仍然装的是素材内容本身。'
       )
     );
+
+    // ---- 按类型单独上传 ----
+    // 现实里图片图床（picui.cn 这类）只收图片，音频 / 视频一律返回「不支持的文件类型」。
+    // 所以音频 / 视频可以各自另填一个上传接口，留空就继续用上面那一套。
+    ['audio', 'video'].forEach((kind) => {
+      if (!upload[kind] || typeof upload[kind] !== 'object') upload[kind] = DEFAULT_UPLOAD_KIND();
+      const one = upload[kind];
+      const box = el('details', 'ch-subupload');
+      if (one.path) box.open = true;
+      const sum = el('summary');
+      sum.appendChild(el('span', 'ch-subupload-name', KIND_TEXT[kind] + '单独上传'));
+      sum.appendChild(
+        el('span', 'ch-subupload-state' + (one.path ? ' on' : ''), one.path ? '已单独配置' : '跟随上面的设置')
+      );
+      box.appendChild(sum);
+      const inner = el('div', 'ch-subupload-body');
+      inner.appendChild(
+        hintRow(
+          '上面的图床如果只收图片，把' + KIND_TEXT[kind] + '在这里单独配一个能收' + KIND_TEXT[kind] +
+            '的地址；路径留空就还是用上面的。'
+        )
+      );
+      const presetRow = el('div', 'grid-2');
+      presetRow.appendChild(
+        fieldRow(
+          '快速预设',
+          makeSelect('', UPLOAD_PRESETS, (v) => {
+            const preset = UPLOAD_PRESET_VALUES[v];
+            if (preset) Object.keys(preset).forEach((key) => { one[key] = preset[key]; });
+            queueSave(true);
+            render();
+          })
+        )
+      );
+      presetRow.appendChild(
+        fieldRow(
+          '上传路径',
+          makeText(one.path, (v) => { one.path = v; queueSave(); }, 'https://图床域名/api/upload')
+        )
+      );
+      inner.appendChild(presetRow);
+      const row2 = el('div', 'grid-3');
+      row2.appendChild(fieldRow('文件字段名', makeText(one.field, (v) => { one.field = v; queueSave(); }, 'file')));
+      row2.appendChild(
+        fieldRow('地址取值路径', makeText(one.resultUrl, (v) => { one.resultUrl = v; queueSave(); }, 'data.links.url'))
+      );
+      row2.appendChild(
+        fieldRow('编号取值路径', makeText(one.resultId, (v) => { one.resultId = v; queueSave(); }, 'data.id'))
+      );
+      inner.appendChild(row2);
+      const row3 = el('div', 'grid-3');
+      row3.appendChild(
+        fieldRow(
+          '上传方式',
+          makeSelect(
+            one.contentType || '',
+            [{ value: '', label: '跟随上面的设置' }].concat(UPLOAD_TYPES),
+            (v) => { one.contentType = v; queueSave(); }
+          )
+        )
+      );
+      row3.appendChild(
+        fieldRow(
+          '方法',
+          makeSelect(
+            one.method || '',
+            [{ value: '', label: '跟随上面的设置' }].concat(METHODS),
+            (v) => { one.method = v; queueSave(); }
+          )
+        )
+      );
+      row3.appendChild(
+        fieldRow(
+          '超时（秒，0 = 跟随）',
+          makeNumber(one.timeoutSec, (v) => { one.timeoutSec = Number(v) || 0; queueSave(); }, 0, 3600)
+        )
+      );
+      inner.appendChild(row3);
+      inner.appendChild(
+        makeCheckbox(
+          '返回的地址没带扩展名时，按真实文件后缀补上（有的平台靠后缀认格式）',
+          one.appendExt === true,
+          (checked) => { one.appendExt = checked; queueSave(true); }
+        )
+      );
+      // 试传：当场验一次「这个图床收不收这类素材」，不产生生成费用。
+      const testRow = el('div', 'ch-subupload-test');
+      const testBtn = el('button', null, '试传一个' + KIND_TEXT[kind]);
+      const testOut = el('div', 'ch-subupload-result');
+      testBtn.title = '用一个 1 秒的样例文件传一次，只验格式收不收，不调用生成模型';
+      testBtn.addEventListener('click', async () => {
+        testBtn.disabled = true;
+        testOut.className = 'ch-subupload-result';
+        testOut.textContent = '正在试传…';
+        try {
+          const res = await window.api.testChannelUpload({ channel: channel, kind: kind });
+          if (res && res.ok) {
+            testOut.className = 'ch-subupload-result ok';
+            testOut.textContent = '可以传' + KIND_TEXT[kind] + '（' + (res.host || '图床') + '）' + (res.url ? '：' + res.url : '');
+          } else {
+            testOut.className = 'ch-subupload-result bad';
+            testOut.textContent = '传不上去：' + ((res && res.reason) || '未知原因');
+          }
+        } catch (error) {
+          testOut.className = 'ch-subupload-result bad';
+          testOut.textContent = '试传失败：' + error.message;
+        } finally {
+          testBtn.disabled = false;
+        }
+      });
+      testRow.appendChild(testBtn);
+      testRow.appendChild(testOut);
+      inner.appendChild(testRow);
+      box.appendChild(inner);
+      body.appendChild(box);
+    });
     body.appendChild(
       makeCheckbox(
         '参考图本来就是公网 HTTPS 地址时，直接透传（不再下载→压缩→上传）',

@@ -957,6 +957,25 @@ async function handleApi(req, res, pathname, query) {
     }
   }
 
+  // 试传：只验「这个图床收不收这类素材」，不产生任何生成费用。
+  // 用户带参考音频报错时，不用猜是通道没接好还是图床不收，点一下就知道。
+  if (pathname === '/api/channels/test-upload' && method === 'POST') {
+    const body = await readBody(req);
+    const channel = channels.normalizeChannel(body.channel);
+    const kind = String(body.kind || 'audio');
+    try {
+      const result = await generate.testRefUpload(channel, kind);
+      log(
+        (result.ok ? '试传成功：' : '试传失败：') +
+          (channel.name || '通道') + ' · ' + result.kindName + (result.ok ? '' : '，' + result.reason)
+      );
+      return sendJson(res, 200, result);
+    } catch (error) {
+      log('试传失败：' + error.message);
+      return sendJson(res, 400, { error: error.message });
+    }
+  }
+
   if (pathname === '/api/channels/test-image' && method === 'POST') {
     const body = await readBody(req);
     try {

@@ -338,6 +338,8 @@
     // 画布左侧「通道状态」面板用：只读汇总，服务端不回传密钥
     channelStatus: (fresh) => request('GET', '/api/channel-status' + (fresh ? '?fresh=1' : '')),
     testChannelImage: (payload) => request('POST', '/api/channels/test-image', payload),
+    // 试传：只验图床收不收这类素材，不产生生成费用
+    testChannelUpload: (payload) => request('POST', '/api/channels/test-upload', payload),
     testChannelVideo: (payload) => request('POST', '/api/channels/test-video', payload),
     preflight: (payload) => request('POST', '/api/preflight', payload),
     generate: (payload) => request('POST', '/api/generate', payload),

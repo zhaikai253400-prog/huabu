@@ -3023,6 +3023,40 @@ body.connecting .node.connect-target .port.in {
   .grid-2 > *, .grid-3 > * { flex: 1 1 0; min-width: 0; }
 }
 
+/* 「按类型单独上传」折叠块：默认收起，省掉一点视觉噪音；配过路径的自动展开 */
+.ch-subupload {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.ch-subupload > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+  list-style: none;
+}
+.ch-subupload > summary::-webkit-details-marker { display: none; }
+.ch-subupload > summary::before { content: '▸'; color: var(--muted); font-size: 0.9em; }
+.ch-subupload[open] > summary::before { content: '▾'; }
+.ch-subupload-name { font-weight: 600; }
+.ch-subupload-state {
+  margin-left: auto;
+  font-size: 0.85em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.ch-subupload-state.on { color: var(--ok); border-color: var(--ok); }
+.ch-subupload-body { display: flex; flex-direction: column; gap: 8px; padding: 8px 0 2px; }
+.ch-subupload-test { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ch-subupload-result { font-size: 0.85em; color: var(--muted); word-break: break-all; }
+.ch-subupload-result.ok { color: var(--ok); }
+.ch-subupload-result.bad { color: var(--danger); }
+
 .channel-notice { font-size: 0.85em; color: var(--muted); word-break: break-word; }
 .channel-notice.ok { color: var(--ok); }
 .channel-notice.bad { color: var(--danger); }
