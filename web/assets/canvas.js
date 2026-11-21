@@ -3321,6 +3321,52 @@
   // 松手后吞掉 click，只播放不位移的原地点击。
   const mediaGuard = { moved: false, startX: 0, startY: 0, el: null };
 
+  // 已经生成好内容的图片 / 视频卡片：单击才打开提示词栏，双击直接在画布上方放大。
+  //
+  // 难点是一次双击浏览器会先发两组 pointerdown / pointerup，再发一次 dblclick。
+  // 如果按下就 setExpanded()，双击时提示词栏会先闪出来、再被放大窗盖住，
+  // 关掉放大窗后底下还留着面板 —— 正是用户说的「双击不该弹提示词栏」。
+  //
+  // 所以对这类卡片，按下时只选中（层级立刻提上来，不会有延迟感），
+  // 展开动作押后到 EXPAND_CLICK_DELAY 之后；这期间来了第二下（双击），就取消展开。
+  const EXPAND_CLICK_DELAY = 200;
+  let pendingExpandTimer = 0;
+  let pendingExpandId = '';
+
+  function cancelPendingExpand() {
+    if (pendingExpandTimer) {
+      window.clearTimeout(pendingExpandTimer);
+      pendingExpandTimer = 0;
+    }
+    pendingExpandId = '';
+  }
+
+  function scheduleExpand(node) {
+    if (!node) return;
+    // 上一下还没落地就换了一张卡：后一次为准
+    cancelPendingExpand();
+    pendingExpandId = node.id;
+    pendingExpandTimer = window.setTimeout(() => {
+      pendingExpandTimer = 0;
+      const id = pendingExpandId;
+      pendingExpandId = '';
+      // 这期间卡片被删了 / 已经展开过了 / 被别处收起：都不再补开
+      if (!id || !byId(id)) return;
+      if (expandedId === id) return;
+      if (!selection.has(id)) return;
+      setExpanded(id);
+    }, EXPAND_CLICK_DELAY);
+  }
+
+  // 这张卡片双击会不会走「放大查看」（决定要不要押后展开）
+  function canZoomNode(node, data) {
+    if (!node || node.type === 'director') return false;
+    const result = data && data.result;
+    if (!result || !result.url) return false;
+    const kind = result.kind || presetOf(node.type).media;
+    return kind === 'image' || kind === 'video';
+  }
+
   function armMediaClickGuard(el, event) {
     mediaGuard.moved = false;
     mediaGuard.el = el;
@@ -3448,12 +3494,18 @@
 
     el.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return;
+      // 换了一张卡在点：上一张押后的展开立刻作废
+      if (pendingExpandId && pendingExpandId !== node.id) cancelPendingExpand();
       // 点在视频 / 音频本体上：照样能拖动卡片。真拉开距离时把点击吞掉，
       // 避免松手顺带触发播放控件；原地松开则交给播放器处理。
       if (event.target.closest && event.target.closest('video, audio')) {
         closeMenu();
         if (!selection.has(node.id) || event.shiftKey) selectNode(node.id, event.shiftKey);
-        if (!event.shiftKey) setExpanded(node.id);
+        // 双击要放大查看，不能先把提示词栏弹出来：押后一拍再展开
+        if (!event.shiftKey) {
+          if (canZoomNode(node, data)) scheduleExpand(node);
+          else setExpanded(node.id);
+        }
         armMediaClickGuard(el, event);
         startDrag(event, node);
         return;
@@ -3500,8 +3552,11 @@
       openNodeMenu(event.clientX, event.clientY);
     });
 
-    // 双击图片 / 视频卡片：在画布上方放大查看；音频和空卡片不响应
+    // 双击图片 / 视频卡片：只放大查看，不弹提示词栏；音频和空卡片不响应
     el.addEventListener('dblclick', (event) => {
+      // 双击的第一下已经排了个「稍后展开面板」，这里必须撤掉，
+      // 否则放大窗盖上去的同时底下还悄悄弹出提示词栏。
+      cancelPendingExpand();
       // 拖拽会接管指针，双击的落点有时会变成整张卡片；
       // 这里只排除提示词、按钮、端口和缩放手柄，避免编辑时误开放大窗。
       const ignore = event.target.closest && event.target.closest('.node-panel, .node-title-tag, .node-index, .node-rename, .port, .resize-handle, .node-video-bar, .node-audio-bar');
@@ -3522,6 +3577,8 @@
       if (kind !== 'image' && kind !== 'video') return;
       event.preventDefault();
       event.stopPropagation();
+      // 面板本来开着（用户先单击看过提示词）也要收起来：双击的语义是「看大图」
+      if (expandedId === node.id) setExpanded(null);
       openMediaLightbox(node, data, kind);
     });
 
@@ -10648,6 +10705,8 @@
   // 只展开选中的那一张；展开的卡片临时浮到最上面，面板才不会被别的卡片压住
   function setExpanded(id) {
     const next = id || null;
+    // 收起面板（点空白 / Esc / 点工具栏）：刚才单击押下的那次展开也不该再补上
+    if (!next) cancelPendingExpand();
     if (expandedId === next) {
       const same = expandedId ? elements.get(expandedId) : null;
       if (same) same.classList.toggle('wide', promptWideOn(byId(expandedId)));
@@ -10788,6 +10847,7 @@
   }
 
   function clearSelection() {
+    cancelPendingExpand();
     selection.clear();
     selectedEdgeId = null;
     expandedId = null;
@@ -12912,6 +12972,8 @@
       let dy = (moveEvent.clientY - startY) / viewport.zoom;
       if (!moved && Math.abs(dx) + Math.abs(dy) > 1) {
         moved = true;
+        // 拖起来了就不是「单击」：押后的展开要撤掉，否则松手后突然弹出面板
+        cancelPendingExpand();
         beginOnce();
         bringNodeToFront(node.id);
         pushHistory();
@@ -12950,9 +13012,12 @@
           refreshSelection();
           return;
         }
-        // 点一下（没有拖动）＝ 选中这一张并展开它的编辑面板
+        // 点一下（没有拖动）＝ 选中这一张并展开它的编辑面板。
+        // 图片 / 视频卡片押后一拍：紧接着再来一下（双击）就只放大、不弹面板。
+        // 选中本来就发生在按下那一刻，所以这里的延后不影响到层级和选中观感。
         selectNode(node.id, false);
-        setExpanded(node.id);
+        if (canZoomNode(node, nodeData(node))) scheduleExpand(node);
+        else setExpanded(node.id);
         return;
       }
       // 组里的卡片：拖到框外才算移出，留在框内就滑回原来的槽位
@@ -14506,6 +14571,7 @@
 
     viewportEl.addEventListener('dblclick', (event) => {
       if (event.target !== viewportEl && event.target !== worldEl) return;
+      cancelPendingExpand();
       openTypeMenu(event.clientX, event.clientY, toWorld(event.clientX, event.clientY));
     });
 
