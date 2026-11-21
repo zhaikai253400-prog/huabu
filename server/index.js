@@ -781,8 +781,11 @@ async function handleApi(req, res, pathname, query) {
       // 分两个池子了，日志要把两边都报出来，否则"只有 1 套"会让人以为图片那套没存上
       const vPool = configStore.tailPoolOfConfig(config, 'video');
       const iPool = configStore.tailPoolOfConfig(config, 'image');
-      log('尾部提示词已更新：视频 ' + vPool.presets.length + ' 套 / 图片 ' + iPool.presets.length +
-        ' 套，' + (config.tailPrompts.enabled ? '启用' : '关闭'));
+      // 两组的开关各自独立，日志要把两边都报出来 —— 只说"启用 / 关闭"会让人以为还是一句话管两组
+      log('尾部提示词已更新：视频 ' + vPool.presets.length + ' 套（' +
+        (configStore.tailGroupEnabledOf(config, 'video') ? '开' : '关') + '） / 图片 ' +
+        iPool.presets.length + ' 套（' +
+        (configStore.tailGroupEnabledOf(config, 'image') ? '开' : '关') + '）');
     }
     if (body.lan !== undefined) {
       const before = Boolean(config.lan && config.lan.enabled);

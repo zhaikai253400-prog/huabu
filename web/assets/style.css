@@ -626,6 +626,107 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   box-shadow: 0 0 0 2px var(--float);
 }
 
+
+/* ------------------- 尾部提示词浮层（视频 / 图片各一个开关） ------------------- */
+/* 左侧按钮已经够挤了，所以这里用一个小浮层，而不是再加两个常驻按钮。
+   浮层贴左侧工具栏展开，点外面或 Esc 关掉。 */
+.tail-pop {
+  position: fixed;
+  left: calc(var(--rail-btn-size, 42px) + 34px);
+  z-index: 120;
+  width: 264px;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(8, 14, 26, 0.28);
+  opacity: 0;
+  transform: translateX(-6px) scale(0.98);
+  transform-origin: left top;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.tail-pop.open { opacity: 1; transform: none; }
+
+.tail-pop-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px 8px;
+}
+.tail-pop-title { font-size: 0.95em; font-weight: 600; }
+.tail-pop-sub { font-size: 0.78em; color: var(--muted); }
+
+.tail-pop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 6px;
+  border-radius: 8px;
+}
+.tail-pop-row:hover { background: var(--surface-2); }
+
+.tail-pop-mark {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 0.72em;
+}
+.tail-pop-row.on .tail-pop-mark { background: var(--accent-soft); color: var(--accent); }
+
+.tail-pop-info { flex: 1 1 auto; min-width: 0; }
+.tail-pop-name { font-size: 0.9em; }
+.tail-pop-state { font-size: 0.76em; color: var(--muted); margin-top: 1px; }
+.tail-pop-row.on .tail-pop-state { color: var(--accent); }
+
+/* 开关：纯 CSS 滑块，不依赖任何组件库 */
+.tail-pop-switch {
+  flex: 0 0 auto;
+  position: relative;
+  width: 34px;
+  height: 19px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-3);
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+.tail-pop-switch .tail-pop-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 0.16s ease;
+}
+.tail-pop-row.on .tail-pop-switch {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.tail-pop-row.on .tail-pop-switch .tail-pop-knob { transform: translateX(15px); }
+.tail-pop-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.tail-pop-manage {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  font-size: 0.76em;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.tail-pop-manage:hover { border-color: var(--accent); color: var(--accent); }
+
 .rail-btn .rail-dot {
   position: absolute;
   right: 5px;
@@ -636,6 +737,11 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   border-radius: 50%;
   background: currentColor;
 }
+
+/* 尾部提示词有两个开关，就用两个点分开表示：
+   左上 = 视频组，右下 = 图片组。两点各亮各的，一眼看出谁开着。 */
+.rail-btn .rail-dot-video { right: 11px; bottom: 4px; }
+.rail-btn .rail-dot-image { right: 4px; bottom: 4px; }
 
 /* 底部保存状态：缩成一个小圆点，鼠标移上去才说存没存上 */
 .rail-foot {
@@ -5598,6 +5704,42 @@ input::placeholder { color: var(--placeholder); }
 }
 
 .tail-version-warn b { font-weight: 700; }
+
+/* 顶部摘要：视频 / 图片两个开关状态，一眼看到谁开着 */
+.tail-master-summary { display: flex; gap: 6px; flex-wrap: wrap; }
+.tail-sum-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+.tail-sum-chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 当前这一组自己的开关：跟着 tab 走，切到哪组就管哪组 */
+.tail-group-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.tail-group-switch .set-hint { font-size: 0.8em; }
+
+/* 关掉的那一组在 tab 上也能看出来 */
+.tail-tab.off { opacity: 0.62; }
 
 .tail-switch {
   display: inline-flex;

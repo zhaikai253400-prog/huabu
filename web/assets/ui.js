@@ -78,9 +78,14 @@
   let submitCompress = { enabled: true };
   // 尾部提示词：按类型分成两个池子（视频 / 图片），互不相通。
   // 每套预设只存名字和正文，卡片只记「用哪一套」。
+  // 视频组默认开（常用）、图片组默认关（不常用，需要时单独打开）。
+  // 这只影响全新安装；已有配置按 normalizeTailPresets 迁移，不会被动到。
   let tailPrompts = {
     enabled: true,
-    groups: { video: { defaultId: '', presets: [] }, image: { defaultId: '', presets: [] } },
+    groups: {
+      video: { enabled: true, defaultId: '', presets: [] },
+      image: { enabled: false, defaultId: '', presets: [] },
+    },
   };
   // 设置面板当前在编辑哪一组
   let tailEditingGroup = 'video';
@@ -100,8 +105,8 @@
     image: { label: '图片', hint: '图片卡用这一组。写构图、画风、光影、画幅这类对出图有意义的描述；别把视频的音频规则写进来。' },
   };
 
-  function emptyTailGroup() {
-    return { defaultId: '', presets: [] };
+  function emptyTailGroup(enabled) {
+    return { enabled: enabled !== false, defaultId: '', presets: [] };
   }
 
   // 归一：既认新结构（groups），也认老结构（扁平 presets → 全部归 video 池）。
@@ -127,15 +132,27 @@
       if (defaultId && !presets.some((one_) => one_.id === defaultId)) defaultId = presets.length ? presets[0].id : '';
       return { defaultId: defaultId, presets: presets };
     };
+    // 顶层 enabled 是 2 版「一个开关管两组」留下的；3 版起每组各有一个。
+    // 迁移：某组没写自己的 enabled 就沿用顶层 —— 升级后行为与之前完全一致。
+    const legacyEnabled = raw.enabled !== false;
+    const enabledOf = (src) =>
+      src && typeof src === 'object' && typeof src.enabled === 'boolean' ? src.enabled : legacyEnabled;
     const groups = { video: emptyTailGroup(), image: emptyTailGroup() };
     if (raw.groups && typeof raw.groups === 'object') {
       groups.video = one(raw.groups.video);
       groups.image = one(raw.groups.image);
+      groups.video.enabled = enabledOf(raw.groups.video);
+      groups.image.enabled = enabledOf(raw.groups.image);
     } else {
-      // 老结构：那时只有视频 / 快速视频支持尾部提示词，所以全部归 video 池
+      // 老结构：那时只有视频 / 快速视频支持尾部提示词，所以全部归 video 池。
+      // 只有一个开关，两组都跟着它，升级前后行为不变。
       groups.video = one(raw);
+      groups.image = one(null);
+      groups.video.enabled = legacyEnabled;
+      groups.image.enabled = legacyEnabled;
     }
-    return { enabled: raw.enabled !== false, groups: groups };
+    // 顶层 enabled 只当 video 组的兼容视图，老调用方读它仍然有意义
+    return { enabled: groups.video.enabled, groups: groups };
   }
 
   function cloneTailPrompts(value) {
@@ -187,7 +204,7 @@
   // 不一致说明"页面是新的、服务进程还是旧的"（或反之）。
   // 这种时候**不能盲目保存** —— 2026-11-08 就是这么把用户那套 335 字的预设清空的：
   // 新前端发 {enabled, groups}，旧服务端只认扁平 presets，于是读成空并落盘。
-  const TAIL_SCHEMA_VERSION = 2;
+  const TAIL_SCHEMA_VERSION = 3;
   let tailSchemaMismatch = false;
 
   function applyStatus(status) {
@@ -860,7 +877,8 @@
     tailPanelEl = null;
   }
 
-  function openTailPromptsPanel() {
+  function openTailPromptsPanel(group) {
+    if (group) tailEditingGroup = tailGroupOf(group);
     if (tailPanelEl) return closeTailPanel();
     const draft = cloneTailPrompts(tailPrompts);
     const mask = document.createElement('div');
@@ -871,8 +889,13 @@
       '    <button class="ghost" data-close>关闭</button></div>' +
       '  <div class="modal-body tail-body">' +
       '    <div class="tail-master">' +
-      '      <label class="tail-switch"><input type="checkbox" id="tail-enabled" /><span>启用尾部提示词</span></label>' +
-      '      <div class="set-hint">关掉后所有卡片都不再追加尾部文字。卡片上自己的开关会保留，下次打开总开关仍然按卡片的选择走。</div>' +
+      '      <div class="tail-master-summary" id="tail-summary"></div>' +
+      '      <div class="set-hint">视频和图片<b>各有一个开关</b>，互不影响。关掉哪一组，就只有那一类卡片不再追加；卡片上自己的选择会保留，重新打开就会恢复。</div>' +
+      '    </div>' +
+      '    <div class="tail-group-switch">' +
+      '      <label class="tail-switch"><input type="checkbox" id="tail-group-enabled" />' +
+      '        <span id="tail-group-enabled-label">启用本组</span></label>' +
+      '      <span class="set-hint" id="tail-group-enabled-hint"></span>' +
       '    </div>' +
       // 版本不一致的红条：默认不显示，打开面板时按实际状态决定
       '    <div class="tail-version-warn" id="tail-version-warn" hidden>' +
@@ -897,11 +920,14 @@
     tailPanelEl = mask;
 
     const listEl = mask.querySelector('#tail-list');
-    const enabledEl = mask.querySelector('#tail-enabled');
+    const groupEnabledEl = mask.querySelector('#tail-group-enabled');
+    const groupEnabledLabel = mask.querySelector('#tail-group-enabled-label');
+    const groupEnabledHint = mask.querySelector('#tail-group-enabled-hint');
+    const summaryEl = mask.querySelector('#tail-summary');
     const savedEl = mask.querySelector('#tail-saved');
     const tabsEl = mask.querySelector('#tail-tabs');
     const tabHintEl = mask.querySelector('#tail-tab-hint');
-    enabledEl.checked = draft.enabled;
+
     // 版本不一致时直接把红条亮出来（保存按钮也会拒绝），
     // 免得用户点半天才发现存不上、或者更糟——把预设写空。
     const warnEl = mask.querySelector('#tail-version-warn');
@@ -915,16 +941,41 @@
     // 当前编辑的那一组（引用，直接改 draft.groups[group]）
     const groupOf = () => draft.groups[tailGroupOf(tailEditingGroup)];
 
+    // 顶部摘要 + 当前这一组自己的开关
+    const paintGroupState = () => {
+      const g = tailGroupOf(tailEditingGroup);
+      const meta = TAIL_GROUP_META[g];
+      const on = draft.groups[g].enabled !== false;
+      if (groupEnabledEl) groupEnabledEl.checked = on;
+      if (groupEnabledLabel) groupEnabledLabel.textContent = '启用' + meta.label + '尾部提示词';
+      if (groupEnabledHint) {
+        groupEnabledHint.textContent = on
+          ? meta.label + '卡片生成时会按各自的选择追加预设文字'
+          : meta.label + '卡片一律不追加（另一组不受影响）';
+      }
+      if (summaryEl) {
+        const v = draft.groups.video.enabled !== false;
+        const i = draft.groups.image.enabled !== false;
+        summaryEl.innerHTML =
+          '<span class="tail-sum-chip' + (v ? ' on' : '') + '">视频 ' + (v ? '开' : '关') + '</span>' +
+          '<span class="tail-sum-chip' + (i ? ' on' : '') + '">图片 ' + (i ? '开' : '关') + '</span>';
+      }
+    };
+
     const paintTabs = () => {
       Array.from(tabsEl.querySelectorAll('.tail-tab')).forEach((tab) => {
         const g = tailGroupOf(tab.dataset.group);
         const count = draft.groups[g].presets.length;
-        tab.textContent = TAIL_GROUP_META[g].label + (count ? '（' + count + '）' : '');
+        const on = draft.groups[g].enabled !== false;
+        // 标签上直接标出「开 / 关」，不用切过去才知道
+        tab.textContent = TAIL_GROUP_META[g].label + (count ? '（' + count + '）' : '') + (on ? '' : ' · 关');
         tab.classList.toggle('on', g === tailGroupOf(tailEditingGroup));
+        tab.classList.toggle('off', !on);
         // 图片卡那一组还没建过预设时给个提示点，免得用户以为坏了
         tab.classList.toggle('empty', count === 0);
       });
       tabHintEl.textContent = TAIL_GROUP_META[tailGroupOf(tailEditingGroup)].hint;
+      paintGroupState();
     };
 
     const render = () => {
@@ -1014,6 +1065,15 @@
       render();
     });
 
+    // 本组开关：只改当前编辑的这一组，另一组原样不动
+    if (groupEnabledEl) {
+      groupEnabledEl.addEventListener('change', () => {
+        const g = tailGroupOf(tailEditingGroup);
+        draft.groups[g].enabled = groupEnabledEl.checked;
+        paintTabs();
+      });
+    }
+
     mask.querySelector('#tail-add').addEventListener('click', () => {
       const group = groupOf();
       const isImage = tailGroupOf(tailEditingGroup) === 'image';
@@ -1038,13 +1098,16 @@
         return;
       }
       const cleaned = normalizeTailPresets({
-        enabled: enabledEl.checked,
+        // 顶层 enabled 只作兼容视图（= 视频组），真正的开关在每组里
+        enabled: draft.groups.video.enabled !== false,
         groups: {
           video: {
+            enabled: draft.groups.video.enabled !== false,
             defaultId: draft.groups.video.defaultId,
             presets: draft.groups.video.presets.map((one) => ({ id: one.id, name: one.name, text: one.text })),
           },
           image: {
+            enabled: draft.groups.image.enabled !== false,
             defaultId: draft.groups.image.defaultId,
             presets: draft.groups.image.presets.map((one) => ({ id: one.id, name: one.name, text: one.text })),
           },

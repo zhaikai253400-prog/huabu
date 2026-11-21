@@ -525,10 +525,18 @@
     if (!window.UITheme) return fallback;
     const raw = window.UITheme.tailPrompts();
     if (!raw || typeof raw !== 'object') return fallback;
-    const groups = { video: { defaultId: '', presets: [] }, image: { defaultId: '', presets: [] } };
+    // 3 版起每组各有一个开关；缺字段时回落到顶层 enabled，
+    // 这样 2 版留下的配置（一个开关管两组）读进来的行为与升级前完全一致。
+    const legacyEnabled = raw.enabled !== false;
+    const groups = {
+      video: { enabled: legacyEnabled, defaultId: '', presets: [] },
+      image: { enabled: legacyEnabled, defaultId: '', presets: [] },
+    };
     const pick = (group, src) => {
       const value = src && typeof src === 'object' ? src : {};
       return {
+        // 组自己的开关优先；没写过就沿用顶层（迁移不改变行为）
+        enabled: typeof value.enabled === 'boolean' ? value.enabled : legacyEnabled,
         defaultId: String(value.defaultId || ''),
         presets: Array.isArray(value.presets) ? value.presets : [],
       };
@@ -537,15 +545,32 @@
       groups.video = pick('video', raw.groups.video);
       groups.image = pick('image', raw.groups.image);
     } else {
-      // 老结构 → 全部归 video 池（与服务端迁移一致）
+      // 老结构 → 全部归 video 池（与服务端迁移一致），两组都跟着那个唯一开关
       groups.video = pick('video', raw);
+      groups.image = { enabled: legacyEnabled, defaultId: '', presets: [] };
     }
-    return { enabled: raw.enabled !== false, groups: groups };
+    // 顶层 enabled 只当视频组的兼容视图
+    return { enabled: groups.video.enabled, groups: groups };
   }
 
   // 取某一类卡片的池子
   function tailPoolOf(nodeOrType) {
     return tailConfig().groups[tailGroupOf(nodeOrType)] || { defaultId: '', presets: [] };
+  }
+
+  // 某一组自己的开关（视频 / 图片各一个，互不影响）
+  function tailGroupEnabledOf(nodeOrType) {
+    const group = tailGroupOf(nodeOrType);
+    const cfg = tailConfig();
+    const one = cfg.groups[group];
+    return Boolean(one && one.enabled !== false);
+  }
+
+  // 有没有任何一组是开着的（决定左侧按钮要不要亮）
+  // 允许传已经解析好的 cfg，调用方就不必为了这一句再读一遍设置
+  function tailAnyEnabled(cfg) {
+    const one = cfg && cfg.groups ? cfg : tailConfig();
+    return one.groups.video.enabled !== false || one.groups.image.enabled !== false;
   }
 
   function tailPresetById(nodeOrType, id) {
@@ -571,9 +596,9 @@
 
   // 新卡片的初始尾部选择：跟随**自己那一类**的默认预设
   function defaultTailChoice(nodeOrType) {
-    const cfg = tailConfig();
     const pool = tailPoolOf(nodeOrType);
-    if (!cfg.enabled || !pool.defaultId || !tailPresetById(nodeOrType, pool.defaultId)) {
+    // 开关按自己那一类算：图片组关着时，新图片卡不会自动带上尾部提示词
+    if (!tailGroupEnabledOf(nodeOrType) || !pool.defaultId || !tailPresetById(nodeOrType, pool.defaultId)) {
       return { enabled: false, presetId: '' };
     }
     return { enabled: true, presetId: '' };
@@ -4425,7 +4450,12 @@
     const cfg = tailConfig();
     const pool = tailPoolOf(node);
     const isImageCard = tailGroupOf(node) === 'image';
-    if (!cfg.enabled) return '尾部提示词总开关已关闭：所有卡片暂时都不追加，打开总开关后这张卡片的设置会自动恢复。';
+    const groupLabel = isImageCard ? '图片' : '视频';
+    // 开关是按组分的：图片组关着不影响视频卡，所以提示语要指名是哪一组
+    if (!tailGroupEnabledOf(node)) {
+      return groupLabel + '尾部提示词已关闭：这张卡片暂时不会追加，打开左侧「尾部提示词 → ' + groupLabel +
+        '」后会自动恢复。';
+    }
     // 图片卡和视频卡各有各的预设池，所以提示语要说清"你这一类的池子是空的"
     if (!pool.presets.length) {
       return isImageCard
@@ -4471,7 +4501,7 @@
     manage.title = '打开预设面板，新增、修改或删除尾部提示词';
     manage.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (window.UITheme) window.UITheme.openTailPromptsPanel();
+      if (window.UITheme) window.UITheme.openTailPromptsPanel(tailGroupOf(node));
     });
     head.appendChild(manage);
     wrap.appendChild(head);
@@ -13920,39 +13950,250 @@
     button.title = desc;
   }
 
-  // 左侧「尾部提示词」：单击开关总开关，双击管理预设
-  function paintTailPrompts(on) {
-    const button = document.getElementById('btn-tail-prompts');
-    if (!button) return;
-    button.classList.toggle('on', Boolean(on));
-    button.setAttribute('aria-pressed', on ? 'true' : 'false');
-    const dot = document.getElementById('tail-prompts-dot');
-    if (dot) dot.hidden = !on;
-    const desc = on
-      ? '尾部提示词：已启用。生成时会按卡片选择自动追加预设文字。单击关闭，双击管理预设'
-      : '尾部提示词：已关闭。所有卡片暂不追加预设文字。单击启用，双击管理预设';
-    setRailDesc('btn-tail-prompts', desc);
-    button.title = desc;
+  // ---------- 左侧「尾部提示词」：小浮层，视频 / 图片各一个开关 ----------
+  //
+  // 为什么要浮层：视频尾部提示词常用、图片不常用，两者不该共用一个开关；
+  // 但左侧按钮已经够挤了（前面专门优化过一次挤压），再塞一个按钮会更挤。
+  // 所以仍然只有一个入口：单击弹出这个小浮层，两组各一行，各自开关 + 管理预设。
+  let tailPopEl = null;
+  // 侧栏的「鼠标移开一会儿再收」逻辑在 bindRail 里是局部函数。
+  // 浮层挂在 document.body 上，不在侧栏的 DOM 子树里，鼠标从浮层移回画布时
+  // 侧栏收不到 mouseleave。所以把那个函数挂出来给浮层用一下。
+  let railAutoClose = null;
+
+  function tailPopBuild() {
+    const mask = document.createElement('div');
+    mask.className = 'tail-pop';
+    mask.setAttribute('role', 'dialog');
+    mask.setAttribute('aria-label', '尾部提示词开关');
+
+    const head = document.createElement('div');
+    head.className = 'tail-pop-head';
+    head.innerHTML =
+      '<span class="tail-pop-title">尾部提示词</span>' +
+      '<span class="tail-pop-sub">视频和图片分开控制</span>';
+    mask.appendChild(head);
+
+    ['video', 'image'].forEach((group) => {
+      const isImage = group === 'image';
+      const row = document.createElement('div');
+      row.className = 'tail-pop-row';
+      row.dataset.group = group;
+
+      const mark = document.createElement('span');
+      mark.className = 'tail-pop-mark';
+      mark.setAttribute('aria-hidden', 'true');
+      mark.textContent = isImage ? '图' : '▶';
+      row.appendChild(mark);
+
+      const info = document.createElement('div');
+      info.className = 'tail-pop-info';
+      const name = document.createElement('div');
+      name.className = 'tail-pop-name';
+      name.textContent = isImage ? '图片' : '视频';
+      info.appendChild(name);
+      const state = document.createElement('div');
+      state.className = 'tail-pop-state';
+      info.appendChild(state);
+      row.appendChild(info);
+
+      const sw = document.createElement('button');
+      sw.type = 'button';
+      sw.className = 'tail-pop-switch';
+      sw.setAttribute('role', 'switch');
+      sw.dataset.group = group;
+      sw.innerHTML = '<span class="tail-pop-knob"></span>';
+      row.appendChild(sw);
+
+      const manage = document.createElement('button');
+      manage.type = 'button';
+      manage.className = 'tail-pop-manage';
+      manage.dataset.group = group;
+      manage.textContent = '预设';
+      manage.title = '管理' + (isImage ? '图片' : '视频') + '尾部提示词预设';
+      row.appendChild(manage);
+
+      mask.appendChild(row);
+    });
+
+    // 点浮层外面就关掉（和别的浮层一致）
+    mask.addEventListener('pointerdown', (event) => event.stopPropagation());
+    // 鼠标从浮层移回画布：侧栏也该跟着收（移回侧栏时那边会自己取消掉）
+    mask.addEventListener('mouseleave', () => {
+      if (railAutoClose) railAutoClose();
+    });
+    document.body.appendChild(mask);
+    return mask;
   }
 
-  async function toggleTailPrompts() {
-    if (!window.UITheme) return;
-    const button = document.getElementById('btn-tail-prompts');
-    const current = window.UITheme.tailPrompts();
-    const next = !(current && current.enabled !== false);
-    paintTailPrompts(next);
-    if (button) button.disabled = true;
-    try {
-      await window.UITheme.save({ tailPrompts: { ...current, enabled: next } });
-      paintTailPrompts(window.UITheme.tailPrompts().enabled);
-      document.dispatchEvent(new CustomEvent('tail-prompts-changed'));
-      toast(next ? '尾部提示词总开关已打开' : '尾部提示词总开关已关闭：已有卡片的设置会保留');
-    } catch (error) {
-      paintTailPrompts(current && current.enabled !== false);
-      toast('这个开关没存上，请再试一次：' + error.message);
-    } finally {
-      if (button) button.disabled = false;
+  function closeTailPop() {
+    if (!tailPopEl) return;
+    const dying = tailPopEl;
+    tailPopEl = null;
+    dying.classList.remove('open');
+    window.setTimeout(() => dying.remove(), 160);
+    document.removeEventListener('pointerdown', onTailPopOutside, true);
+    document.removeEventListener('keydown', onTailPopKey, true);
+  }
+
+  function onTailPopOutside(event) {
+    if (!tailPopEl) return;
+    if (tailPopEl.contains(event.target)) return;
+    // 点左侧那个按钮本身不算「点外面」：交给按钮自己的点击逻辑（再点一次 = 关）
+    if (event.target.closest && event.target.closest('#btn-tail-prompts')) return;
+    closeTailPop();
+  }
+
+  function onTailPopKey(event) {
+    if (!tailPopEl || event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeTailPop();
+  }
+
+  function paintTailPop() {
+    if (!tailPopEl) return;
+    const cfg = tailConfig();
+    tailPopEl.querySelectorAll('.tail-pop-row').forEach((row) => {
+      const group = row.dataset.group;
+      const pool = cfg.groups[group] || { enabled: true, presets: [] };
+      const on = pool.enabled !== false;
+      row.classList.toggle('on', on);
+      const sw = row.querySelector('.tail-pop-switch');
+      if (sw) {
+        sw.setAttribute('aria-checked', on ? 'true' : 'false');
+        sw.title = on ? '点一下关闭' + (group === 'image' ? '图片' : '视频') + '尾部提示词' : '点一下打开' + (group === 'image' ? '图片' : '视频') + '尾部提示词';
+      }
+      const state = row.querySelector('.tail-pop-state');
+      if (state) {
+        const n = pool.presets.length;
+        state.textContent = (on ? '已开启' : '已关闭') + ' · ' + (n ? n + ' 套预设' : '还没有预设');
+      }
+      const manage = row.querySelector('.tail-pop-manage');
+      if (manage) {
+        manage.disabled = false;
+        manage.title = '管理' + (group === 'image' ? '图片' : '视频') + '尾部提示词的预设（' + pool.presets.length + ' 套）';
+      }
+    });
+  }
+
+  function openTailPop() {
+    if (tailPopEl) return paintTailPop();
+    tailPopEl = tailPopBuild();
+    paintTailPop();
+    // 贴着侧栏右边缘展开，别跑到屏幕中间去。
+    // 侧栏有「一列 / 两列 / 三列」三种排法，宽度不是固定值，所以量一下真实位置。
+    const btn = document.getElementById('btn-tail-prompts');
+    const railGroup = document.querySelector('#rail .rail-group');
+    const btnRect = btn ? btn.getBoundingClientRect() : null;
+    const railRect = railGroup ? railGroup.getBoundingClientRect() : null;
+    if (railRect) {
+      // 留 12px 空隙。双列 / 三列时侧栏比按钮宽，只按按钮算会压住旁边的图标。
+      // 再把右边界收进窗口：窄窗口下宁可贴右边，也不能被裁掉半截。
+      const want = Math.round(railRect.right + 12);
+      const room = window.innerWidth - tailPopEl.offsetWidth - 8;
+      tailPopEl.style.left = Math.max(8, Math.min(want, room)) + 'px';
     }
+    const anchor = btnRect || railRect;
+    const top = anchor
+      ? Math.min(Math.max(8, anchor.top), Math.max(8, window.innerHeight - tailPopEl.offsetHeight - 8))
+      : 100;
+    tailPopEl.style.top = top + 'px';
+    requestAnimationFrame(() => {
+      if (tailPopEl) tailPopEl.classList.add('open');
+    });
+    document.addEventListener('pointerdown', onTailPopOutside, true);
+    document.addEventListener('keydown', onTailPopKey, true);
+
+    // 行内交互只挂一次（元素是新建的，挂在这里就行）
+    tailPopEl.querySelectorAll('.tail-pop-switch').forEach((sw) => {
+      sw.addEventListener('click', (event) => {
+        event.stopPropagation();
+        toggleTailGroup(sw.dataset.group);
+      });
+    });
+    tailPopEl.querySelectorAll('.tail-pop-manage').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        closeTailPop();
+        if (window.UITheme) window.UITheme.openTailPromptsPanel(button.dataset.group);
+      });
+    });
+  }
+
+  // 左侧按钮：有任意一组开着就亮，两个小点分别表示视频 / 图片
+  function paintTailPrompts() {
+    const button = document.getElementById('btn-tail-prompts');
+    if (!button) return;
+    const cfg = tailConfig();
+    const videoOn = cfg.groups.video.enabled !== false;
+    const imageOn = cfg.groups.image.enabled !== false;
+    const anyOn = tailAnyEnabled(cfg);
+    button.classList.toggle('on', anyOn);
+    button.setAttribute('aria-pressed', anyOn ? 'true' : 'false');
+    // 两个小点：左上=视频、右下=图片，各自独立亮
+    const vDot = document.getElementById('tail-prompts-dot');
+    if (vDot) {
+      vDot.hidden = !videoOn;
+      vDot.dataset.group = 'video';
+    }
+    const iDot = document.getElementById('tail-prompts-dot-image');
+    if (iDot) iDot.hidden = !imageOn;
+    const parts = [];
+    parts.push(videoOn ? '视频开' : '视频关');
+    parts.push(imageOn ? '图片开' : '图片关');
+    const desc = '尾部提示词（' + parts.join(' / ') + '）：点一下分别开关视频 / 图片，' +
+      '视频和图片各有自己的预设';
+    setRailDesc('btn-tail-prompts', desc);
+    button.title = desc;
+    paintTailPop();
+  }
+
+  // 切某一组的开关（另一组完全不受影响）
+  async function toggleTailGroup(group) {
+    if (!window.UITheme) return;
+    const key = group === 'image' ? 'image' : 'video';
+    const current = window.UITheme.tailPrompts();
+    const before = tailConfig();
+    if (!before.groups[key]) return;
+    const next = !(before.groups[key].enabled !== false);
+    // 先按新状态亮起来，保存失败再退回去
+    paintTailPromptsOptimistic(key, next);
+    try {
+      // 两组都带上：服务端按整份结构落盘，少传一组会被当成默认值
+      const payload = {
+        enabled: before.groups.video.enabled !== false,
+        groups: {
+          video: {
+            enabled: key === 'video' ? next : before.groups.video.enabled !== false,
+            defaultId: before.groups.video.defaultId,
+            presets: before.groups.video.presets,
+          },
+          image: {
+            enabled: key === 'image' ? next : before.groups.image.enabled !== false,
+            defaultId: before.groups.image.defaultId,
+            presets: before.groups.image.presets,
+          },
+        },
+      };
+      await window.UITheme.save({ tailPrompts: payload });
+      paintTailPrompts();
+      document.dispatchEvent(new CustomEvent('tail-prompts-changed'));
+      const label = key === 'image' ? '图片' : '视频';
+      toast(next ? label + '尾部提示词已打开' : label + '尾部提示词已关闭：已有卡片的设置会保留');
+    } catch (error) {
+      paintTailPrompts();
+      toast('这个开关没存上，请再试一次：' + error.message);
+    }
+  }
+
+  function paintTailPromptsOptimistic(group, on) {
+    if (!tailPopEl) return;
+    const row = tailPopEl.querySelector('.tail-pop-row[data-group="' + group + '"]');
+    if (!row) return;
+    row.classList.toggle('on', on);
+    const sw = row.querySelector('.tail-pop-switch');
+    if (sw) sw.setAttribute('aria-checked', on ? 'true' : 'false');
   }
 
   async function toggleSubmitCompress() {
@@ -14181,6 +14422,8 @@
       closeTimer = 0;
       // 保存失败期间不许自动收起，否则用户刚要去看红点它就缩回去了
       if (saveRailPinned) return;
+      // 侧栏收了，挂在上面的浮层不能留在原地悬空
+      if (typeof closeTailPop === 'function') closeTailPop();
       rail.classList.remove('open');
       page.classList.remove('rail-open');
       tip.classList.remove('show');
@@ -14190,6 +14433,8 @@
       window.clearTimeout(closeTimer);
       closeTimer = window.setTimeout(close, CLOSE_DELAY);
     };
+    // 供「尾部提示词」浮层复用：鼠标离开浮层就按同样的延迟收侧栏
+    railAutoClose = closeSoon;
 
     // 鼠标贴到画布左边缘就弹出来
     document.addEventListener(
@@ -14215,11 +14460,21 @@
       window.clearTimeout(closeTimer);
       closeTimer = 0;
     });
-    rail.addEventListener('mouseleave', closeSoon);
+    // 浮层是侧栏按钮弹出来的，跟着鼠标移进浮层时不能算「离开侧栏」，
+    // 否则手刚伸过去点开关，侧栏连带浮层一起收掉了。
+    rail.addEventListener('mouseleave', (event) => {
+      const to = event.relatedTarget;
+      if (to instanceof Element && to.closest && to.closest('.tail-pop')) return;
+      closeSoon();
+    });
 
     // 键盘 Tab 到工具栏里也要能看见它
     rail.addEventListener('focusin', open);
     rail.addEventListener('focusout', (event) => {
+      // 焦点移到浮层里的开关上也不算离开 —— 浮层挂在 body 上，
+      // 不是 rail 的子树，否则点一下开关就把侧栏和浮层一起收了
+      const to = event.relatedTarget;
+      if (to instanceof Element && to.closest && to.closest('.tail-pop')) return;
       if (!rail.contains(event.relatedTarget)) closeSoon();
     });
 
@@ -14228,6 +14483,9 @@
       const target = event.target;
       if (!(target instanceof Element)) return;
       if (target.closest('.modal-mask')) return;
+      // 侧栏弹出的浮层（尾部提示词开关）也算侧栏的一部分，
+      // 在浮层里点开关不能把侧栏连带浮层一起收掉
+      if (target.closest('.tail-pop')) return;
       if (isOpen() && !rail.contains(target)) closeSoon();
     });
     window.addEventListener('resize', () => {
@@ -17498,25 +17756,16 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     if (submitCompressBtn) submitCompressBtn.addEventListener('click', toggleSubmitCompress);
     const tailBtn = document.getElementById('btn-tail-prompts');
     if (tailBtn) {
-      let tailClickTimer = 0;
-      tailBtn.addEventListener('click', () => {
-        if (tailClickTimer) return;
-        tailClickTimer = window.setTimeout(() => {
-          tailClickTimer = 0;
-          toggleTailPrompts();
-        }, 220);
-      });
-      tailBtn.addEventListener('dblclick', (event) => {
+      // 单击 = 开 / 关小浮层（视频、图片各一行，各自开关）
+      tailBtn.addEventListener('click', (event) => {
         event.preventDefault();
-        if (tailClickTimer) {
-          window.clearTimeout(tailClickTimer);
-          tailClickTimer = 0;
-        }
-        if (window.UITheme) window.UITheme.openTailPromptsPanel();
+        if (tailPopEl) closeTailPop();
+        else openTailPop();
       });
     }
     document.addEventListener('tail-prompts-changed', () => {
-      paintTailPrompts(window.UITheme ? window.UITheme.tailPrompts().enabled : false);
+      // 两组开关状态都可能变了，统一重画（按钮两个小点 + 浮层行内状态）
+      paintTailPrompts();
       if (expandedId) {
         const node = byId(expandedId);
         if (node) refreshNode(node);
@@ -17897,7 +18146,7 @@ const MM_TINTS = { image: '#2f9e6f', video: '#b4552f', audio: '#7a4fd4', group: 
     setMode(mode);
     paintThemeButton(window.UITheme ? window.UITheme.current().theme : 'light');
     paintSubmitCompress(window.UITheme ? window.UITheme.submitCompress().enabled : true);
-    paintTailPrompts(window.UITheme ? window.UITheme.tailPrompts().enabled : false);
+    paintTailPrompts();
     const settingsBtn = document.getElementById('btn-settings');
     if (settingsBtn && window.UITheme) {
       settingsBtn.addEventListener('click', () => window.UITheme.openSettings());

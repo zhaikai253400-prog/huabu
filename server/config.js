@@ -24,13 +24,17 @@ function defaultConfig() {
     submitCompress: {
       enabled: true,
     },
-    // 尾部提示词：总开关 + 按类型分开的两套预设（视频一套、图片一套，互不相通）。
+    // 尾部提示词：按类型分成两套预设 + **各自的开关**（视频一套、图片一套，互不相通）。
     // 视频 / 快速视频提交时从 video 池取，图片卡从 image 池取。
+    // 两个开关互不影响：关掉图片组，视频卡照常追加，反过来也一样。
+    //
+    // 默认值：视频开（常用）、图片关（不常用，需要时在浮层里单独打开）。
+    // 注意这只作用于**全新安装**；已有配置按 normalizeTailPrompts 迁移，不会被动到。
     tailPrompts: {
       enabled: true,
       groups: {
-        video: { defaultId: '', presets: [] },
-        image: { defaultId: '', presets: [] },
+        video: { enabled: true, defaultId: '', presets: [] },
+        image: { enabled: false, defaultId: '', presets: [] },
       },
       defaultId: '',
       presets: [],
@@ -175,7 +179,14 @@ const TAIL_GROUPS = ['video', 'image'];
 //   · 新前端发 {enabled, groups:{video,image}}，老服务端只认扁平的 raw.presets
 //   · 老代码把 presets 读成空 → **用户那套 335 字的预设被清空**
 // 两个版本都能"正常跑"，却在交界处悄悄毁数据。有了版本号就能在写盘前拦住。
-const TAIL_SCHEMA_VERSION = 2;
+//
+// 3 版（2026-11-21）：视频组和图片组**各有一个开关**，不再共用一个总开关。
+//   用户诉求：视频尾部提示词常用、图片不常用，两者不该绑在一起。
+//   老结构（2 版：一个 enabled 管两组）读进来时按下面的规则迁移：
+//     · 有 groups 且某组缺 enabled → 该组沿用顶层 enabled（行为与 2 版完全一致）
+//     · 扁平老结构（根本没有 groups）→ 两组都取顶层 enabled
+//   所以升级后「原本开着的还是开着」，不会因为分开关而忽然失效。
+const TAIL_SCHEMA_VERSION = 3;
 
 // 判断一份 tailPrompts 提交"是什么形状"。用于区分：
 //   groups —— 新结构（带 groups 字段）
@@ -240,22 +251,47 @@ function tailPromptsHasRealGroups(raw) {
 
 function normalizeTailPrompts(value) {
   const raw = value && typeof value === 'object' ? value : {};
-  const enabled = raw.enabled !== false;
+  // 顶层 enabled 是 2 版留下的「一个开关管两组」。现在只当迁移用的默认值，
+  // 以及给还没更新的老调用方当兼容视图（= video 组的开关）。
+  const legacyEnabled = raw.enabled !== false;
   const groups = {};
+  const groupsRaw = raw.groups && typeof raw.groups === 'object' ? raw.groups : null;
+  const flatHasPresets = Array.isArray(raw.presets) && raw.presets.length > 0;
 
-  if (tailPromptsHasRealGroups(raw)) {
+  // 每一组自己的开关：3 版起才有这个字段，缺省时回落到顶层，迁移才是无损的
+  const enabledOf = (rawGroup, fallback) => {
+    const one = rawGroup && typeof rawGroup === 'object' ? rawGroup : null;
+    if (one && typeof one.enabled === 'boolean') return one.enabled;
+    return fallback;
+  };
+
+  // 走哪条路取预设，看「有没有真的分过组」：
+  //   · 某组真有预设            -> 分组读（正常情况）
+  //   · 只有 groups 壳、没有预设 -> 也走分组读（新装的默认值就是这种形状，
+  //     两组各自的默认开关必须被保留，否则「图片默认关」会被当成「跟顶层走」）
+  //   · groups 壳 + 顶层还带着真预设 -> 老结构，预设全归 video（历史上出现过
+  //     这种混合对象，判据沿用老注释里那次事故的结论）
+  const useGroups = tailPromptsHasRealGroups(raw) || (Boolean(groupsRaw) && !flatHasPresets);
+
+  if (useGroups) {
     // 确实已经分过组：按新结构读
-    TAIL_GROUPS.forEach((g) => { groups[g] = tailPoolOf(g, raw.groups[g]); });
+    TAIL_GROUPS.forEach((g) => {
+      groups[g] = tailPoolOf(g, groupsRaw && groupsRaw[g]);
+      groups[g].enabled = enabledOf(groupsRaw && groupsRaw[g], legacyEnabled);
+    });
   } else {
-    // 老结构（扁平）→ 全部迁进 video 池；image 池初始为空
+    // 老结构（扁平）→ 全部迁进 video 池；image 池初始为空。
+    // 两组都沿用那个唯一的开关：升级前后行为一模一样，不会突然少追加或多追加。
     groups.video = tailPoolOf('video', { defaultId: raw.defaultId, presets: raw.presets });
-    groups.image = tailPoolOf('image', null);
+    groups.video.enabled = enabledOf(groupsRaw && groupsRaw.video, legacyEnabled);
+    groups.image = tailPoolOf('image', groupsRaw && groupsRaw.image);
+    groups.image.enabled = enabledOf(groupsRaw && groupsRaw.image, legacyEnabled);
   }
 
   // 顶层保留一份 video 池的兼容视图：老版本的读写路径（以及暂时还没改的
-  // 调用方）仍然按 raw.presets / raw.defaultId 取用，行为与迁移前一致。
+  // 调用方）仍然按 raw.presets / raw.defaultId / raw.enabled 取用。
   return {
-    enabled: enabled,
+    enabled: groups.video.enabled,
     groups: groups,
     defaultId: groups.video.defaultId,
     presets: groups.video.presets,
@@ -273,6 +309,18 @@ function tailConfigOf(config) {
     ? true
     : (Array.isArray(raw.presets) || typeof raw.enabled === 'boolean' || typeof raw.defaultId === 'string');
   return looksLikeTailPrompts ? raw : null;
+}
+
+// 取某一组自己的开关。
+// 缺 enabled 字段时回落到顶层 enabled —— 拿到的配置没经过 normalizeTailPrompts
+// （测试里手写的、或者 2 版留下没迁移的）时，行为必须和分开关之前一致。
+function tailGroupEnabledOf(config, group) {
+  const key = TAIL_GROUPS.indexOf(String(group)) >= 0 ? String(group) : 'video';
+  const tp = tailConfigOf(config);
+  if (!tp) return true;
+  const one = tp.groups && tp.groups[key] ? tp.groups[key] : null;
+  if (one && typeof one.enabled === 'boolean') return one.enabled;
+  return tp.enabled !== false;
 }
 
 // 取某一类的池子。给错 group 时退回 video —— 宁可给视频池，
@@ -331,7 +379,17 @@ function load() {
     merged.lan = normalizeLan(merged.lan);
     merged.shortcuts = normalizeShortcuts(merged.shortcuts);
     merged.submitCompress = normalizeSubmitCompress(merged.submitCompress);
-    merged.tailPrompts = normalizeTailPrompts(merged.tailPrompts);
+    // 尾部提示词**不能**用 merge 之后的对象归一：
+    // 新默认值里 groups.image.enabled=false（图片组默认关），merge 会把它补进
+    // 老配置那两组里，于是 2 版「一个开关管两组」的老用户升级后，图片组会被
+    // 悄悄关掉 —— 那是行为变化，不是迁移。所以这里只看盘上写了什么：
+    //   · 盘上有 tailPrompts -> 拿它原样归一，缺的字段按 2 版规则回落；
+    //   · 盘上压根没有      -> 才用新装的默认值（视频开 / 图片关）。
+    merged.tailPrompts = normalizeTailPrompts(
+      decrypted && typeof decrypted === 'object' && decrypted.tailPrompts !== undefined
+        ? decrypted.tailPrompts
+        : fallback.tailPrompts
+    );
     merged.cardDefaults = cardDefaults.normalize(merged.cardDefaults);
     return merged;
   } catch (error) {
@@ -407,6 +465,7 @@ module.exports = {
   cardDefaultsOf,
   CARD_DEFAULT_TYPES: cardDefaults.CARD_TYPES,
   tailPoolOfConfig,
+  tailGroupEnabledOf,
   tailConfigOf,
   tailPromptsShapeOf,
   TAIL_SCHEMA_VERSION,

@@ -177,12 +177,14 @@ function resolveTail(config, payload, kind) {
       text: String(frozen.text || ''),
     };
   }
-  // 总开关从 config 里取（tailConfigOf 容错"完整 config"与"tailPrompts 本身"两种形状）
-  const global = configStore.tailConfigOf(config) || { enabled: true, presets: [] };
+  // 开关按**自己那一类**取：视频组和图片组各有一个，互不影响。
+  // 老配置缺这个字段时 tailGroupEnabledOf 会回落到顶层 enabled，行为与分开关之前一致。
   const choice = normalizeTailChoice(payload && payload.tailPrompt);
   const override = payload && payload.tailOverride && typeof payload.tailOverride === 'object' ? payload.tailOverride : null;
   if (override && override.mode === 'none') return { enabled: false, presetId: '', name: '', text: '' };
-  if (!global.enabled) return { enabled: false, presetId: '', name: '', text: '' };
+  if (!configStore.tailGroupEnabledOf(config, kind)) {
+    return { enabled: false, presetId: '', name: '', text: '' };
+  }
   if (!choice.enabled && !(override && override.presetId)) return { enabled: false, presetId: '', name: '', text: '' };
   // 默认预设也要按池子取：图片卡的「跟随全局默认」指的是图片池的默认
   const presetId = String((override && override.presetId) || choice.presetId || pool.defaultId || '');
