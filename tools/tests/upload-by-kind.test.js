@@ -11,7 +11,8 @@
 //   1. 每种素材按自己的类型挑上传设置（图片一个图床、音视频另一个）；
 //   2. 类型没单独配时，原样跟随通用设置（不能因为新增字段就改变老行为）；
 //   3. 图床 200 但 JSON 里写着失败时，报错必须把图床原文带出来；
-//   4. 体检要提前提醒「这个图床只收图片」。
+//   4. 体检要提前提醒「这个图床只收图片」；
+//   5. 主图床不收音频 / 视频时，自动换备用图床重试（代码级兜底，另一台电脑同步代码就生效）。
 //
 // 网络只打本机 127.0.0.1 上临时起的 mock 图床，不碰外网。
 //
@@ -255,6 +256,24 @@ function assert(cond, msg) {
 
   console.log('\nU4 · 体检提前提醒');
 
+  check('兜底关掉时，警示要明确说「一带音频就会失败」', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c1b',
+      name: '星光视频',
+      kinds: ['video'],
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      models: { video: ['seedance2.5-M'] },
+      upload: { enabled: true, path: 'https://picui.cn/api/v1/upload', resultUrl: 'data.links.url', fallback: false },
+      refLimits: { audio: { maxCount: 10 }, video: { maxCount: 10 } },
+    });
+    const one = channels.inspectChannel(ch);
+    const hit = (one.notices || []).filter(function (it) { return it.field === 'upload.path'; });
+    assert(hit.length === 1, '应该有 1 条提示，实际 ' + hit.length);
+    assert(hit[0].detail.indexOf('已关掉') > 0, '没说明兜底已关：' + hit[0].detail);
+    assert(hit[0].detail.indexOf('就会失败') > 0, '没说清后果：' + hit[0].detail);
+  });
+
   check('只收图片的图床 + 要传音频 → 有提示', () => {
     const ch = channels.normalizeChannel({
       id: 'c1',
@@ -270,6 +289,7 @@ function assert(cond, msg) {
     const hit = (one.notices || []).filter(function (it) { return it.field === 'upload.path'; });
     assert(hit.length === 1, '应该有 1 条图床提示，实际 ' + hit.length);
     assert(hit[0].detail.indexOf('只收图片') > 0, '提示没说原因：' + hit[0].detail);
+    assert(hit[0].detail.indexOf('自动') > 0, '兜底开着时应说明会自动换图床：' + hit[0].detail);
   });
 
   check('音频已经单独配了能收的地址 → 不再提示', () => {
@@ -352,6 +372,138 @@ function assert(cond, msg) {
     eq(typeof ch.upload.audio, 'object');
     eq(ch.upload.audio.path, '');
     eq(typeof ch.upload.video, 'object');
+  });
+
+  console.log('\nU6 · 主图床不收时自动换备用图床');
+
+  check('picui + 音频、没单独配 → 给出 kappa.lol 备用规格', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c7',
+      name: '星光视频',
+      kinds: ['video'],
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      upload: { enabled: true, path: 'https://picui.cn/api/v1/upload', field: 'file', resultUrl: 'data.links.url' },
+    });
+    const spare = channels.fallbackUploadSpec(ch, 'audio');
+    assert(spare, '应该给出备用规格');
+    eq(spare.path, 'https://kappa.lol/api/upload');
+    eq(spare.field, 'file');
+    eq(spare.resultUrl, 'link');
+    eq(spare.appendExt, true);
+  });
+
+  check('备用规格不带主图床的任何请求头 / 附加参数（防泄露 token）', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c8',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      upload: {
+        enabled: true,
+        path: 'https://picui.cn/api/v1/upload',
+        resultUrl: 'data.links.url',
+        headers: { Authorization: 'Bearer picui-token' },
+        extra: { token: 'picui-extra' },
+      },
+    });
+    const spare = channels.fallbackUploadSpec(ch, 'video');
+    eq(Object.keys(spare.headers).length, 0, '不该带请求头');
+    eq(Object.keys(spare.extra).length, 0, '不该带附加参数');
+  });
+
+  check('图片永远不换备用图床', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c9',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      upload: { enabled: true, path: 'https://picui.cn/api/v1/upload', resultUrl: 'data.links.url' },
+    });
+    eq(channels.fallbackUploadSpec(ch, 'image'), null);
+  });
+
+  check('用户关了兜底开关就不换', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c10',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      upload: { enabled: true, path: 'https://picui.cn/api/v1/upload', resultUrl: 'data.links.url', fallback: false },
+    });
+    eq(ch.upload.fallback, false);
+    eq(channels.fallbackUploadSpec(ch, 'audio'), null);
+  });
+
+  check('老配置没写 fallback 字段时默认开着', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c11',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      upload: { enabled: true, path: 'https://picui.cn/api/v1/upload', resultUrl: 'data.links.url' },
+    });
+    eq(ch.upload.fallback, true);
+  });
+
+  check('非纯图片图床不换（不乱改用户配好的图床）', () => {
+    const ch = channels.normalizeChannel({
+      id: 'c12',
+      name: 'x',
+      baseUrl: 'https://xingapi.top/v1',
+      apiKey: 'sk-x',
+      upload: { enabled: true, path: base + '/audio', resultUrl: 'link' },
+    });
+    eq(channels.fallbackUploadSpec(ch, 'audio'), null);
+  });
+
+  await checkAsync('真的会自动重传，并把地址写回素材', async () => {
+    // 借用本机 mock：主图床 /image-only 拒收，备用图床 /spare 收
+    const spareHost = 'http://127.0.0.1:' + port + '/spare';
+    const FALLBACK = channels.fallbackUploadSpec;
+    channels.fallbackUploadSpec = function (channel, kind) {
+      if (kind !== 'audio' && kind !== 'video') return null;
+      return { enabled: true, path: spareHost, method: 'POST', contentType: 'form', field: 'file', resultUrl: 'link', resultId: '', appendExt: true, timeoutSec: 60, extra: {}, headers: {} };
+    };
+    try {
+      seen.length = 0;
+      const ch = channelWith({
+        enabled: true,
+        path: base + '/image-only',
+        contentType: 'form',
+        field: 'file',
+        resultUrl: 'data.links.url',
+      });
+      const refs = [audioRef()];
+      await generate.uploadRefs(ch, refs, null, function () {});
+      const urls = seen.map(function (one) { return one.url; });
+      eq(urls.length, 2, '应该传两次（主 + 备用）');
+      assert(urls[0].indexOf('/image-only') === 0, '第一次应走主图床，实际 ' + urls[0]);
+      assert(urls[1].indexOf('/spare') === 0, '第二次应走备用图床，实际 ' + urls[1]);
+      assert(refs[0].remoteUrl.indexOf('/f/ok.bin') > 0, '没写回地址：' + refs[0].remoteUrl);
+    } finally {
+      channels.fallbackUploadSpec = FALLBACK;
+    }
+  });
+
+  await checkAsync('备用图床也拒时，报错说的是备用图床', async () => {
+    const FALLBACK = channels.fallbackUploadSpec;
+    channels.fallbackUploadSpec = function () {
+      return { enabled: true, path: base + '/image-only', method: 'POST', contentType: 'form', field: 'file', resultUrl: 'link', resultId: '', appendExt: true, timeoutSec: 60, extra: {}, headers: {} };
+    };
+    try {
+      const ch = channelWith({ enabled: true, path: base + '/image-only', contentType: 'form', field: 'file', resultUrl: 'data.links.url' });
+      let caught = null;
+      try {
+        await generate.uploadRefs(ch, [audioRef()], null, function () {});
+      } catch (error) {
+        caught = error;
+      }
+      assert(caught, '本该报错却成功了');
+      assert(caught.message.indexOf('不支持的文件类型') > 0, '报错没带图床原文：' + caught.message);
+    } finally {
+      channels.fallbackUploadSpec = FALLBACK;
+    }
   });
 
   console.log('\n────────────────────────────────────────────────────');

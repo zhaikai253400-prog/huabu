@@ -82,6 +82,8 @@
     appendExt: false,
     audio: DEFAULT_UPLOAD_KIND(),
     video: DEFAULT_UPLOAD_KIND(),
+    // 主图床拒收音频 / 视频时，自动换 kappa.lol 重试一次（服务端执行）
+    fallback: true,
   };
   // 「按类型单独上传」的空白模板：路径留空 = 跟随上面的通用设置
   function DEFAULT_UPLOAD_KIND() {
@@ -1306,6 +1308,16 @@
         '传完之后下单模板里可以用 {{refIds}} {{refUploadUrls}} {{refImageIds}} {{refVideoIds}} {{refAudioIds}}；没上传或没拿到地址时，{{refs}} 系列仍然装的是素材内容本身。'
       )
     );
+    // 兜底开关：主上传地址是纯图片图床（picui.cn 这类）却要传音频 / 视频时，
+    // 服务端自动换 kappa.lol 再试一次。默认开着——data/ 不随代码同步，
+    // 另一台电脑上的通道配置常常还是旧的，靠这一层才不至于一带音频就失败。
+    body.appendChild(
+      makeCheckbox(
+        '主上传地址不收音频 / 视频时，自动换 kappa.lol 重试一次（不用你另配）',
+        upload.fallback !== false,
+        (checked) => { upload.fallback = checked; queueSave(true); }
+      )
+    );
 
     // ---- 按类型单独上传 ----
     // 现实里图片图床（picui.cn 这类）只收图片，音频 / 视频一律返回「不支持的文件类型」。
@@ -1404,7 +1416,9 @@
           const res = await window.api.testChannelUpload({ channel: channel, kind: kind });
           if (res && res.ok) {
             testOut.className = 'ch-subupload-result ok';
-            testOut.textContent = '可以传' + KIND_TEXT[kind] + '（' + (res.host || '图床') + '）' + (res.url ? '：' + res.url : '');
+            testOut.textContent = (res.fellBack
+              ? '主图床不收' + KIND_TEXT[kind] + '（' + (res.fellBackFrom || '') + '），已自动改用 ' + (res.host || '备用图床') + '，可以传'
+              : '可以传' + KIND_TEXT[kind] + '（' + (res.host || '图床') + '）') + (res.url ? '：' + res.url : '');
           } else {
             testOut.className = 'ch-subupload-result bad';
             testOut.textContent = '传不上去：' + ((res && res.reason) || '未知原因');

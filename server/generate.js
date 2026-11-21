@@ -665,6 +665,44 @@ function uploadFailReason(data) {
   return '';
 }
 
+function hostOfSpec(spec) {
+  try {
+    return new URL(String(spec && spec.path)).host;
+  } catch (error) {
+    return '';
+  }
+}
+
+// 上传失败统一报错。把「谁拒的、拒了什么、用户该去哪儿改」写全，
+// 免得看到「没拿到素材地址」这种只能瞎猜的提示。
+function uploadError(item, kindName, spec, got) {
+  const host = hostOfSpec(spec);
+  const reason = (got && got.reason) || '';
+  return errorKinds.configError(
+    '上传' + kindName + '「' + item.name + '」失败' + (reason ? '：' + reason : '，没拿到素材地址或编号'),
+    (reason
+      ? '这是上传图床' + (host ? '（' + host + '）' : '') + '返回的原文，不是生成平台报的错。' +
+        '说明这个图床不收' + kindName + '：到通道的「参考素材：先上传再引用」里给' + kindName +
+        '单独填一个支持它的上传地址（那里有 kappa.lol 的一键预设）。'
+      : '检查通道的「上传结果取值路径」。') +
+      (got && got.data && got.data.text ? '返回片段：' + snippet(got.data.text, 200) : '')
+  );
+}
+
+// 传一次，把地址 / 编号 / 失败原因都摊平了交给调用方。
+// 单独抽出来是为了让「主图床失败→备用图床重试」复用同一段解析逻辑。
+async function uploadOnce(channel, spec, item) {
+  const data = await channels.callUpload(channel, spec, item);
+  let url = spec.resultUrl ? channels.pickByPath(data.json, spec.resultUrl) : '';
+  const id = spec.resultId ? channels.pickByPath(data.json, spec.resultId) : '';
+  const reason = uploadFailReason(data);
+  // 图床给的地址没有扩展名时，有的平台会当成未知格式；按真实后缀补上。
+  if (url && spec.appendExt && item.ext && !/\.[A-Za-z0-9]{1,5}(?:[?#].*)?$/.test(String(url))) {
+    url = String(url) + item.ext;
+  }
+  return { ok: Boolean(url || id), url: url ? String(url) : '', id: id ? String(id) : '', reason: reason, data: data };
+}
+
 // 通道开了「先上传素材」就挨个传一遍，拿到平台给的地址 / 编号
 async function uploadRefs(channel, refs, ctx, progress) {
   const base = channel && channel.upload;
@@ -687,35 +725,29 @@ async function uploadRefs(channel, refs, ctx, progress) {
     // 名字里已经带了后缀就别再加一遍
     const stem = String(item.name || '').replace(/\.[A-Za-z0-9]{1,5}$/, '');
     item.fileName = assets.safeName(stem, 'ref', 40) + (item.ext || '');
-    const data = await channels.callUpload(channel, spec, item);
-    let url = spec.resultUrl ? channels.pickByPath(data.json, spec.resultUrl) : '';
-    const id = spec.resultId ? channels.pickByPath(data.json, spec.resultId) : '';
-    const reason = uploadFailReason(data);
-    if (!url && !id) {
-      const kindName = KIND_REF_NAME[item.kind] || '参考素材';
-      const host = (function () {
-        try {
-          return new URL(String(spec.path)).host;
-        } catch (error) {
-          return '';
+    const kindName = KIND_REF_NAME[item.kind] || '参考素材';
+    let used = spec;
+    let got = await uploadOnce(channel, spec, item);
+    // 主图床不收这一类（picui.cn 这类纯图片图床最常见）：自动换一个都收的图床再试一次。
+    // 这一层兜底放在代码里，另一台电脑同步了代码就能用，不必先把 data/ 里的通道配置补齐。
+    if (!got.ok) {
+      const spare = channels.fallbackUploadSpec(channel, item.kind);
+      if (spare) {
+        progress({ stage: '图床不收' + kindName + '，换备用图床重传…' });
+        const retry = await uploadOnce(channel, spare, item);
+        if (retry.ok) {
+          used = spare;
+          got = retry;
+        } else {
+          throw uploadError(item, kindName, spare, retry);
         }
-      })();
-      throw errorKinds.configError(
-        '上传' + kindName + '「' + item.name + '」失败' + (reason ? '：' + reason : '，没拿到素材地址或编号'),
-        (reason
-          ? '这是上传图床' + (host ? '（' + host + '）' : '') + '返回的原文，不是生成平台报的错。' +
-            '多半是这个图床不收' + kindName + '，到通道的「参考素材：先上传再引用」里给' + kindName +
-            '单独填一个支持它的上传地址（那里有 kappa.lol 的一键预设，图片 / 视频 / 音频都收，单文件 100 MB）。'
-          : '检查通道的「上传结果取值路径」。') +
-          '返回片段：' + snippet(data.text, 200)
-      );
+      } else {
+        throw uploadError(item, kindName, spec, got);
+      }
     }
-    // 图床给的地址没有扩展名时，有的平台会当成未知格式；按真实后缀补上。
-    if (url && spec.appendExt && item.ext && !/\.[A-Za-z0-9]{1,5}(?:[?#].*)?$/.test(String(url))) {
-      url = String(url) + item.ext;
-    }
-    item.remoteUrl = url ? String(url) : '';
-    item.remoteId = id ? String(id) : '';
+    item.remoteUrl = got.url;
+    item.remoteId = got.id;
+    item.uploadHost = hostOfSpec(used);
   }
   return refs;
 }
@@ -827,27 +859,54 @@ async function testRefUpload(channel, kind) {
     buffer: sample.buffer,
     dataUrl: dataUrlOf(sample.buffer, sample.mime),
   };
-  let data;
+  let got;
   try {
-    data = await channels.callUpload(channel, spec, item);
+    got = await uploadOnce(channel, spec, item);
   } catch (error) {
-    return { ok: false, host: host, kindName: kindName, reason: (error && error.message) || String(error) };
+    got = { ok: false, reason: (error && error.message) || String(error), data: null };
   }
-  let url = spec.resultUrl ? channels.pickByPath(data.json, spec.resultUrl) : '';
-  const id = spec.resultId ? channels.pickByPath(data.json, spec.resultId) : '';
-  if (!url && !id) {
+  // 跟真正生成时完全同一套兜底：主图床不收这一类就换备用图床再试。
+  // 否则试传说「不行」、真生成却成功，反而更让人困惑。
+  if (!got.ok) {
+    const spare = channels.fallbackUploadSpec(channel, wanted);
+    if (!spare) {
+      return {
+        ok: false,
+        host: host,
+        kindName: kindName,
+        reason: got.reason || '没拿到素材地址或编号（检查「地址取值路径」）',
+        snippet: snippet(got.data && got.data.text, 160),
+      };
+    }
+    const spareHost = hostOfSpec(spare);
+    let retry;
+    try {
+      retry = await uploadOnce(channel, spare, item);
+    } catch (error) {
+      retry = { ok: false, reason: (error && error.message) || String(error), data: null };
+    }
+    if (!retry.ok) {
+      return {
+        ok: false,
+        host: spareHost,
+        kindName: kindName,
+        reason: (got.reason ? got.reason + '；' : '') + '换备用图床 ' + spareHost + ' 也没成功：' + (retry.reason || '没拿到地址'),
+        snippet: snippet(retry.data && retry.data.text, 160),
+        fellBack: true,
+      };
+    }
     return {
-      ok: false,
-      host: host,
+      ok: true,
+      host: spareHost,
       kindName: kindName,
-      reason: uploadFailReason(data) || '没拿到素材地址或编号（检查「地址取值路径」）',
-      snippet: snippet(data.text, 160),
+      url: retry.url,
+      id: retry.id,
+      fellBack: true,
+      fellBackFrom: host,
+      reason: got.reason,
     };
   }
-  if (url && spec.appendExt && sample.ext && !/\.[A-Za-z0-9]{1,5}(?:[?#].*)?$/.test(String(url))) {
-    url = String(url) + sample.ext;
-  }
-  return { ok: true, host: host, kindName: kindName, url: url ? String(url) : '', id: id ? String(id) : '' };
+  return { ok: true, host: host, kindName: kindName, url: got.url, id: got.id };
 }
 
 async function fetchMedia(config, found, channel) {

@@ -224,6 +224,9 @@ function defaultUpload() {
     // 现实里很常见：图片走图床 A，但 A 只收图片，音频 / 视频得换 B。
     audio: defaultUploadKind(),
     video: defaultUploadKind(),
+    // 主图床拒收音频 / 视频时，自动换一个三类都收的公共图床重试一次。
+    // 关掉它，就只用手动配的那一套，失败直接报错。
+    fallback: true,
   };
 }
 
@@ -362,6 +365,8 @@ function normalizeUpload(input) {
     appendExt: source.appendExt === true,
     audio: normalizeUploadKind(source.audio),
     video: normalizeUploadKind(source.video),
+    // 只有显式写 false 才关；老配置没有这个字段，默认当作开着
+    fallback: source.fallback === false ? false : true,
   };
 }
 
@@ -387,6 +392,58 @@ function uploadSpecFor(channel, kind) {
   merged.extra = Object.assign({}, base.extra || {}, one.extra || {});
   merged.headers = Object.assign({}, base.headers || {}, one.headers || {});
   return merged;
+}
+
+// 主图床明明只收图片、却在传音频 / 视频 —— 这类情况换一个都收的公共图床重试一次。
+// 为什么放在代码里而不是只靠配置：data/ 目录不参与代码同步，另一台电脑上的通道配置
+// 往往还是旧的（图片图床一套走天下），手动在那边再配一遍很容易漏。
+// 只在「主图床是已知的纯图片图床」时生效，别的图床不做任何自动替换。
+const FALLBACK_UPLOAD_HOSTS = {
+  'picui.cn': {
+    path: 'https://kappa.lol/api/upload',
+    field: 'file',
+    resultUrl: 'link',
+    appendExt: true,
+    timeoutSec: 600,
+  },
+};
+
+// 换成备用图床时，请求头 / 附加参数一律清空：那些多半是主图床的 token，
+// 发给不相干的图床等于泄露。字段名、取值路径、超时用备用图床自己的。
+function fallbackUploadSpec(channel, kind) {
+  if (kind !== 'audio' && kind !== 'video') return null;
+  const upload = channel && channel.upload;
+  if (!upload || upload.enabled !== true || upload.fallback === false) return null;
+  const primary = uploadSpecFor(channel, kind);
+  const primaryPath = str(primary && primary.path).trim();
+  if (!/^https?:\/\//i.test(primaryPath)) return null;
+  let host = '';
+  try {
+    host = new URL(primaryPath).host;
+  } catch (error) {
+    return null;
+  }
+  const hit = Object.keys(FALLBACK_UPLOAD_HOSTS).filter(function (one) {
+    return host === one || host.endsWith('.' + one);
+  })[0];
+  if (!hit) return null;
+  const preset = FALLBACK_UPLOAD_HOSTS[hit];
+  // 备用地址跟主图床同一个域名就没意义了（多半是配置写错，重试也是白重试）
+  if (preset.path === primaryPath) return null;
+  const spec = Object.assign({}, primary, {
+    path: preset.path,
+    method: (preset.method || 'POST').toUpperCase(),
+    contentType: preset.contentType || 'form',
+    field: preset.field,
+    resultUrl: preset.resultUrl,
+    resultId: '',
+    appendExt: preset.appendExt === true,
+    timeoutSec: preset.timeoutSec,
+    extra: {},
+    headers: {},
+    fallbackFrom: host,
+  });
+  return spec;
 }
 
 // 只收图片的常见图床：配置里选中它们却又要传音频 / 视频时，提前提醒一句，
@@ -419,9 +476,18 @@ function uploadHostKindWarning(channel) {
   });
   if (!wants.length) return '';
   const label = wants.map(function (kind) { return kind === 'audio' ? '音频' : '视频'; }).join(' / ');
+  // 兜底开着：这不是故障，只是「会多绕一次」的说明；关掉了才是真要用户动手。
+  if (upload.fallback !== false) {
+    return (
+      '上传图床 ' + host + ' 只收图片，参考' + label + '会被它拒（返回「不支持的文件类型」）。' +
+      '画布会自动改用备用图床（kappa.lol）重传一次，不用你手动配；' +
+      '想固定用自己的图床，就在「参考素材：先上传再引用」里给' + label + '单独填一个上传地址。'
+    );
+  }
   return (
-    '上传图床 ' + host + ' 只收图片，参考' + label + '会被拒（返回「不支持的文件类型」）。' +
-    '请在「参考素材：先上传再引用」里给' + label + '单独填一个支持' + label + '的上传地址。'
+    '上传图床 ' + host + ' 只收图片，参考' + label + '会被它拒（返回「不支持的文件类型」），' +
+    '而「自动换备用图床」已关掉，一带' + label + '就会失败。' +
+    '请给' + label + '单独填一个支持它的上传地址，或者把兜底开关打开。'
   );
 }
 
@@ -1567,6 +1633,8 @@ module.exports = {
   normalizeUploadKind,
   defaultUploadKind,
   uploadSpecFor,
+  fallbackUploadSpec,
+  IMAGE_ONLY_UPLOAD_HOSTS,
   normalizeLimits,
   defaultChannel,
   defaultApiSpec,
