@@ -271,6 +271,18 @@ const AMBIGUOUS_SUBMIT_WORDS = [
   'uncertain',
 ];
 
+// 网关「没拿到任务号」的几种写法。真见过的是 Prompt Hubs 的
+// video task creation returned no task identifier。
+function looksLikeNoTaskId(body) {
+  const text = String(body === undefined || body === null ? '' : body).toLowerCase();
+  if (!text) return false;
+  return (
+    text.indexOf('no task identifier') >= 0 ||
+    text.indexOf('no task id') >= 0 ||
+    text.indexOf('task creation returned no') >= 0
+  );
+}
+
 function looksAmbiguousSubmit(body) {
   const text = String(body === undefined || body === null ? '' : body).toLowerCase();
   if (!text) return false;
@@ -309,6 +321,14 @@ function classify(error, context) {
   }
   if (status === 402) return pick('QUOTA');
   if (status === 429) return pick('RATE_LIMIT');
+
+  // 422 常见两种：参数不合法（该由 400 报，各家不统一），
+  // 以及 Prompt Hubs 这类网关「上游没建成任务」时回的 service_error：
+  //   {"code":"service_error","message":"video task creation returned no task identifier"}
+  // 后者既不是密钥也不是额度问题，但**可能已经产生了上游调用**，
+  // 直接重发有重复计费风险，所以按「提交结果待确认」处理：
+  // 让用户先去后台核对，而不是让程序自作主张重试。
+  if (status === 422 && looksLikeNoTaskId(body)) return pick('SUBMIT_UNKNOWN');
 
   if (status === 404) {
     // 轮询时 404 是「这条任务平台不认了」，跟模型无关

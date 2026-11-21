@@ -297,8 +297,10 @@ check('没带上的素材名原样保留', () => {
 });
 
 console.log('\nR9 · 不误伤其它模型');
-check('Prompt Hubs 的 S-2.5-满血 仍然允许纯文字', () => {
-  generate.checkModelRefs('S-2.5-满血', [], 'video');
+check('Prompt Hubs 的 S-2.5-线路四 仍然允许纯文字', () => {
+  // 原来的用例点名的是「S-2.5-满血」，那条线路在站点侧已经 404（只剩死配置），
+  // 规格也一并删掉了；换成实际在用的线路四，保住「纯文字不该被 minRefs 拦住」这条语义。
+  generate.checkModelRefs('S-2.5-线路四', [], 'video');
 });
 check('没有登记在 model-specs 里的模型不受 minRefs 影响', () => {
   generate.checkModelRefs('某个还没登记的模型', [], 'video');

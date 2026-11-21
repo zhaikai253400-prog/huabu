@@ -158,9 +158,17 @@ const VIDEO_SPECS = {
   // 分辨率只认小写（720p / 1080p），所以模板里必须用 {{resolutionLower}}。
   // 这四个模型都不吃首尾帧（平台文档明确列了 unsupported_parameters），所以 frames: false。
   // 线路四的时长下限是 4 秒（其余三个 5 秒）；特惠只收 1080P、只收 16:9 / 9:16、不收参考视频。
+  // 三个模型都实测过（2026-11-21，用真实 key 打 /v1/videos 的零费用探测）：
+  //   线路四       → 400 invalid_resolution（说明模型存在、令牌有权限）
+  //   特惠 903     → 400 invalid_resolution
+  //   满血-flash    → 403 This token has no access（模型真实存在，只是这个令牌没勾权限）
+  // 「S-2.5-满血」「S-2.5-flash」在控制台模型清单里还挂着，但实际调用是 404 model_not_found，
+  //   属于站点侧的死配置，已经从通道清单里删掉，别再留规格误导卡片。
   's-2.5-线路四': {
-    label: 'SD2.5 线路四 · 720P · 4–30秒 · 30图/10视频/10音频',
-    resolutions: ['720p'],
+    label: 'SD2.5 线路四 · 720P/1080P · 4–30秒 · 30图/10视频/10音频',
+    // 文档原文：resolution=720p|1080p（默认 720p）。之前这里只写了 720p，
+    // 于是用户选 1080P 会被 buildVars 悄悄收敛回 720P —— 花了 1080P 的钱出了 720P 的画面。
+    resolutions: ['720p', '1080p'],
     durations: Array.from({ length: 27 }, (_, i) => String(i + 4)),
     ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'],
     modes: ['reference', 'text'],
@@ -175,30 +183,14 @@ const VIDEO_SPECS = {
     // 平台对「素材总数」另有一条 ≤50 的硬上限（三类各自上限之外）
     maxRefTotal: 50,
   },
-  's-2.5-满血': {
-    label: 'SD2.5 满血 · 720P · 5–30秒 · 30图/10视频/10音频',
+  's-2.5满血-flash': {
+    label: 'SD2.5 满血 Flash · 720P · 5–30秒 · 10图/5视频/5音频',
     resolutions: ['720p'],
     durations: Array.from({ length: 26 }, (_, i) => String(i + 5)),
-    ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+    ratios: ['16:9', '9:16', '4:3', '1:1', '3:4', '21:9'],
     modes: ['reference', 'text'],
     frames: false,
     defaultResolution: '720P',
-    defaultDuration: 5,
-    maxDurationSec: 30,
-    minDurationSec: 5,
-    maxRefs: 30,
-    maxRefVideos: 10,
-    maxRefAudios: 10,
-  },
-  's-2.5-flash': {
-    label: 'SD2.5 Flash · 480P/720P/1080P · 10图/5视频/5音频',
-    resolutions: ['480p', '720p', '1080p'],
-    durations: Array.from({ length: 26 }, (_, i) => String(i + 5)),
-    ratios: ['9:16', '16:9', '3:4', '1:1', '21:9'],
-    modes: ['reference', 'text'],
-    frames: false,
-    // 平台默认就是 1080p（也是三档里最贵的一档），卡片默认跟平台一致更好解释
-    defaultResolution: '1080P',
     defaultDuration: 5,
     maxDurationSec: 30,
     minDurationSec: 5,
