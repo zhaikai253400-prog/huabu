@@ -3492,6 +3492,29 @@ body.connecting .node.connect-target .port.in {
 .set-saved { color: var(--ok); font-size: 0.86em; }
 .set-saved.bad { color: var(--danger); }
 
+/* 「有未保存的修改」浮标：面板里改的只是草稿，点「关闭」会丢掉。
+   用暖色小圆点 + 文字，别做得像错误（它不是失败，只是还没点保存）。 */
+.tail-dirty {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--warn, #b4791f);
+  background: var(--warn-soft, rgba(180, 121, 31, 0.12));
+  color: var(--warn, #b4791f);
+  font-size: 0.8em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.tail-dirty::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 /* 新建卡片默认值：设置面板里的摘要 + 独立面板的每一类一节 */
 .cd-summary {
   flex: 1 1 auto; min-width: 0; min-height: 1.4em;

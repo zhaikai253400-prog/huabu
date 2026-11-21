@@ -14580,6 +14580,36 @@
     return key ? mods.concat(key).join('+') : '';
   }
 
+  // 焦点是不是落在「能打字的地方」——输入框 / 多行文本框 / 下拉框 / 可编辑区。
+  //
+  // 为什么必须认 TEXTAREA：这里原先只判 INPUT 和 contentEditable，于是**尾部提示词的正文框**
+  // （<textarea class="tail-text">）里的按键被当成画布快捷键抢走 —— 退格和 Delete 变成
+  // 「删除选中的卡片」（一删就是一整张卡，预设正文一个字没少），Ctrl+A 变成「全选画布卡片」
+  // 而不是「全选这段文字」，用户的手感就是**预设根本改不了**（2026-11-21 定位）。
+  // 提示词框自己不是 textarea（是 contenteditable 的 .node-prompt），所以这里不会误伤它。
+  // 复选框 / 单选框 / 按钮不算：点完勾选框再按 Delete 是常有的事，不该被当成在打字。
+  function isTypingTarget(target) {
+    if (!target || !target.tagName) return false;
+    if (target.isContentEditable) return true;
+    const tag = String(target.tagName).toUpperCase();
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (tag === 'INPUT') {
+      const type = String(target.type || '').toLowerCase();
+      return type !== 'checkbox' && type !== 'radio' && type !== 'button' && type !== 'submit' && type !== 'reset';
+    }
+    return false;
+  }
+
+
+  // 浮层 / 弹窗挡在画布上面时，画布的删除、全选这些快捷键不该穿透到后面的画布。
+  // 尤其是尾部提示词面板：它自己的 Esc 只负责关自己，其它键以前会「落到画布上」。
+  function canvasShortcutsBlocked(target) {
+    // 任何 modal 弹窗（设置 / 尾部提示词 / 参数 / 批量…）打开时都不动背后的画布
+    if (document.querySelector('.modal-mask')) return true;
+    // 左侧工具栏小浮层（尾部提示词开关）也算浮层
+    if (target && target.closest && target.closest('.tail-pop')) return true;
+    return false;
+  }
   function hitShortcut(event) {
     const combo = comboOf(event);
     if (!combo) return '';
@@ -14815,7 +14845,11 @@
         setPerfPanel(!perfOn);
         return;
       }
-      const typing = editingId !== null || (event.target && (event.target.isContentEditable || event.target.tagName === 'INPUT'));
+      // 焦点在输入控件里（提示词框 / 尾部预设的名字与正文 / 参数输入…）时，
+      // 退格、Delete、Ctrl+A 这些键属于那个控件，画布不许抢。
+      const typing = editingId !== null || isTypingTarget(event.target);
+      // 弹窗 / 侧栏浮层开着时，画布的快捷键也不许穿透过去动后面那些卡片
+      const blocked = canvasShortcutsBlocked(event.target);
       // 素材库抽屉里按 Ctrl+A / Delete，是操作素材，不是操作画布
       const inLibrary = libraryDrawerOpen();
       // 筛选面板开着时，Esc 不管焦点在哪都先把它收起来
@@ -14832,6 +14866,11 @@
         }
         return;
       }
+      // 上面盖着弹窗（尾部提示词 / 设置 / 参数 / 批量…）或侧栏浮层时，键盘交给那一层自己处理：
+      // 画布的删除 / 全选 / 撤销不许穿透到背后的卡片。
+      // 位置很关键：放在 Esc 分支**之前**就没法清掉背后的选择（也不该清）；
+      // 又必须放在「快捷键表」之后，否则快捷键表自己的 Esc 会被这里吞掉。
+      if (blocked) return;
       if (event.key === 'F1' || (event.ctrlKey && event.key === '/')) {
         event.preventDefault();
         openHelp();

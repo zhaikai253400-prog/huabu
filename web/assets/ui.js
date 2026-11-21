@@ -871,15 +871,30 @@
   // ---------- 尾部提示词预设管理 ----------
   // 面板里改的是一份草稿，点保存才写进设置；卡片只引用预设 id，所以删预设后旧卡会明确提示。
   let tailPanelEl = null;
+  // 当前面板的「有没有未保存的修改」。关面板前问一句 —— 否则改完点「关闭」，
+  // 草稿被丢掉，下次打开还是原文，用户看到的就是「这个预设改不了」。
+  let tailPanelIsDirty = null;
+  let tailPanelEsc = null;
 
-  function closeTailPanel() {
+  function closeTailPanel(force) {
+    if (!force && tailPanelIsDirty && tailPanelIsDirty()) {
+      const ok = window.confirm('这套尾部提示词还有没保存的修改。\n\n点「保存」才会写进设置；现在关掉，这些修改会丢掉。\n\n确定放弃修改吗？');
+      if (!ok) return false;
+    }
+    if (tailPanelEsc) {
+      document.removeEventListener('keydown', tailPanelEsc, true);
+      tailPanelEsc = null;
+    }
     if (tailPanelEl && tailPanelEl.parentNode) tailPanelEl.parentNode.removeChild(tailPanelEl);
     tailPanelEl = null;
+    tailPanelIsDirty = null;
+    return true;
   }
 
   function openTailPromptsPanel(group) {
     if (group) tailEditingGroup = tailGroupOf(group);
-    if (tailPanelEl) return closeTailPanel();
+    // 面板已经开着：再点一次等于关掉，同样要问「未保存的修改」
+    if (tailPanelEl) { closeTailPanel(); return; }
     const draft = cloneTailPrompts(tailPrompts);
     const mask = document.createElement('div');
     mask.className = 'modal-mask';
@@ -912,7 +927,9 @@
       '    <div class="tail-preview-note">尾部提示词会自动接在主提示词后面，中间空一行；主提示词里已经含这段文字时不会重复追加。' +
       '      <b>视频和图片是分开的两组，互不相通</b> —— 图片卡只会用到「图片」这一组里的预设。</div>' +
       '  </div>' +
-      '  <div class="modal-foot"><span class="set-saved" id="tail-saved"></span><span class="grow"></span>' +
+      '  <div class="modal-foot"><span class="set-saved" id="tail-saved"></span>' +
+      '    <span class="tail-dirty" id="tail-dirty" hidden>有未保存的修改</span>' +
+      '    <span class="grow"></span>' +
       '    <button class="ghost" data-close>关闭</button>' +
       '    <button class="primary" id="tail-save">保存</button></div>' +
       '</div>';
@@ -932,6 +949,20 @@
     // 免得用户点半天才发现存不上、或者更糟——把预设写空。
     const warnEl = mask.querySelector('#tail-version-warn');
     if (warnEl && tailSchemaMismatch) warnEl.hidden = false;
+
+    // ---- 有未保存的修改：面板里改的只是草稿，点「关闭」会丢掉 ----
+    // 这个浮标存在的理由很实际：用户改完一关就以为生效了，下次打开发现「改了没用」，
+    // 看起来完全像一个 BUG（2026-11-21 就有人这么报上来）。
+    const dirtyEl = mask.querySelector('#tail-dirty');
+    const draftSignature = () => JSON.stringify(normalizeTailPresets({
+      enabled: draft.groups.video.enabled !== false,
+      groups: { video: draft.groups.video, image: draft.groups.image },
+    }));
+    let savedSignature = draftSignature();
+    const markDirty = () => {
+      if (!dirtyEl) return;
+      dirtyEl.hidden = draftSignature() === savedSignature;
+    };
 
     const flash = (text, bad) => {
       savedEl.textContent = text;
@@ -1004,7 +1035,7 @@
         name.maxLength = 40;
         name.placeholder = '这套叫什么，例如「电影感冷调」';
         name.value = preset.name;
-        name.addEventListener('input', () => { preset.name = name.value; });
+        name.addEventListener('input', () => { preset.name = name.value; markDirty(); });
         head.appendChild(name);
 
         const isDefault = group.defaultId === preset.id;
@@ -1018,6 +1049,7 @@
         def.addEventListener('click', () => {
           group.defaultId = isDefault ? '' : preset.id;
           render();
+          markDirty();
         });
         head.appendChild(def);
 
@@ -1030,6 +1062,7 @@
           group.presets.splice(index, 1);
           if (group.defaultId === preset.id) group.defaultId = group.presets.length ? group.presets[0].id : '';
           render();
+          markDirty();
         });
         head.appendChild(del);
         item.appendChild(head);
@@ -1049,7 +1082,7 @@
           count.textContent = Array.from(text.value).length + ' 字';
         };
         paintCount();
-        text.addEventListener('input', () => { preset.text = text.value; paintCount(); });
+        text.addEventListener('input', () => { preset.text = text.value; paintCount(); markDirty(); });
         meta.appendChild(count);
         item.appendChild(meta);
 
@@ -1071,6 +1104,7 @@
         const g = tailGroupOf(tailEditingGroup);
         draft.groups[g].enabled = groupEnabledEl.checked;
         paintTabs();
+        markDirty();
       });
     }
 
@@ -1086,6 +1120,7 @@
       group.presets.push(preset);
       if (!group.defaultId) group.defaultId = preset.id;
       render();
+      markDirty();
       const first = listEl.querySelector('.tail-item:last-child .tail-name');
       if (first) first.focus();
     });
@@ -1124,17 +1159,35 @@
       try {
         await save({ tailPrompts: cleaned });
         flash('已保存', false);
+        // 保存后草稿就是「已保存的样子」，浮标随之消失
+        savedSignature = draftSignature();
+        markDirty();
         document.dispatchEvent(new CustomEvent('tail-prompts-changed'));
       } catch (error) {
         flash('保存失败：' + error.message, true);
       }
     });
 
-    mask.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeTailPanel));
+    mask.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => closeTailPanel()));
+    // 点遮罩空白处也算关面板：同样要走「未保存修改」的确认
     mask.addEventListener('click', (event) => {
       if (event.target === mask) closeTailPanel();
     });
     render();
+    markDirty();
+
+    // 草稿是否还没保存：关闭前要问一句（见 closeTailPanel）
+    tailPanelIsDirty = () => Boolean(dirtyEl && !dirtyEl.hidden);
+
+    // 画布那边的快捷键在弹窗打开时整段让开了（canvasShortcutsBlocked），
+    // 所以 Esc 得由面板自己处理 —— 否则预设里按 Esc 会毫无反应。
+    tailPanelEsc = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeTailPanel();
+    };
+    document.addEventListener('keydown', tailPanelEsc, true);
   }
 
   window.UITheme = {
