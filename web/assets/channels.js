@@ -149,6 +149,15 @@
   const clearImportBtn = document.getElementById('btn-ch-import-clear');
   const exportSubEl = document.getElementById('ch-export-sub');
   const exportNoteEl = document.getElementById('ch-export-note');
+  const exportAllBtn = document.getElementById('btn-ch-export-all');
+  const pickBarEl = document.getElementById('ch-pickbar');
+  const pickCountEl = document.getElementById('ch-pick-count');
+  const pickAllBtn = document.getElementById('btn-ch-pick-all');
+  const pickNoneBtn = document.getElementById('btn-ch-pick-none');
+  const pickShownBtn = document.getElementById('btn-ch-pick-shown');
+  const dropZoneEl = document.getElementById('ch-drop');
+  const loadedRowEl = document.getElementById('ch-loaded-row');
+  const loadedNameEl = document.getElementById('ch-loaded-name');
 
   let channels = [];
   let channelTemplate = null;
@@ -169,6 +178,9 @@
   const closedIds = new Set();
   const advancedOpen = new Set();
   const keyShown = new Set();
+  // 导出勾选：只记 id，不往通道对象里塞字段（否则勾选会被一起存进 config.json）
+  const picked = new Set();
+  let loadedFileName = '';
 
   function el(tag, className, text) {
     const node = document.createElement(tag);
@@ -362,10 +374,36 @@
         listEl.appendChild(broken);
       }
     });
+    // 卡片刚被重建，勾选框是照 picked 画的；按钮可用状态跟着刷一次
+    updatePickCount();
   }
 
   function badge(text, tone) {
     return el('span', 'ch-badge' + (tone ? ' ' + tone : ''), text);
+  }
+
+  // 导入 / 导出面板开着的时候，卡片头部才出现导出勾选框。
+  // 平时编辑通道不该看见它 —— 它不是通道配置的一部分，收起来时跟着一起消失。
+  function ioPanelOpen() {
+    return Boolean(ioPanel) && !ioPanel.classList.contains('hidden');
+  }
+
+  function buildPickBox(channel) {
+    const wrap = el('label', 'ch-pick');
+    wrap.title = '勾上就跟着「导出选中的」一起导出';
+    const box = el('input');
+    box.type = 'checkbox';
+    box.className = 'ch-pick-box';
+    box.checked = picked.has(channel.id);
+    box.addEventListener('change', () => {
+      if (box.checked) picked.add(channel.id);
+      else picked.delete(channel.id);
+      updatePickCount();
+    });
+    wrap.appendChild(box);
+    // 勾选框本身别触发卡片上的拖动 / 展开
+    wrap.addEventListener('click', (event) => event.stopPropagation());
+    return wrap;
   }
 
   function buildCard(channel) {
@@ -373,6 +411,7 @@
     if (!isOpen(channel)) card.classList.add('collapsed');
 
     const head = el('div', 'channel-head');
+    if (ioPanelOpen()) head.appendChild(buildPickBox(channel));
     const toggle = el('button', 'ch-toggle', isOpen(channel) ? '▾' : '▸');
     toggle.title = '展开 / 收起这个通道';
     toggle.addEventListener('click', () => {
@@ -1965,6 +2004,36 @@
       problems.map((one) => one.name).join('、');
   }
 
+  function setExportNote(text, tone) {
+    if (!exportNoteEl) return;
+    exportNoteEl.textContent = text || '';
+    exportNoteEl.className = 'ch-io-note' + (tone ? ' ' + tone : '');
+  }
+
+  // 勾选计数 + 按钮可用状态。
+  // 「导出选中的」在没有勾任何东西时置灰：这份文件里是明文密钥，
+  // 与其点了没反应、或者悄悄改成导出全部，不如明确告诉用户先勾。
+  function updatePickCount() {
+    // 通道被删掉后，勾选集合里可能残留已不存在的 id，顺手清掉
+    const alive = new Set(channels.map((one) => one && one.id));
+    Array.from(picked).forEach((id) => { if (!alive.has(id)) picked.delete(id); });
+
+    const total = channels.length;
+    const n = picked.size;
+    if (pickCountEl) {
+      pickCountEl.textContent = n
+        ? '已勾选 ' + n + ' / ' + total + ' 个通道'
+        : '还没勾选通道（勾上卡片左侧的方框）';
+      pickCountEl.className = 'ch-pick-count' + (n ? ' ok' : '');
+    }
+    // 「导出选中的」「复制选中」只在勾了东西时可用
+    [exportFileBtn, exportCopyBtn].forEach((btn) => {
+      if (btn) btn.disabled = n === 0;
+    });
+    if (exportAllBtn) exportAllBtn.disabled = total === 0;
+    updateExportSub();
+  }
+
   function downloadText(text, filename) {
     const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1986,7 +2055,7 @@
   async function doImport(mode) {
     const text = importText.value.trim();
     if (!text) {
-      setImportNote('先把 JSON 粘进来，或者选一个文件。', 'bad');
+      setImportNote('先选一个通道配置文件，或者展开下面手动粘贴 JSON。', 'bad');
       return;
     }
     if (mode === 'replace') {
@@ -2010,9 +2079,7 @@
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    importText.value = '';
-    previewBox.classList.add('hidden');
-    previewBox.textContent = '';
+    resetImport();
     setIoBusy(false);
     render();
     saveStateEl.textContent =
@@ -2099,9 +2166,10 @@
   function updateExportSub() {
     if (!exportSubEl) return;
     const total = channels.length;
+    const n = picked.size;
     const withKeys = includeKeysEl ? includeKeysEl.checked : true;
-    exportSubEl.textContent = '共 ' + total + ' 个通道，' +
-      (withKeys ? '含密钥（换电脑直接能用）' : '不含密钥（对面要自己填）');
+    exportSubEl.textContent = (n ? '选中 ' + n + ' 个（共 ' + total + ' 个）' : '共 ' + total + ' 个通道') +
+      '，' + (withKeys ? '含密钥（换电脑直接能用）' : '不含密钥（对面要自己填）');
   }
 
   function setImportNote(text, tone) {
@@ -2111,9 +2179,12 @@
   }
 
   function setIoBusy(busy) {
-    [exportFileBtn, exportCopyBtn, mergeBtn, appendBtn, replaceBtn].forEach((btn) => {
+    [exportFileBtn, exportCopyBtn, exportAllBtn, mergeBtn, appendBtn, replaceBtn,
+      pickAllBtn, pickNoneBtn, pickShownBtn, clearImportBtn].forEach((btn) => {
       if (btn) btn.disabled = Boolean(busy);
     });
+    // 导出的两个按钮还要看「有没有勾选」，忙完要回到正确状态
+    if (!busy) updatePickCount();
   }
 
   function bindToolbar() {
@@ -2167,8 +2238,14 @@
     const ioBtn = document.getElementById('btn-ch-io');
     if (ioBtn) {
       ioBtn.addEventListener('click', () => {
-        if (ioPanel) ioPanel.classList.toggle('hidden');
-        updateExportSub();
+        if (!ioPanel) return;
+        ioPanel.classList.toggle('hidden');
+        // 勾选框只在面板开着时出现，所以两边一起重画
+        render();
+        updatePickCount();
+        if (ioPanel.classList.contains('hidden')) {
+          setExportNote('', '');
+        }
       });
     }
     bindIoPanel();
@@ -2179,59 +2256,116 @@
     if (includeKeysEl) {
       includeKeysEl.addEventListener('change', () => {
         updateExportSub();
-        if (exportNoteEl) {
-          exportNoteEl.textContent = '';
-          exportNoteEl.className = 'ch-io-note';
-        }
+        setExportNote('', '');
       });
     }
 
-    if (exportFileBtn) {
-      exportFileBtn.addEventListener('click', async () => {
-        const withKeys = includeKeysEl ? includeKeysEl.checked : true;
-        setIoBusy(true);
-        const got = await exportPayload(withKeys);
-        setIoBusy(false);
-        if (!got.ok) {
-          saveStateEl.textContent = '导出失败：' + got.error;
-          saveStateEl.className = 'hint bad';
-          return;
-        }
-        downloadText(got.text, got.filename);
-        const warn = exportWarning(got.bundle);
-        saveStateEl.textContent = withKeys
-          ? '已导出 ' + got.bundle.count + ' 个通道（含密钥，注意保管）'
-          : '已导出 ' + got.bundle.count + ' 个通道（不含密钥）';
-        saveStateEl.className = 'hint ' + (withKeys ? 'warn' : 'ok');
-        if (exportNoteEl) {
-          exportNoteEl.textContent = warn || (withKeys
-            ? '这份文件里有明文密钥，别发到公开的地方；传到另一台电脑后用「导入」即可。'
-            : '没勾「包含密钥」，对面导入后要自己补填密钥。');
-          exportNoteEl.className = 'ch-io-note' + (warn ? ' bad' : withKeys ? ' warn' : '');
-        }
-      });
-    }
-
-    if (exportCopyBtn) {
-      exportCopyBtn.addEventListener('click', async () => {
-        const withKeys = includeKeysEl ? includeKeysEl.checked : true;
-        setIoBusy(true);
-        const got = await exportPayload(withKeys);
-        setIoBusy(false);
-        if (!got.ok) {
-          saveStateEl.textContent = '导出失败：' + got.error;
-          saveStateEl.className = 'hint bad';
-          return;
-        }
+    // 导出：ids 里有就只导这几个，没有就导全部。
+    // 「导出选中的」和「导出全部」走同一段，只是 ids 不同 —— 少一条代码路径就少一处漏密钥的机会。
+    async function runExport(onlyIds, toClipboard) {
+      const withKeys = includeKeysEl ? includeKeysEl.checked : true;
+      setIoBusy(true);
+      const got = await exportPayload(withKeys, onlyIds);
+      setIoBusy(false);
+      if (!got.ok) {
+        saveStateEl.textContent = '导出失败：' + got.error;
+        saveStateEl.className = 'hint bad';
+        return;
+      }
+      if (toClipboard) {
         const copied = await copyText(got.text);
         saveStateEl.textContent = copied
           ? '已复制 ' + got.bundle.count + ' 个通道' + (withKeys ? '（含密钥）' : '（不含密钥）')
           : '复制失败，请改用「导出到文件」';
         saveStateEl.className = 'hint ' + (copied ? (withKeys ? 'warn' : 'ok') : 'bad');
+        return;
+      }
+      downloadText(got.text, got.filename);
+      const warn = exportWarning(got.bundle);
+      saveStateEl.textContent = withKeys
+        ? '已导出 ' + got.bundle.count + ' 个通道（含密钥，注意保管）'
+        : '已导出 ' + got.bundle.count + ' 个通道（不含密钥）';
+      saveStateEl.className = 'hint ' + (withKeys ? 'warn' : 'ok');
+      setExportNote(
+        warn || (withKeys
+          ? '这份文件里有明文密钥，别发到公开的地方；传到另一台电脑后用「导入」即可。'
+          : '没勾「包含密钥」，对面导入后要自己补填密钥。'),
+        warn ? 'bad' : (withKeys ? 'warn' : '')
+      );
+    }
+
+    function pickedIds() {
+      // 按通道原顺序导出，勾选的先后不影响文件里的次序
+      return channels.filter((one) => one && picked.has(one.id)).map((one) => one.id);
+    }
+
+    if (exportFileBtn) {
+      exportFileBtn.addEventListener('click', () => {
+        const ids = pickedIds();
+        if (!ids.length) {
+          setExportNote('先在通道卡片左侧勾上要导出的，或者点旁边的「导出全部」。', 'warn');
+          return;
+        }
+        runExport(ids, false);
+      });
+    }
+    if (exportAllBtn) {
+      exportAllBtn.addEventListener('click', () => {
+        if (!channels.length) return;
+        // 「导出全部」是明确的例外操作，但它把每一条的密钥都放进同一个文件，
+        // 值得多问一句 —— 尤其是勾着「包含密钥」的时候。
+        const withKeys = includeKeysEl ? includeKeysEl.checked : true;
+        if (withKeys) {
+          const ok = window.confirm(
+            '这份文件会把全部 ' + channels.length + ' 个通道连同各自的密钥一起导出。\n' +
+              '文件里是明文密钥，只放到你信任的地方。确定要导出全部吗？'
+          );
+          if (!ok) return;
+        }
+        runExport(null, false);
+      });
+    }
+    if (exportCopyBtn) {
+      exportCopyBtn.addEventListener('click', () => {
+        const ids = pickedIds();
+        if (!ids.length) {
+          setExportNote('先在通道卡片左侧勾上要复制的。', 'warn');
+          return;
+        }
+        runExport(ids, true);
       });
     }
 
-    // 选文件 / 拖文件：直接读成文本塞进粘贴框，后面的流程与手动粘贴完全一样
+    // 勾选批量操作：通道一多，一个个点太慢
+    if (pickAllBtn) {
+      pickAllBtn.addEventListener('click', () => {
+        channels.forEach((one) => { if (one && one.id) picked.add(one.id); });
+        render();
+        updatePickCount();
+      });
+    }
+    if (pickNoneBtn) {
+      pickNoneBtn.addEventListener('click', () => {
+        picked.clear();
+        render();
+        updatePickCount();
+      });
+    }
+    if (pickShownBtn) {
+      pickShownBtn.addEventListener('click', () => {
+        // 只勾「当前搜索结果」：搜「视频」再点，就只选视频通道
+        const shown = channels.filter(matches);
+        if (!shown.length) {
+          setExportNote('当前没有搜索结果，先清掉搜索框里的关键词。', 'warn');
+          return;
+        }
+        shown.forEach((one) => { if (one && one.id) picked.add(one.id); });
+        render();
+        updatePickCount();
+      });
+    }
+
+    // 导入以「选择文件」为主：点选区、拖文件都行
     if (importFileEl) {
       importFileEl.addEventListener('change', () => {
         const file = importFileEl.files && importFileEl.files[0];
@@ -2239,12 +2373,32 @@
         readImportFile(file);
       });
     }
-    if (importText) {
-      importText.addEventListener('input', () => {
-        // 打字时不做实时预览：每敲一个字符都请求一次服务端太吵
-        previewBox.classList.add('hidden');
-        previewBox.textContent = '';
+    if (dropZoneEl) {
+      ['dragenter', 'dragover'].forEach((type) => {
+        dropZoneEl.addEventListener(type, (event) => {
+          event.preventDefault();
+          dropZoneEl.classList.add('dragging');
+        });
       });
+      ['dragleave', 'dragend'].forEach((type) => {
+        dropZoneEl.addEventListener(type, () => dropZoneEl.classList.remove('dragging'));
+      });
+      dropZoneEl.addEventListener('drop', (event) => {
+        event.preventDefault();
+        dropZoneEl.classList.remove('dragging');
+        const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+        if (file) readImportFile(file);
+      });
+    }
+
+    const onPasteInput = () => {
+      // 打字时不做实时预览：每敲一个字符都请求一次服务端太吵
+      previewBox.classList.add('hidden');
+      previewBox.textContent = '';
+      setLoadedName('', true);
+    };
+    if (importText) {
+      importText.addEventListener('input', onPasteInput);
       importText.addEventListener('dragover', (event) => {
         event.preventDefault();
         importText.classList.add('dragging');
@@ -2260,11 +2414,9 @@
 
     if (clearImportBtn) {
       clearImportBtn.addEventListener('click', () => {
-        if (importText) importText.value = '';
+        resetImport();
+        setImportNote('已清空，可以重新选一个文件。', '');
         if (importFileEl) importFileEl.value = '';
-        previewBox.classList.add('hidden');
-        previewBox.textContent = '';
-        setImportNote('已清空。', '');
       });
     }
 
@@ -2273,10 +2425,31 @@
     if (replaceBtn) replaceBtn.addEventListener('click', () => doImport('replace'));
   }
 
+  // 「已载入 xxx.json」那一行：只有真选过文件才显示，手动粘贴时藏起来
+  function setLoadedName(name, hide) {
+    loadedFileName = hide ? '' : String(name || '');
+    if (!loadedRowEl) return;
+    if (loadedFileName) {
+      loadedRowEl.classList.remove('hidden');
+      if (loadedNameEl) loadedNameEl.textContent = '已载入：' + loadedFileName;
+    } else {
+      loadedRowEl.classList.add('hidden');
+      if (loadedNameEl) loadedNameEl.textContent = '';
+    }
+  }
+
+  function resetImport() {
+    if (importText) importText.value = '';
+    previewBox.classList.add('hidden');
+    previewBox.textContent = '';
+    setLoadedName('', true);
+  }
+
   function readImportFile(file) {
     // 通道配置一份就几十 KB，上限按 20 MB 放足；再大基本是选错文件了
     if (file.size > 20 * 1024 * 1024) {
       setImportNote('这个文件有 ' + (file.size / 1024 / 1024).toFixed(1) + ' MB，不像通道配置，先确认一下。', 'bad');
+      setLoadedName('', true);
       return;
     }
     const reader = new FileReader();
@@ -2284,10 +2457,14 @@
       const text = String(reader.result || '');
       if (importText) importText.value = text;
       if (importFileEl) importFileEl.value = '';
-      setImportNote('已载入「' + file.name + '」，下面核对一下再点导入。', 'ok');
+      setLoadedName(file.name);
+      setImportNote('已载入，下面核对一下再点导入。', 'ok');
       previewImport();
     };
-    reader.onerror = () => setImportNote('这个文件读不出来：' + (reader.error && reader.error.message ? reader.error.message : '未知原因'), 'bad');
+    reader.onerror = () => {
+      setLoadedName('', true);
+      setImportNote('这个文件读不出来：' + (reader.error && reader.error.message ? reader.error.message : '未知原因'), 'bad');
+    };
     reader.readAsText(file, 'utf-8');
   }
 
@@ -2321,7 +2498,7 @@
       channels = Array.isArray(data.channels) ? data.channels : [];
       channelTemplate = data.template || null;
       render();
-      updateExportSub();
+      updatePickCount();
       if (hooks.onLoaded) hooks.onLoaded();
       autoQueryBalances();
       autoQueryRides();

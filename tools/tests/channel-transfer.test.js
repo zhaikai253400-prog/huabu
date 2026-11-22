@@ -433,6 +433,76 @@ check('导入默认是「按 ID 覆盖」，不是「全部追加」', () => {
 });
 
 console.log('');
+console.log('界面 · 勾选导出 + 选文件导入');
+
+const htmlSrc = fs.readFileSync(path.join(ROOT, 'web', 'channels.html'), 'utf8');
+const frontSrc = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'channels.js'), 'utf8');
+const cssSrc = fs.readFileSync(path.join(ROOT, 'web', 'assets', 'style.css'), 'utf8');
+
+check('导出有「导出选中的」和「导出全部」两个明确入口', () => {
+  assert(htmlSrc.indexOf('id="btn-ch-export"') > 0, '没有「导出选中的」按钮');
+  assert(htmlSrc.indexOf('id="btn-ch-export-all"') > 0, '没有「导出全部」按钮');
+  assert(htmlSrc.indexOf('导出选中的') > 0, '按钮文案不是「导出选中的」');
+});
+
+check('卡片上的勾选框只在导入导出面板展开时出现', () => {
+  // 面板收起时列表里一个勾选框都不该有 —— 它不是通道配置的一部分
+  assert(frontSrc.indexOf('function ioPanelOpen()') > 0, '没有 ioPanelOpen 判断');
+  const at = frontSrc.indexOf('function buildCard(channel)');
+  const body = frontSrc.slice(at, at + 600);
+  assert(/if \(ioPanelOpen\(\)\) head\.appendChild\(buildPickBox\(channel\)\)/.test(body),
+    '卡片头部没有按「面板是否展开」来决定要不要画勾选框');
+});
+
+check('勾选状态存在独立集合里，不会被写进通道配置', () => {
+  // 往通道对象上塞字段（channel.picked）会被一起序列化进 config.json，
+  // 下次读回来就带着一堆脏字段；这里必须是闭包里的一个 Set。
+  assert(frontSrc.indexOf('const picked = new Set()') > 0, '没有独立的 picked 集合');
+  assert(frontSrc.indexOf('channel.picked') < 0, '还在往通道对象上写勾选字段');
+});
+
+check('没勾任何通道时「导出选中的」是置灰的，而不是悄悄导出全部', () => {
+  const at = frontSrc.indexOf('function updatePickCount()');
+  assert(at > 0, '没有 updatePickCount');
+  const body = frontSrc.slice(at, at + 900);
+  assert(body.indexOf('btn.disabled = n === 0') >= 0, '没有按「勾了几个」来禁用导出按钮');
+});
+
+check('导出的两个按钮走同一段代码，只是 ids 不同', () => {
+  const at = frontSrc.indexOf('async function runExport(');
+  assert(at > 0, '没有抽出来的 runExport');
+  assert(frontSrc.indexOf('runExport(ids, false)') > 0, '「导出选中的」没走 runExport');
+  assert(frontSrc.indexOf('runExport(null, false)') > 0, '「导出全部」没走 runExport');
+});
+
+check('导入以「选择文件」为主入口，并且整块可拖', () => {
+  assert(htmlSrc.indexOf('id="ch-drop"') > 0, '没有选文件的大块区域');
+  assert(htmlSrc.indexOf('点击选择文件') > 0, '没有「点击选择文件」文案');
+  assert(frontSrc.indexOf("dropZoneEl.addEventListener('drop'") > 0, '拖拽区没接 drop');
+  // 手动粘贴收进折叠区，不再占一整块地方
+  assert(htmlSrc.indexOf('<details class="ch-paste">') > 0, '手动粘贴没做成折叠区');
+});
+
+check('选完文件要显示「已载入：文件名」，导入完要清掉', () => {
+  assert(frontSrc.indexOf('setLoadedName(file.name)') > 0, '选完文件没记名字');
+  const at = frontSrc.indexOf('async function doImport(');
+  assert(frontSrc.slice(at, at + 2200).indexOf('resetImport()') > 0, '导入完没清掉已载入状态');
+});
+
+check('界面文案说清了「勾选 → 导出 → 另一台选文件导入」这条路径', () => {
+  const noteAt = htmlSrc.indexOf('class="local-note"');
+  const body = htmlSrc.slice(noteAt, noteAt + 900);
+  assert(/勾上要搬的通道/.test(body), '说明里没提勾选');
+  assert(/选这个文件导入/.test(body), '说明里没提选文件导入');
+});
+
+check('新增样式都在（勾选框 / 选文件大块 / 折叠粘贴区）', () => {
+  ['.ch-pick', '.ch-drop', '.ch-paste', '.ch-io-pickbar'].forEach((sel) => {
+    assert(cssSrc.indexOf(sel) >= 0, '缺样式 ' + sel);
+  });
+});
+
+console.log('');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 fs.rmSync(box, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);

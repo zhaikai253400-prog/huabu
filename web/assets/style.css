@@ -3227,6 +3227,74 @@ body.connecting .node.connect-target .port.in {
 .ch-io-note.bad { color: var(--danger); }
 .ch-io-note.ok { color: var(--ok); }
 
+/* 导入 / 导出 · 勾选与选文件 */
+.ch-io-pickbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--field);
+}
+.ch-io-pickbar button { padding: 3px 9px; font-size: 0.84em; }
+.ch-pick-count { font-size: 0.85em; color: var(--muted); }
+.ch-pick-count.ok { color: var(--ok); }
+
+/* 卡片上的勾选框：只在「导入 / 导出」面板展开时出现 */
+.ch-pick {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.ch-pick input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* 导入区：整块可点、可拖，别让人猜哪里能点 */
+.ch-drop {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 22px 14px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--field);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.ch-drop input[type='file'] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.ch-drop:hover,
+.ch-drop.dragging { border-color: var(--accent); background: var(--accent-soft); }
+.ch-drop-icon { font-size: 1.4em; line-height: 1; color: var(--accent); }
+.ch-drop-main { font-weight: 600; }
+.ch-drop-sub { font-size: 0.84em; color: var(--muted); }
+
+.ch-loaded-name { font-size: 0.86em; color: var(--ok); word-break: break-all; }
+.ch-io-when-loaded { align-items: center; }
+
+/* 手动粘贴收进折叠区，平时不占地方 */
+.ch-paste { margin-top: 2px; }
+.ch-paste > summary {
+  cursor: pointer;
+  font-size: 0.85em;
+  color: var(--muted);
+  padding: 2px 0;
+  list-style-position: inside;
+}
+.ch-paste > summary:hover { color: var(--accent); }
+.ch-paste[open] > summary { color: var(--text); }
+.ch-paste textarea { margin-top: 6px; width: 100%; }
+
 /* 选文件：用 label 包住真正的 input，按钮样式一致、又能点到原生文件框 */
 .ch-file-pick {
   position: relative;
