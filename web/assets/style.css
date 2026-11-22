@@ -3208,6 +3208,72 @@ body.connecting .node.connect-target .port.in {
 
 .ch-io-row { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* 导入 / 导出：分成「导出」「导入」两块，避免按钮和说明混成一片 */
+.ch-io-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.ch-io-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ch-io-sub { color: var(--muted); font-size: 0.84em; }
+
+.ch-io-note { color: var(--muted); font-size: 0.82em; line-height: 1.5; }
+.ch-io-note.warn { color: var(--tint-warn-text); }
+.ch-io-note.bad { color: var(--danger); }
+.ch-io-note.ok { color: var(--ok); }
+
+/* 选文件：用 label 包住真正的 input，按钮样式一致、又能点到原生文件框 */
+.ch-file-pick {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 0.92em;
+}
+.ch-file-pick input[type='file'] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.ch-file-pick:hover { border-color: var(--accent); }
+
+.ch-io-panel textarea.dragging { border-color: var(--accent); background: var(--field); }
+
+.ch-io-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--field);
+}
+
+.ch-io-preview-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ch-io-preview-meta { color: var(--muted); font-size: 0.84em; }
+.ch-io-preview-list { display: flex; flex-direction: column; gap: 3px; }
+.ch-io-preview-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 0.88em;
+}
+.ch-io-preview-tags { color: var(--muted); font-size: 0.86em; white-space: nowrap; }
+.ch-io-preview-bad { color: var(--danger); font-size: 0.84em; line-height: 1.5; }
+.ch-io-preview-note { color: var(--tint-warn-text); font-size: 0.84em; line-height: 1.5; }
+
+button.danger-ghost { border-color: var(--danger); color: var(--danger); }
+
+
 .channel-card.collapsed .channel-body { display: none; }
 
 .ch-toggle {

@@ -333,6 +333,12 @@
     listChannels: () => request('GET', '/api/channels'),
     saveChannels: (channels) => request('POST', '/api/channels', { channels }),
     probeChannel: (channel) => request('POST', '/api/channels/probe', { channel }),
+    // 导入 / 导出：带密钥导出必须由服务端解密后再给（磁盘上是 DPAPI 密文，拷走解不开）
+    exportChannels: (withKeys, onlyIds) =>
+      request('GET', '/api/channels/export?keys=' + (withKeys === false ? '0' : '1') +
+        (Array.isArray(onlyIds) && onlyIds.length ? '&ids=' + encodeURIComponent(onlyIds.join(',')) : '')),
+    previewImportChannels: (text) => request('POST', '/api/channels/import/preview', { text }),
+    importChannels: (text, mode) => request('POST', '/api/channels/import', { text, mode }),
     channelBalance: (channel) => request('POST', '/api/channels/balance', { channel }),
     channelRide: (channel) => request('POST', '/api/channels/ride', { channel }),
     // 画布左侧「通道状态」面板用：只读汇总，服务端不回传密钥

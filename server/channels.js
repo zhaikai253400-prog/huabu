@@ -826,6 +826,96 @@ function inspectChannel(channel) {
   };
 }
 
+// 「原始 JSON」版体检：给导入预览用。
+//
+// 为什么还要单独一份：inspectChannel 收的是 normalizeChannel 之后的通道，
+// 那时缺的项已经被默认模板补齐了（没写 kinds 补成 ['image']、没写 image 补成
+// /images/generations），再看就永远是齐的，等于什么都没查。
+// 导入恰恰最需要看「文件里到底写了什么」，所以这里直接判原始对象：
+//   · 勾了用途、但那一节根本没写 → 提示「已按默认模板补上」，不当成错（常见的简写）；
+//   · 勾了用途、那一节写了却把 path 留空 → 真问题，跑起来必挂。
+function inspectChannelRaw(raw) {
+  const c = raw && typeof raw === 'object' ? raw : {};
+  const name = str(c.name).trim() || '（未命名通道）';
+  const problems = [];
+  const notices = [];
+  const kinds = Array.isArray(c.kinds) ? c.kinds.filter((kind) => KINDS.indexOf(kind) >= 0) : [];
+  const models = c.models && typeof c.models === 'object' ? c.models : {};
+  const countOf = (kind) => (Array.isArray(models[kind]) ? models[kind].length : 0);
+
+  if (!str(c.baseUrl).trim()) {
+    problems.push({ field: 'baseUrl', label: 'Base URL', detail: '接口地址没填，这个通道发不出任何请求' });
+  }
+  const auth = c.auth && typeof c.auth === 'object' ? c.auth : {};
+  if (str(auth.style, 'bearer') !== 'none' && !str(c.apiKey).trim()) {
+    problems.push({ field: 'apiKey', label: '密钥', detail: '这个通道要密钥才能调，现在是空的' });
+  }
+  if (!kinds.length) {
+    problems.push({ field: 'kinds', label: '支持的用途', detail: '一个都没勾，这个通道不会被任何生成用到' });
+  }
+  if (kinds.length && !kinds.some((kind) => countOf(kind) > 0)) {
+    problems.push({ field: 'models', label: '模型清单', detail: '勾选的用途下都没有模型，生成时挑不中模型' });
+  }
+
+  kinds.forEach((kind) => {
+    const spec = c[kind];
+    if (!spec || typeof spec !== 'object') {
+      notices.push({
+        field: kind + '.path',
+        label: KIND_LABEL_CN[kind] + '请求参数',
+        detail: '原始 JSON 里没写' + KIND_LABEL_CN[kind] + '这一节，已按默认模板补上，生成前最好核对一遍',
+      });
+      return;
+    }
+    if (!str(spec.path).trim()) {
+      problems.push({
+        field: kind + '.path',
+        label: KIND_LABEL_CN[kind] + '生成路径',
+        detail: '这个通道要用来生成' + KIND_LABEL_CN[kind] + '，但请求路径是空的',
+      });
+    }
+    if (kind !== 'image' && spec.poll && spec.poll.enabled === false) {
+      notices.push({
+        field: kind + '.poll',
+        label: KIND_LABEL_CN[kind] + '轮询',
+        detail: '轮询是关着的：如果这个平台的' + KIND_LABEL_CN[kind] + '是异步出片，会一直拿不到结果',
+      });
+    }
+  });
+
+  kinds.forEach((kind) => {
+    const ids = modelIds(models[kind]);
+    if (!ids.length) return;
+    const want = str((c.defaults || {})[kind]).trim();
+    if (!want) {
+      notices.push({
+        field: 'defaults.' + kind,
+        label: KIND_LABEL_CN[kind] + '默认模型',
+        detail: '没选默认模型，生成时会用清单里的第一个' + (ids[0] ? '（' + ids[0] + '）' : ''),
+      });
+    } else if (ids.indexOf(want) < 0) {
+      notices.push({
+        field: 'defaults.' + kind,
+        label: KIND_LABEL_CN[kind] + '默认模型',
+        detail: '设的默认模型（' + want + '）不在模型清单里，导入后会被忽略',
+      });
+    }
+  });
+
+  return { id: str(c.id), name: name, problems: problems, notices: notices, ok: problems.length === 0 };
+}
+
+function inspectChannelsRaw(list) {
+  const items = (Array.isArray(list) ? list : []).map((one) => inspectChannelRaw(one));
+  return {
+    items: items,
+    total: items.length,
+    okCount: items.filter((one) => one.ok).length,
+    problemCount: items.filter((one) => !one.ok).length,
+    noticeCount: items.filter((one) => one.notices.length > 0).length,
+  };
+}
+
 // 一批通道的体检结果，附带汇总，前端直接照着渲染
 function inspectChannels(list) {
   const items = (Array.isArray(list) ? list : []).map((channel) => inspectChannel(channel));
@@ -1683,6 +1773,8 @@ module.exports = {
   normalizeChannels,
   inspectChannel,
   inspectChannels,
+  inspectChannelRaw,
+  inspectChannelsRaw,
   KIND_LABEL_CN,
   activeChannels,
   findChannel,

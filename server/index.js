@@ -13,6 +13,7 @@ const migrate = require('./migrate');
 const assets = require('./assets');
 const assetIndex = require('./asset-index');
 const channels = require('./channels');
+const channelTransfer = require('./channel-transfer');
 const modelSpecs = require('./model-specs');
 const generate = require('./generate');
 const tasks = require('./tasks');
@@ -913,6 +914,182 @@ async function handleApi(req, res, pathname, query) {
       });
     }
     return sendJson(res, 405, { error: '不支持的操作' });
+  }
+
+  // 导出通道：带上密钥（可选只导某几个）。
+  // 为什么放在服务端：磁盘上是 DPAPI 加密的密文，拷到另一台电脑解不开；
+  // 只有本机内存里是明文，所以「带密钥导出」必须由服务端解密后再给。
+  if (pathname === '/api/channels/export') {
+    if (method === 'GET') {
+      const withKeys = String(query.get('keys') || '') !== '0';
+      const only = String(query.get('ids') || '')
+        .split(',')
+        .map((one) => one.trim())
+        .filter(Boolean);
+      const bundle = channelTransfer.buildBundle(config.channels || [], { withKeys: withKeys, onlyIds: only });
+      log(
+        '导出接口通道 ' + bundle.count + ' 个' + (withKeys ? '（含密钥）' : '（不含密钥）') +
+          (bundle.problems.length ? '，有 ' + bundle.problems.length + ' 个通道的密钥解不开' : '')
+      );
+      return sendJson(res, 200, bundle);
+    }
+    return sendJson(res, 405, { error: '不支持的操作' });
+  }
+
+  // 预览导入：只解析 + 体检，不落库。前端拿它显示「要导入哪几个、缺什么」。
+  if (pathname === '/api/channels/import/preview' && method === 'POST') {
+    const body = await readBody(req);
+    let parsed = null;
+    try {
+      parsed = channelTransfer.parseBundle(body && (body.text !== undefined ? body.text : body));
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const incoming = channels.normalizeChannels(parsed.channels || []);
+    // 体检要按「文件原样」判：normalizeChannels 会把缺的项用默认模板补齐，
+    // 补完再查永远是齐的。这里额外回一份 raw，前端据此把真缺的挑出来。
+    const check = channels.inspectChannelsRaw(parsed.channels || []);
+    // 预览里「哪些会被覆盖」必须和真正导入时的判据一模一样，否则
+    // 用户照着预览做决定，真点了却是另一回事。
+    // 判据：同 id，或者同名字（跨电脑建的通道 id 天然不同，名字才是人能对上的那把钥匙）。
+    const byId = new Set((config.channels || []).map((one) => String(one && one.id)));
+    // 同名匹配只在名字唯一时才成立，见下方导入逻辑里的说明；
+    // 预览必须跟着同一套规则，否则「预览说会覆盖 3 个」点下去却只覆盖 2 个。
+    const nameCount = (list) => {
+      const map = new Map();
+      (list || []).forEach((one) => {
+        const key = String((one && one.name) || '').trim();
+        if (!key) return;
+        map.set(key, (map.get(key) || 0) + 1);
+      });
+      return map;
+    };
+    const localNameCount = nameCount(config.channels || []);
+    const incomingNameCount = nameCount(incoming);
+    const plan = incoming.map((one, index) => {
+      const raw = parsed.channels[index] || {};
+      const id = String(one.id || raw.id || '');
+      const name = String(raw.name || one.name || '').trim();
+      return {
+        id: id,
+        name: name,
+        kinds: Array.isArray(one.kinds) ? one.kinds.slice() : [],
+        // 凭据看原文件：apiKey 与自定义 header / query 里都可能是 token
+        hasKey: Boolean(String(raw.apiKey || '').trim()),
+        hasSecret: channelTransfer.hasSecretValue(raw),
+        willOverwrite:
+          byId.has(id) ||
+          (Boolean(name) && localNameCount.get(name) === 1 && incomingNameCount.get(name) === 1),
+        raw: raw,
+      };
+    });
+    return sendJson(res, 200, {
+      ok: true,
+      count: incoming.length,
+      source: parsed.source || '',
+      withKeys: parsed.withKeys,
+      exportedAt: parsed.exportedAt || '',
+      plan: plan,
+      check: check,
+    });
+  }
+
+  // 导入通道：merge（按 id 覆盖同名、其余追加）/ replace（整份替换）。
+  if (pathname === '/api/channels/import' && method === 'POST') {
+    const body = await readBody(req);
+    let parsed = null;
+    try {
+      parsed = channelTransfer.parseBundle(body && (body.text !== undefined ? body.text : body));
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const incoming = channels.normalizeChannels(parsed.channels || []);
+    if (!incoming.length) return sendJson(res, 400, { error: '这份内容里没有可用的通道' });
+    const asked = String((body && body.mode) || 'merge');
+    const mode = asked === 'replace' ? 'replace' : asked === 'append' ? 'append' : 'merge';
+    const before = new Set((config.channels || []).map((one) => one && one.id));
+    let added = 0;
+    let replaced = 0;
+    if (mode === 'replace') {
+      config.channels = incoming;
+      added = incoming.length;
+    } else {
+      const next = (config.channels || []).slice();
+      // 「同名即同一条」只在名字唯一时才敢用。
+      // 用户手里本来就可能有两个都叫「新通道 1」的通道；导入包里也可能有重名的。
+      // 这时按名字猜会覆盖错，或者把两条挤成一条 —— 那比多出一条严重得多。
+      // 所以先各数一遍名字，只对「两边都只出现一次」的名字启用同名匹配。
+      const countName = (list) => {
+        const map = new Map();
+        (list || []).forEach((one) => {
+          const key = String((one && one.name) || '').trim();
+          if (!key) return;
+          map.set(key, (map.get(key) || 0) + 1);
+        });
+        return map;
+      };
+      const localNames = countName(next);
+      const incomingNames = countName(incoming);
+      const uniqueName = (name) => Boolean(name) && localNames.get(name) === 1 && incomingNames.get(name) === 1;
+      incoming.forEach((one) => {
+        // append：不管 id 撞不撞，都当作一条新通道；重名的给个新 id，
+        // 否则保存时会被 normalizeChannels 覆盖掉同 id 的那条，等于白导。
+        if (mode === 'append') {
+          const copy = Object.assign({}, one);
+          if (!copy.id || next.some((old) => old && String(old.id) === String(copy.id))) {
+            copy.id = 'ch_' + crypto.randomBytes(4).toString('hex');
+          }
+          next.push(copy);
+          added += 1;
+          return;
+        }
+        // merge 的第一条：同一个 id 就是「同一台机器上的同一个通道」。
+        const byId = next.findIndex((old) => old && String(old.id) === String(one.id));
+        if (byId >= 0) {
+          next[byId] = one;
+          replaced += 1;
+          return;
+        }
+        // merge 的第二条：id 不同但名字相同，也当同一条。
+        //
+        // 为什么必须有这一条：id 是每台电脑各生成各的（'ch_' + 随机数）。
+        // 用户在另一台电脑上重新建过一遍同样的通道，或者换过一台机器建过，
+        // 两边的 id 天然不一样、名字却一模一样。只认 id 的话，导一次就多一份，
+        // 用几次通道列表就翻几倍 —— 而用户看到的是「同样的几个通道重复出现」。
+        //
+        // 覆盖时**保留本地 id**：画布卡片里存的是 channelId，换了 id 卡片就找不到通道。
+        const sameName = String(one.name || '').trim();
+        const byName = uniqueName(sameName)
+          ? next.findIndex((old) => old && String(old.name || '').trim() === sameName)
+          : -1;
+        if (byName >= 0) {
+          next[byName] = Object.assign({}, one, { id: next[byName].id });
+          replaced += 1;
+          return;
+        }
+        next.push(one);
+        added += 1;
+      });
+      config.channels = next;
+    }
+    // 保存这一步会把明文密钥重新加密成这台电脑自己的密文（keybox + secret.key）
+    configStore.save(config);
+    const check = channels.inspectChannels(config.channels);
+    const fresh = check.items.filter((one) => one && !before.has(one.id));
+    log(
+      '导入接口通道：' + (mode === 'replace' ? '替换' : mode === 'append' ? '全量追加' : '按 id / 同名覆盖') + '，新增 ' + added + ' 个' +
+        (replaced ? '、覆盖 ' + replaced + ' 个' : '') + '，现在共 ' + config.channels.length + ' 个'
+    );
+    return sendJson(res, 200, {
+      ok: true,
+      mode: mode,
+      added: added,
+      replaced: replaced,
+      total: config.channels.length,
+      channels: config.channels,
+      check: check,
+      freshProblems: fresh.filter((one) => !one.ok),
+    });
   }
 
   if (pathname === '/api/channels/probe' && method === 'POST') {

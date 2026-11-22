@@ -640,6 +640,8 @@ function helperReady() {
 
 module.exports = {
   PREFIX,
+  // 密钥字段清单：导入 / 导出要按同一份清单剥离或解密，不能各写一份
+  SECRET_MAPS,
   KEY_FILE_NAME,
   isSealed,
   seal,

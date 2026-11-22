@@ -274,13 +274,19 @@ check('只把本次新增的算进 freshProblems（避免每次保存都弹旧�
 });
 
 console.log('F3 · 前端把清单摆出来了');
-check('导入时按原始 JSON 体检（必须在填平默认值之前）', () => {
-  const at = frontSrc.indexOf('function inspectImported');
-  assert(at > 0, '没有 inspectImported');
-  const callAt = frontSrc.indexOf('const check = inspectBatch(raw)');
-  assert(callAt > 0, '导入时没调 inspectBatch(raw)');
-  const shapeAt = frontSrc.indexOf('incoming = raw.map((item) => normalizeImported(item))');
-  assert(shapeAt > 0 && shapeAt < callAt, '体检排在填平默认值之后了，那样永远查不出缺项');
+check('导入预览按原始 JSON 体检（服务端用的是 inspectChannelsRaw，不是补全后的）', () => {
+  const previewAt = indexSrc.indexOf("pathname === '/api/channels/import/preview'");
+  assert(previewAt > 0, '找不到导入预览路由');
+  const body = indexSrc.slice(previewAt, previewAt + 1600);
+  assert(body.indexOf('inspectChannelsRaw(parsed.channels') >= 0, '预览没有按原始 JSON 体检');
+  assert(body.indexOf('inspectChannels(incoming)') < 0, '预览还在拿补全后的数据体检，缺项会被填平查不出来');
+  // 规则本身落在 channels.js：这一版必须真能挑出「写了那一节但 path 是空的」
+  const rawBad = { id: 'ch_raw', name: '原始', kinds: ['image'], baseUrl: 'https://a.b', apiKey: 'sk-x', image: { path: '' } };
+  assert(channels.inspectChannelsRaw([rawBad]).problemCount === 1, '原始体检没挑出空的生成路径');
+  // 换 inspectChannel 就会因为默认模板补上 path 而误判为健康 —— 两条路必须分开
+  const rawThin = { id: 'ch_thin', name: '简写', kinds: ['image'], baseUrl: 'https://a.b', apiKey: 'sk-x', models: { image: ['m1'] } };
+  assert(channels.inspectChannelsRaw([rawThin]).problemCount === 0, '简写（整节没写）不该判成错');
+  assert(channels.inspectChannelsRaw([rawThin]).noticeCount === 1, '简写应该提示「已按默认模板补上」');
 });
 check('体检清单有自己的一行（不在导入面板里，不会被一起收起）', () => {
   const html = fs.readFileSync(path.join(ROOT, 'web', 'channels.html'), 'utf8');
@@ -310,10 +316,12 @@ check('卡片头部角标显示缺了几项必填', () => {
   assert(body.indexOf("'缺 ' + missing + ' 项必填'") >= 0, '没有「缺 N 项必填」角标');
 });
 check('提醒调用在落库之后（拿到真实 id，角标才对得上）', () => {
-  const at = frontSrc.indexOf('const check = inspectBatch(raw)');
-  const saveAt = frontSrc.indexOf('await flushSave();', at);
-  const paintAt = frontSrc.indexOf('paintInspectReport({ check: check', at);
-  assert(saveAt > 0 && paintAt > saveAt, '体检渲染排在保存之前，id 可能对不上');
+  const saveAt = frontSrc.indexOf('await window.api.importChannels(text');
+  assert(saveAt > 0, '导入没有走服务端接口');
+  const paintAt = frontSrc.indexOf('paintInspectReport({ check: result.check', saveAt);
+  assert(paintAt > saveAt, '体检渲染排在导入之前，id 可能对不上');
+  // 清单用的是服务端落库后回的那份 check，而不是前端自己算的
+  assert(frontSrc.indexOf('const check = inspectBatch(raw)') < 0, '前端还在自己算体检，容易和服务端不一致');
 });
 check('样式存在', () => {
   assert(cssSrc.indexOf('.ch-io-report') >= 0, '缺 .ch-io-report 样式');

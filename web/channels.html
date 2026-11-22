@@ -28,6 +28,7 @@
       <div class="local-note">
         把平台地址、密钥和模型填在这里，保存后画布就能直接用。每个通道下面的
         <b>「拉取模型」</b>、<b>「试生成一张图」</b> 和 <b>「试生成一段视频」</b> 都保留。
+        <br />换电脑时用上面的 <b>「导入 / 导出」</b>：导出会连密钥一起带走，导入后立刻可用。
         密钥只保存在这台电脑的配置里，不会写进画布页面。
       </div>
 
@@ -38,19 +39,51 @@
         <button id="btn-ch-io">导入 / 导出</button>
       </div>
 
+      <!-- 导入 / 导出：默认就是「带着密钥导出」，因为最常见的是换电脑时一次搬完 -->
       <div class="ch-io-panel hidden" id="ch-io-panel">
-        <div class="ch-io-row">
-          <button id="btn-ch-export">导出到文件</button>
-          <button id="btn-ch-copy">复制到剪贴板</button>
-          <label class="kind-box"><input type="checkbox" id="ch-include-keys" /> 导出时包含密钥</label>
+        <div class="ch-io-block">
+          <div class="ch-io-head">
+            <b>导出</b>
+            <span class="ch-io-sub" id="ch-export-sub"></span>
+          </div>
+          <div class="ch-io-row">
+            <button id="btn-ch-export">导出到文件</button>
+            <button id="btn-ch-copy">复制到剪贴板</button>
+            <label class="kind-box" id="ch-include-keys-box">
+              <input type="checkbox" id="ch-include-keys" checked />
+              导出时包含密钥
+            </label>
+          </div>
+          <div class="ch-io-note" id="ch-export-note"></div>
         </div>
-        <textarea id="ch-import-text" rows="5" placeholder="把通道 JSON 粘到这里，再选下面的「合并导入」或「替换导入」。"></textarea>
-        <div class="ch-io-row">
-          <button id="btn-ch-import-merge">合并导入</button>
-          <button id="btn-ch-import-replace">替换导入</button>
-        </div>
-      </div>
 
+        <div class="ch-io-block">
+          <div class="ch-io-head">
+            <b>导入</b>
+            <span class="ch-io-sub">选文件、或把 JSON 粘 / 拖到下面</span>
+          </div>
+          <div class="ch-io-row">
+            <label class="ch-file-pick">
+              <input type="file" id="ch-import-file" accept=".json,application/json" />
+              选择文件
+            </label>
+            <button id="btn-ch-import-clear">清空</button>
+          </div>
+          <textarea id="ch-import-text" rows="5" placeholder="把通道 JSON 粘到这里（也可以直接选上面的 .json 文件，或把文件拖进这个框）"></textarea>
+          <div class="ch-io-row">
+            <button class="primary" id="btn-ch-import-merge">合并导入</button>
+            <button id="btn-ch-import-append">全部追加为新通道</button>
+            <button id="btn-ch-import-replace" class="danger-ghost">替换全部</button>
+          </div>
+          <div class="ch-io-note" id="ch-import-note">
+            「合并导入」：同一个 ID、或者同名但 ID 不同的通道，都用新配置覆盖；其余新增。
+            换电脑同步时用这个，不会把同一批通道导成两份。<br />
+            覆盖时保留本机的 ID，画布上已有卡片不会断掉和通道的关联。
+          </div>
+        </div>
+
+        <div class="ch-io-preview hidden" id="ch-io-preview"></div>
+      </div>
       <div class="ch-io-report hidden" id="ch-io-report"></div>
 
       <div class="channel-list" id="channel-list"></div>

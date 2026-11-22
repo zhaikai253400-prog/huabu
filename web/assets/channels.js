@@ -138,6 +138,17 @@
   const importText = document.getElementById('ch-import-text');
   const includeKeysEl = document.getElementById('ch-include-keys');
   const ioReportEl = document.getElementById('ch-io-report');
+  const previewBox = document.getElementById('ch-io-preview');
+  const importNoteEl = document.getElementById('ch-import-note');
+  const importFileEl = document.getElementById('ch-import-file');
+  const exportFileBtn = document.getElementById('btn-ch-export');
+  const exportCopyBtn = document.getElementById('btn-ch-copy');
+  const mergeBtn = document.getElementById('btn-ch-import-merge');
+  const appendBtn = document.getElementById('btn-ch-import-append');
+  const replaceBtn = document.getElementById('btn-ch-import-replace');
+  const clearImportBtn = document.getElementById('btn-ch-import-clear');
+  const exportSubEl = document.getElementById('ch-export-sub');
+  const exportNoteEl = document.getElementById('ch-export-note');
 
   let channels = [];
   let channelTemplate = null;
@@ -1924,17 +1935,34 @@
     return Promise.resolve(false);
   }
 
-  function exportPayload(withKeys) {
-    const plain = channels.map((channel) => {
-      const item = JSON.parse(JSON.stringify(channel));
-      if (!withKeys) item.apiKey = '';
-      return item;
-    });
-    return JSON.stringify(
-      { kind: 'canvas-channels', version: 1, exportedAt: new Date().toISOString(), channels: plain },
-      null,
-      2
-    );
+  // 导出：必须走服务端。磁盘上的密钥是 DPAPI + AES-GCM 的密文，
+  // 拷到另一台电脑解不开；只有本机内存里是明文。
+  // 返回 { ok, text, filename, bundle } 或 { ok:false, error }
+  async function exportPayload(withKeys, onlyIds) {
+    let bundle;
+    try {
+      bundle = await window.api.exportChannels(withKeys, onlyIds);
+    } catch (error) {
+      return { ok: false, error: error.message || String(error) };
+    }
+    if (!bundle || !Array.isArray(bundle.channels)) {
+      return { ok: false, error: '服务端没返回通道数据' };
+    }
+    return {
+      ok: true,
+      bundle: bundle,
+      text: JSON.stringify(bundle, null, 2),
+      filename: '通道配置-' + new Date().toISOString().slice(0, 10) +
+        (withKeys ? '-含密钥' : '') + '.json',
+    };
+  }
+
+  // 导出前的一条提醒：哪些通道的密钥本机解不开（导出来的就是空串）。
+  function exportWarning(bundle) {
+    const problems = (bundle && bundle.problems) || [];
+    if (!problems.length) return '';
+    return '有 ' + problems.length + ' 个通道的密钥解不开，导出的文件里它们是空的：' +
+      problems.map((one) => one.name).join('、');
   }
 
   function downloadText(text, filename) {
@@ -1951,219 +1979,141 @@
     }, 200);
   }
 
-  function parseImport(text) {
-    const parsed = JSON.parse(text);
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && Array.isArray(parsed.channels)) return parsed.channels;
-    if (parsed && typeof parsed === 'object' && parsed.id && parsed.baseUrl !== undefined) return [parsed];
-    throw new Error('这段 JSON 里没有通道配置');
-  }
-
-  // 填平缺项：导入的 JSON 可能只写了一半，缺的部分用模板补上，免得渲染出错
-  function fillDefaults(base, value) {
-    if (Array.isArray(base)) return Array.isArray(value) ? value.slice() : base.slice();
-    if (base && typeof base === 'object') {
-      const src = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-      const out = {};
-      Object.keys(base).forEach((key) => {
-        out[key] = fillDefaults(base[key], src[key]);
-      });
-      Object.keys(src).forEach((key) => {
-        if (!(key in out)) out[key] = src[key];
-      });
-      return out;
-    }
-    return value === undefined || value === null ? base : value;
-  }
-
-  const FALLBACK_TEMPLATE = {
-    id: '',
-    name: '新通道',
-    notes: '',
-    enabled: true,
-    kinds: ['image'],
-    baseUrl: '',
-    apiKey: '',
-    auth: { style: 'bearer', header: 'Authorization', prefix: 'Bearer ', query: 'key' },
-    headers: {},
-    query: {},
-    models: { image: [], video: [], audio: [] },
-    defaults: { image: '', video: '', audio: '' },
-    filters: { image: '', video: '', audio: '' },
-    lists: { path: '/models', method: 'GET', resultPath: 'data', itemId: 'id' },
-    balance: DEFAULT_BALANCE,
-    ride: DEFAULT_RIDE,
-    faceProcessing: { image: [], video: [], audio: [] },
-    sizeMap: DEFAULT_SIZE_MAP,
-    videoSizeMap: DEFAULT_VIDEO_SIZE_MAP,
-    image: { path: '/images/generations', method: 'POST', contentType: 'json', body: '{}', extra: {}, headers: {}, resultUrl: 'data.0.url', resultB64: 'data.0.b64_json', timeoutSec: 300, poll: { enabled: false } },
-    video: { path: '/videos', method: 'POST', contentType: 'json', body: '{}', extra: {}, headers: {}, resultUrl: 'data.0.url', resultB64: '', timeoutSec: 600, poll: { enabled: false } },
-    audio: { path: '/audio/speech', method: 'POST', contentType: 'json', body: '{}', extra: {}, headers: {}, resultUrl: 'data.0.url', resultB64: '', timeoutSec: 300, poll: { enabled: false } },
-  };
-
-  function normalizeImported(item) {
-    const shaped = fillDefaults(channelTemplate || FALLBACK_TEMPLATE, item);
-    if (!Array.isArray(shaped.kinds) || !shaped.kinds.length) shaped.kinds = ['image'];
-    shaped.kinds = shaped.kinds.filter((kind) => KIND_ORDER.indexOf(kind) >= 0);
-    if (!shaped.kinds.length) shaped.kinds = ['image'];
-    KIND_ORDER.forEach((kind) => {
-      if (!Array.isArray(shaped.models[kind])) shaped.models[kind] = [];
-    });
-    if (!shaped.id) shaped.id = 'ch_' + Math.random().toString(16).slice(2, 10);
-    if (!shaped.name) shaped.name = '导入的通道';
-    return shaped;
-  }
-
-  // 导入前的体检（清单 40）。
+  // 导入：默认「按 ID 覆盖」。换电脑时同一批通道本来就该是同一批 id，
+  // 覆盖才不会导成两份；想并排放两套时用「全部追加为新通道」。
   //
-  // 关键点：必须在 fillDefaults 之前、拿「原始 JSON」判。填平缺项会把模板里的
-  // 默认值补上去（kinds 补成 ['image']、路径补成 /images/generations），
-  // 补完再看就永远是齐的——那等于什么都没查。
-  //
-  // 规则跟服务端 server/channels.js 的 inspectChannel 对齐，只是这里跑在原始数据上。
-  function inspectImported(raw, id) {
-    const c = raw && typeof raw === 'object' ? raw : {};
-    const problems = [];
-    const notices = [];
-    const kinds = Array.isArray(c.kinds) ? c.kinds.filter((kind) => KIND_ORDER.indexOf(kind) >= 0) : [];
-    const models = c.models && typeof c.models === 'object' ? c.models : {};
-    const countOf = (kind) => (Array.isArray(models[kind]) ? models[kind].length : 0);
-
-    if (!String(c.baseUrl || '').trim()) {
-      problems.push({ field: 'baseUrl', label: 'Base URL', detail: '接口地址没填，这个通道发不出任何请求' });
-    }
-    const auth = c.auth && typeof c.auth === 'object' ? c.auth : {};
-    const authStyle = String(auth.style || 'bearer');
-    if (authStyle !== 'none' && !String(c.apiKey || '').trim()) {
-      problems.push({ field: 'apiKey', label: '密钥', detail: '这个通道要密钥才能调，现在是空的' });
-    }
-    if (!kinds.length) {
-      problems.push({ field: 'kinds', label: '支持的用途', detail: '一个都没勾，这个通道不会被任何生成用到' });
-    }
-    if (kinds.length && !kinds.some((kind) => countOf(kind) > 0)) {
-      problems.push({ field: 'models', label: '模型清单', detail: '勾选的用途下都没有模型，生成时挑不中模型' });
-    }
-    // 只有「这个用途的对象在原始 JSON 里、路径却是空的」才算真缺；
-    // 整个 image / video 对象没写，会按模板补上默认路径，那属于提示。
-    kinds.forEach((kind) => {
-      const spec = c[kind];
-      if (!spec || typeof spec !== 'object') return;
-      if (!String(spec.path || '').trim()) {
-        problems.push({
-          field: kind + '.path',
-          label: KIND_TEXT[kind] + '生成路径',
-          detail: '这个通道要用来生成' + KIND_TEXT[kind] + '，但请求路径是空的',
-        });
-      }
-    });
-
-    kinds.forEach((kind) => {
-      const spec = c[kind];
-      if (!spec || typeof spec !== 'object') {
-        notices.push({
-          field: kind + '.path',
-          label: KIND_TEXT[kind] + '请求参数',
-          detail: '原始 JSON 里没写' + KIND_TEXT[kind] + '这一节，已按默认模板补上，生成前最好核对一遍',
-        });
-      }
-      if (kind !== 'image' && spec && spec.poll && spec.poll.enabled === false) {
-        notices.push({
-          field: kind + '.poll',
-          label: KIND_TEXT[kind] + '轮询',
-          detail: '轮询是关着的：如果这个平台的' + KIND_TEXT[kind] + '是异步出片，会一直拿不到结果',
-        });
-      }
-      const ids = Array.isArray(models[kind]) ? models[kind] : [];
-      if (!ids.length) return;
-      const want = String((c.defaults || {})[kind] || '').trim();
-      if (!want) {
-        notices.push({
-          field: 'defaults.' + kind,
-          label: KIND_TEXT[kind] + '默认模型',
-          detail: '没选默认模型，生成时会用清单里的第一个',
-        });
-      } else if (ids.map((one) => modelId(one)).indexOf(want) < 0) {
-        notices.push({
-          field: 'defaults.' + kind,
-          label: KIND_TEXT[kind] + '默认模型',
-          detail: '设的默认模型（' + want + '）不在模型清单里，已忽略',
-        });
-      }
-    });
-
-    return {
-      id: String(id || c.id || ''),
-      name: String(c.name || '').trim() || '（未命名通道）',
-      problems: problems,
-      notices: notices,
-      ok: problems.length === 0,
-    };
-  }
-
-  // 把一批原始通道体检成服务端 check 的同一种形状，前端直接照着渲染
-  function inspectBatch(list) {
-    const items = (Array.isArray(list) ? list : []).map((one) => inspectImported(one, one && one.id));
-    return {
-      items: items,
-      total: items.length,
-      okCount: items.filter((one) => one.ok).length,
-      problemCount: items.filter((one) => !one.ok).length,
-      noticeCount: items.filter((one) => one.notices.length > 0).length,
-    };
-  }
-
+  // mode: 'merge'（按 id 覆盖） | 'append'（都当新的） | 'replace'（整份替换）
   async function doImport(mode) {
-    let raw;
-    let incoming;
-    try {
-      raw = parseImport(importText.value.trim());
-      incoming = raw.map((item) => normalizeImported(item));
-    } catch (error) {
-      window.alert('导入失败：' + error.message);
+    const text = importText.value.trim();
+    if (!text) {
+      setImportNote('先把 JSON 粘进来，或者选一个文件。', 'bad');
       return;
     }
-    if (!incoming.length) {
-      window.alert('这段 JSON 里没有通道。');
-      return;
-    }
-    // 先按原始 JSON 体检一遍（填平默认值之前），导入完直接给用户看结果
-    const check = inspectBatch(raw);
     if (mode === 'replace') {
-      if (!window.confirm('确定用这 ' + incoming.length + ' 个通道替换掉现有的 ' + channels.length + ' 个吗？')) return;
-      channels = incoming;
-    } else {
-      incoming.forEach((item) => {
-        const copy = JSON.parse(JSON.stringify(item));
-        if (!copy.id || channels.some((channel) => channel.id === copy.id)) {
-          copy.id = 'ch_' + Math.random().toString(16).slice(2, 10);
-        }
-        if (!copy.name) copy.name = (channelTemplate && channelTemplate.name) || '导入的通道';
-        channels.push(copy);
-      });
+      const ok = window.confirm('确定用这份文件替换掉现有的 ' + channels.length + ' 个通道吗？\n原来的通道配置会被整份换掉。');
+      if (!ok) return;
     }
-    // 补上 id：原始 JSON 里没写 id 的，上面已经生成过了，体检结果要跟着对齐
-    check.items.forEach((one, index) => {
-      const shaped = incoming[index];
-      if (shaped && shaped.id) one.id = shaped.id;
-    });
+    setIoBusy(true);
+    let result;
+    try {
+      result = await window.api.importChannels(text, mode === 'append' ? 'append' : mode === 'replace' ? 'replace' : 'merge');
+    } catch (error) {
+      setIoBusy(false);
+      setImportNote('导入失败：' + (error.message || String(error)), 'bad');
+      window.alert('导入失败：' + (error.message || String(error)));
+      return;
+    }
+    // 服务端已经落库，这里把最新列表读回来，避免前端和磁盘不一致
+    channels = Array.isArray(result.channels) ? result.channels : channels;
+    dirty = false;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
     importText.value = '';
-    render();
-    dirty = true;
-    // 先落库（这一步服务端也会体检一遍，见 server/index.js），
-    // 之后再用「按原始 JSON 算的」这份覆盖渲染：它抓的是导入文件本身缺什么，
-    // 而服务端看到的是已经填平默认值之后的数据，报告会轻一些。
-    await flushSave();
-    check.items.forEach((one) => {
-      if (one.id) inspectMap.set(one.id, one);
-    });
-    // 体检清单在导入面板外面，收起面板不影响它
-    if (ioPanel) ioPanel.classList.add('hidden');
-    paintInspectReport({ check: check, freshProblems: check.items.filter((one) => !one.ok) }, true);
+    previewBox.classList.add('hidden');
+    previewBox.textContent = '';
+    setIoBusy(false);
     render();
     saveStateEl.textContent =
-      '已导入 ' + incoming.length + ' 个通道并保存' +
-      (check.problemCount ? '，其中 ' + check.problemCount + ' 个还缺必填项' : '');
-    saveStateEl.className = 'hint ' + (check.problemCount ? 'bad' : 'ok');
+      '已导入：新增 ' + (result.added || 0) + ' 个' +
+      (result.replaced ? '、覆盖 ' + result.replaced + ' 个' : '') +
+      '，现在共 ' + result.total + ' 个';
+    saveStateEl.className = 'hint ok';
+    // 体检清单要摆出来：导入的往往是从别的电脑来的，缺了什么得当场看见
+    paintInspectReport({ check: result.check, freshProblems: result.freshProblems }, true);
+    updateExportSub();
+    setImportNote('导入完成。' + ((result.freshProblems && result.freshProblems.length)
+      ? ' 其中 ' + result.freshProblems.length + ' 个还缺必填项，见下面的体检清单。'
+      : ''), (result.freshProblems && result.freshProblems.length) ? 'warn' : 'ok');
+    if (hooks.onSaved) hooks.onSaved();
+  }
+
+  // 预览：只解析和体检，不落库。选完文件就自动跑一次，
+  // 让用户在点「导入」之前先看清「要进来几个、哪些会覆盖、哪个没带密钥」。
+  async function previewImport() {
+    const text = importText.value.trim();
+    if (!text) {
+      previewBox.classList.add('hidden');
+      previewBox.textContent = '';
+      return;
+    }
+    let got;
+    try {
+      got = await window.api.previewImportChannels(text);
+    } catch (error) {
+      previewBox.classList.remove('hidden');
+      previewBox.textContent = '';
+      previewBox.appendChild(el('div', 'ch-io-preview-bad', '这份内容读不出来：' + (error.message || String(error))));
+      return;
+    }
+    previewBox.classList.remove('hidden');
+    previewBox.textContent = '';
+
+    const head = el('div', 'ch-io-preview-head');
+    head.appendChild(el('b', null, '将导入 ' + got.count + ' 个通道'));
+    const meta = [];
+    if (got.withKeys === true) meta.push('带密钥');
+    if (got.withKeys === false) meta.push('不含密钥');
+    // 有没有凭据要看整条通道（apiKey、自定义 header、query 里的 token 都算），
+    // 只数 apiKey 会把「只有 header token」的通道误标成「无密钥」。
+    const noKey = (got.plan || []).filter((one) => !(one.hasSecret === true || one.hasKey)).length;
+    if (noKey) meta.push(noKey + ' 个没带密钥');
+    const over = (got.plan || []).filter((one) => one.willOverwrite).length;
+    if (over) meta.push(over + ' 个会覆盖现有通道');
+    if (got.exportedAt) meta.push('导出于 ' + String(got.exportedAt).slice(0, 10));
+    if (meta.length) head.appendChild(el('span', 'ch-io-preview-meta', meta.join(' · ')));
+    previewBox.appendChild(head);
+
+    const list = el('div', 'ch-io-preview-list');
+    (got.plan || []).forEach((one) => {
+      const row = el('div', 'ch-io-preview-row');
+      row.appendChild(el('b', null, one.name || '（未命名通道）'));
+      const tags = [];
+      tags.push(one.willOverwrite ? '覆盖' : '新增');
+      if (!(one.hasSecret === true || one.hasKey)) tags.push('无密钥');
+      row.appendChild(el('span', 'ch-io-preview-tags', tags.join(' · ')));
+      list.appendChild(row);
+    });
+    previewBox.appendChild(list);
+
+    const items = (got.check && got.check.items) || [];
+    const problems = items.filter((one) => !one.ok);
+    if (problems.length) {
+      previewBox.appendChild(
+        el('div', 'ch-io-preview-bad', problems.length + ' 个通道缺必填项：' +
+          problems.map((one) => one.name).slice(0, 6).join('、') +
+          (problems.length > 6 ? ' 等' : '') + '（导入后仍可补）')
+      );
+    }
+    const warnings = items.filter((one) => one.ok && one.notices && one.notices.length);
+    if (warnings.length) {
+      previewBox.appendChild(
+        el('div', 'ch-io-preview-note', warnings.length + ' 个通道能跑、但有值得看一眼的地方（导入后看下面的体检清单）')
+      );
+    }
+  }
+
+  // 面板顶部那句「会导出几个」：通道数量随时在变，别写死在 HTML 里。
+  // 顺带把「含 / 不含密钥」带上，因为这是这次导出最要紧的一件事。
+  function updateExportSub() {
+    if (!exportSubEl) return;
+    const total = channels.length;
+    const withKeys = includeKeysEl ? includeKeysEl.checked : true;
+    exportSubEl.textContent = '共 ' + total + ' 个通道，' +
+      (withKeys ? '含密钥（换电脑直接能用）' : '不含密钥（对面要自己填）');
+  }
+
+  function setImportNote(text, tone) {
+    if (!importNoteEl) return;
+    importNoteEl.textContent = text;
+    importNoteEl.className = 'ch-io-note' + (tone ? ' ' + tone : '');
+  }
+
+  function setIoBusy(busy) {
+    [exportFileBtn, exportCopyBtn, mergeBtn, appendBtn, replaceBtn].forEach((btn) => {
+      if (btn) btn.disabled = Boolean(busy);
+    });
   }
 
   function bindToolbar() {
@@ -2218,35 +2168,127 @@
     if (ioBtn) {
       ioBtn.addEventListener('click', () => {
         if (ioPanel) ioPanel.classList.toggle('hidden');
+        updateExportSub();
       });
     }
-    const exportFile = document.getElementById('btn-ch-export');
-    if (exportFile) {
-      exportFile.addEventListener('click', () => {
-        const withKeys = includeKeysEl && includeKeysEl.checked;
-        downloadText(exportPayload(withKeys), '通道配置-' + new Date().toISOString().slice(0, 10) + '.json');
-        saveStateEl.textContent = withKeys ? '已导出（含密钥，注意保管）' : '已导出（不含密钥）';
+    bindIoPanel();
+  }
+
+  // ------------------------------------------------------------------ 导入 / 导出
+  function bindIoPanel() {
+    if (includeKeysEl) {
+      includeKeysEl.addEventListener('change', () => {
+        updateExportSub();
+        if (exportNoteEl) {
+          exportNoteEl.textContent = '';
+          exportNoteEl.className = 'ch-io-note';
+        }
+      });
+    }
+
+    if (exportFileBtn) {
+      exportFileBtn.addEventListener('click', async () => {
+        const withKeys = includeKeysEl ? includeKeysEl.checked : true;
+        setIoBusy(true);
+        const got = await exportPayload(withKeys);
+        setIoBusy(false);
+        if (!got.ok) {
+          saveStateEl.textContent = '导出失败：' + got.error;
+          saveStateEl.className = 'hint bad';
+          return;
+        }
+        downloadText(got.text, got.filename);
+        const warn = exportWarning(got.bundle);
+        saveStateEl.textContent = withKeys
+          ? '已导出 ' + got.bundle.count + ' 个通道（含密钥，注意保管）'
+          : '已导出 ' + got.bundle.count + ' 个通道（不含密钥）';
         saveStateEl.className = 'hint ' + (withKeys ? 'warn' : 'ok');
+        if (exportNoteEl) {
+          exportNoteEl.textContent = warn || (withKeys
+            ? '这份文件里有明文密钥，别发到公开的地方；传到另一台电脑后用「导入」即可。'
+            : '没勾「包含密钥」，对面导入后要自己补填密钥。');
+          exportNoteEl.className = 'ch-io-note' + (warn ? ' bad' : withKeys ? ' warn' : '');
+        }
       });
     }
-    const exportCopy = document.getElementById('btn-ch-copy');
-    if (exportCopy) {
-      exportCopy.addEventListener('click', () => {
-        const withKeys = includeKeysEl && includeKeysEl.checked;
-        copyText(exportPayload(withKeys)).then((ok) => {
-          saveStateEl.textContent = ok
-            ? withKeys
-              ? '已复制到剪贴板（含密钥）'
-              : '已复制到剪贴板（不含密钥）'
-            : '复制失败，请改用「导出到文件」';
-          saveStateEl.className = 'hint ' + (ok ? (withKeys ? 'warn' : 'ok') : 'bad');
-        });
+
+    if (exportCopyBtn) {
+      exportCopyBtn.addEventListener('click', async () => {
+        const withKeys = includeKeysEl ? includeKeysEl.checked : true;
+        setIoBusy(true);
+        const got = await exportPayload(withKeys);
+        setIoBusy(false);
+        if (!got.ok) {
+          saveStateEl.textContent = '导出失败：' + got.error;
+          saveStateEl.className = 'hint bad';
+          return;
+        }
+        const copied = await copyText(got.text);
+        saveStateEl.textContent = copied
+          ? '已复制 ' + got.bundle.count + ' 个通道' + (withKeys ? '（含密钥）' : '（不含密钥）')
+          : '复制失败，请改用「导出到文件」';
+        saveStateEl.className = 'hint ' + (copied ? (withKeys ? 'warn' : 'ok') : 'bad');
       });
     }
-    const mergeBtn = document.getElementById('btn-ch-import-merge');
+
+    // 选文件 / 拖文件：直接读成文本塞进粘贴框，后面的流程与手动粘贴完全一样
+    if (importFileEl) {
+      importFileEl.addEventListener('change', () => {
+        const file = importFileEl.files && importFileEl.files[0];
+        if (!file) return;
+        readImportFile(file);
+      });
+    }
+    if (importText) {
+      importText.addEventListener('input', () => {
+        // 打字时不做实时预览：每敲一个字符都请求一次服务端太吵
+        previewBox.classList.add('hidden');
+        previewBox.textContent = '';
+      });
+      importText.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        importText.classList.add('dragging');
+      });
+      importText.addEventListener('dragleave', () => importText.classList.remove('dragging'));
+      importText.addEventListener('drop', (event) => {
+        event.preventDefault();
+        importText.classList.remove('dragging');
+        const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+        if (file) readImportFile(file);
+      });
+    }
+
+    if (clearImportBtn) {
+      clearImportBtn.addEventListener('click', () => {
+        if (importText) importText.value = '';
+        if (importFileEl) importFileEl.value = '';
+        previewBox.classList.add('hidden');
+        previewBox.textContent = '';
+        setImportNote('已清空。', '');
+      });
+    }
+
     if (mergeBtn) mergeBtn.addEventListener('click', () => doImport('merge'));
-    const replaceBtn = document.getElementById('btn-ch-import-replace');
+    if (appendBtn) appendBtn.addEventListener('click', () => doImport('append'));
     if (replaceBtn) replaceBtn.addEventListener('click', () => doImport('replace'));
+  }
+
+  function readImportFile(file) {
+    // 通道配置一份就几十 KB，上限按 20 MB 放足；再大基本是选错文件了
+    if (file.size > 20 * 1024 * 1024) {
+      setImportNote('这个文件有 ' + (file.size / 1024 / 1024).toFixed(1) + ' MB，不像通道配置，先确认一下。', 'bad');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      if (importText) importText.value = text;
+      if (importFileEl) importFileEl.value = '';
+      setImportNote('已载入「' + file.name + '」，下面核对一下再点导入。', 'ok');
+      previewImport();
+    };
+    reader.onerror = () => setImportNote('这个文件读不出来：' + (reader.error && reader.error.message ? reader.error.message : '未知原因'), 'bad');
+    reader.readAsText(file, 'utf-8');
   }
 
   // 密钥这次是怎么解开的：本机 DPAPI 解不出来、改用可移植副本时，
@@ -2279,6 +2321,7 @@
       channels = Array.isArray(data.channels) ? data.channels : [];
       channelTemplate = data.template || null;
       render();
+      updateExportSub();
       if (hooks.onLoaded) hooks.onLoaded();
       autoQueryBalances();
       autoQueryRides();
