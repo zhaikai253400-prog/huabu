@@ -126,8 +126,10 @@ function resumeOne(config, id) {
   }
   // 先把状态拉回「跑着」，卡片才会重新轮询起来
   store.updateTask(id, { status: 'running', stage: '重新拉取中…', error: '' });
-  runJob(task.id, Number(task.createdAt) || now(), function (ctx) {
-    return generate.resumeTask(config, store.getTask(id), ctx);
+  // 从「现在」重新计时：这条任务早就过了原来的最长等待时间，
+  // 拿旧的时间戳去判会立刻又报超时（一个请求都不发）。
+  runJob(task.id, now(), function (ctx) {
+    return generate.resumeTask(config, store.getTask(id), ctx, { refetch: true });
   });
   return store.getTask(id);
 }

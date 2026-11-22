@@ -918,7 +918,41 @@ async function testRefUpload(channel, kind) {
   return { ok: true, host: host, kindName: kindName, url: got.url, id: got.id };
 }
 
+// 有的平台在任务详情里回的是相对路径，例如 520ruo：
+//   { "status": "completed", "url": "/v1/videos/task_xxx/content" }
+// 这种地址直接交给 fetch 会当场失败（不是合法的绝对 URL），
+// 结果就是「平台明明出片了、本地一直报拿不到素材」。
+//
+// 不能无脑用 new URL(rel, baseUrl)：baseUrl 通常带 /v1 这种路径前缀，
+// 而平台回的相对路径可能已经把 /v1 写全了、也可能只写到 /videos/…，
+// 两种情况要分别对齐，否则会拼出 /v1/v1/... 或者丢掉 /v1。
+//
+// 放在 fetchMedia 里是因为它是所有素材下载的唯一入口（轮询取件、直链、取件接口兜底
+// 都汇到这里），改这一处就全覆盖了，不用在每个调用点各补一次。
+function absolutizeMediaUrl(found, channel) {
+  if (!found || typeof found !== 'object') return found;
+  const url = String(found.url || '').trim();
+  if (!url || /^https?:\/\//i.test(url) || /^data:/i.test(url)) return found;
+  const base = String((channel && channel.baseUrl) || '').trim().replace(/\/+$/, '');
+  if (!base) return found;
+  let origin = '';
+  let basePath = '';
+  try {
+    const parsed = new URL(base);
+    origin = parsed.origin;
+    basePath = parsed.pathname.replace(/\/+$/, '');
+  } catch {
+    return found;
+  }
+  const rel = url.charAt(0) === '/' ? url : '/' + url;
+  // 平台自己已经把 baseUrl 的路径前缀写全了（/v1/videos/…）：直接用 origin 拼
+  const alreadyFull = basePath && (rel === basePath || rel.indexOf(basePath + '/') === 0);
+  return Object.assign({}, found, { url: (alreadyFull ? origin : base) + rel });
+}
+
 async function fetchMedia(config, found, channel) {
+  // 相对地址先补成绝对地址，后面的同域判断、下载、重试才有意义
+  found = absolutizeMediaUrl(found, channel);
   if (found.base64) return { buffer: Buffer.from(found.base64, 'base64'), mime: '' };
   const dataUrl = found.dataUrl || (found.url && assets.isDataUrl(found.url) ? found.url : '');
   if (dataUrl) {
@@ -1498,10 +1532,35 @@ function buildWaitRecord(channel, kind, spec, payload, model, size, prompt, remo
 // 第一次是立刻问，之后按间隔问；已等多久按记录里的开始时间算，重启后不会从头计时
 async function pollRemote(config, channel, kind, record, ctx, progress) {
   const intervalMs = Math.max(1, Number(record.intervalSec) || 5) * 1000;
-  const deadline = Number(record.deadlineAt) || Date.now() + Math.max(30, Number(record.maxWaitSec) || 1800) * 1000;
+  // 最长等待时间。
+  //
+  // 这里只认「等了多久」这个时长，不能直接信 deadlineAt 那个绝对时间戳 ——
+  // 它是任务刚提交时算出来的，一旦这条任务判过超时，再点「重新拉取」时
+  // 那个时间戳早就过去了，循环第一次判 Date.now() >= deadline 就立刻 break，
+  // 于是一个请求都不发、当场又报一次「等太久了」，用户以为永远拉不回来了。
+  // 所以按 startedAt + maxWaitSec 现算一遍，并且保证至少还有一段可取件的时间。
+  //
+  // 通道里的「最长等待」是用户随时可能调大的配置，记录里的只是提交那一刻的快照。
+  // 取两者较大的：用户把上限从 2 小时调到 4 小时后，之前提交、还在跑的任务也应该
+  // 享受新的上限，而不是继续按老快照判超时。
+  const pollCfg = (channel && channel[kind] && channel[kind].poll) || {};
+  const maxWaitSec = Math.max(
+    Number(record.maxWaitSec) || 0,
+    Number(pollCfg.maxWaitSec) || 0,
+    30
+  );
+  const maxWaitMs = maxWaitSec * 1000;
+  const startedAt = Number(record.startedAt) || Date.now();
+  // 重新拉取时（record.refetch）从「现在」重新计时：判过超时的任务本来就已经
+  // 超过 maxWaitSec 了，不减这一下的话一进来就又超时。
+  const baseMs = record.refetch ? Date.now() : startedAt;
+  const deadline = Math.max(
+    baseMs + maxWaitMs,
+    Number(record.deadlineAt) || 0,
+    Date.now() + 60 * 1000
+  );
   const doneWords = splitWords(record.doneValues);
   const failWords = splitWords(record.failValues);
-  const startedAt = Number(record.startedAt) || Date.now();
   const queryPath = String(record.queryPath || '').replace(
     /\{\{\s*(taskId|task_id|id)\s*\}\}/g,
     encodeURIComponent(record.remoteId)
@@ -1949,8 +2008,14 @@ async function generateImage(config, payload, ctx) {
 }
 
 // 服务重启后接着等：拿之前记下的任务号继续轮询，不再提交一遍
-async function resumeTask(config, task, ctx) {
-  const record = task && task.resume ? task.resume : null;
+// options.refetch：用户手动点「重新拉取」时传 true。
+// 这时整条任务早就超过最长等待时间了，必须从「现在」重新给一段取件窗口，
+// 否则 pollRemote 一进去就判超时、一个请求都不发（这就是「平台明明出片了，
+// 本地却永远拉不回来」的那个 bug）。
+async function resumeTask(config, task, ctx, options) {
+  const opts = options || {};
+  const stored = task && task.resume ? task.resume : null;
+  const record = stored && opts.refetch ? Object.assign({}, stored, { refetch: true }) : stored;
   const progress = (ctx && ctx.progress) || function () {};
   if (!record || !record.remoteId) throw new Error('这条任务没有可接续的信息（服务重启前还没拿到任务号）');
   const kind = record.kind || task.kind || 'image';

@@ -51,6 +51,44 @@ check('resumeOne 里没有提交请求路径', () => {
   assert.ok(seg.indexOf('submit') < 0);
 });
 
+
+console.log('E - 已经超时的任务重新拉取要真的发请求（不能一进来就判超时）');
+const generateSrc = fs.readFileSync(path.join(ROOT, 'server', 'generate.js'), 'utf8');
+check('pollRemote 按 startedAt + maxWaitSec 现算截止时间', () => {
+  const i = generateSrc.indexOf('async function pollRemote(');
+  assert.ok(i > 0, '找不到 pollRemote');
+  const seg = generateSrc.slice(i, i + 1400);
+  assert.ok(seg.indexOf('record.refetch') >= 0, '没有识别「重新拉取」');
+  assert.ok(seg.indexOf('maxWaitMs') >= 0, '没有按 maxWaitSec 现算时长');
+  assert.ok(seg.indexOf('Date.now() + 60 * 1000') >= 0, '没有兜底的 60 秒取件窗口');
+});
+check('resumeOne 从 now() 重新计时并传 refetch', () => {
+  const i = tasksSrc.indexOf('function resumeOne');
+  const seg = tasksSrc.slice(i, i + 700);
+  assert.ok(seg.indexOf('runJob(task.id, now()') >= 0, '还在用旧 createdAt 计时');
+  assert.ok(seg.indexOf('refetch: true') >= 0, '没有标记 refetch');
+});
+check('resumeTask 透传 refetch 到轮询记录', () => {
+  const i = generateSrc.indexOf('async function resumeTask(');
+  const seg = generateSrc.slice(i, i + 800);
+  assert.ok(seg.indexOf('opts.refetch') >= 0, 'resumeTask 没有读 options.refetch');
+  assert.ok(seg.indexOf('refetch: true') >= 0, '没有把 refetch 写进轮询记录');
+});
+
+console.log('F - 平台回相对地址时也能下载（520ruo 出片却拿不到）');
+check('有 absolutizeMediaUrl 且 fetchMedia 里先补齐地址', () => {
+  assert.ok(generateSrc.indexOf('function absolutizeMediaUrl(') >= 0, '没有补齐函数');
+  const i = generateSrc.indexOf('async function fetchMedia(');
+  const seg = generateSrc.slice(i, i + 300);
+  assert.ok(seg.indexOf('absolutizeMediaUrl(found, channel)') >= 0, 'fetchMedia 没有调用补齐');
+});
+check('拼相对地址时不会拼出 /v1/v1', () => {
+  const i = generateSrc.indexOf('function absolutizeMediaUrl(');
+  const seg = generateSrc.slice(i, i + 1400);
+  assert.ok(seg.indexOf('alreadyFull') >= 0, '没有判断平台是否已写全路径前缀');
+  assert.ok(seg.indexOf('parsed.origin') >= 0, '没有单独取 origin');
+});
+
 console.log('---');
 console.log('全部通过（' + passed + ' 项）' + (failed ? '，失败 ' + failed + ' 项' : ''));
 if (failed) process.exitCode = 1;
