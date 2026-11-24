@@ -605,18 +605,18 @@
               <path :d="edgePath(e)" class="edge-hit" />
             </g>
           </svg>
-          <button
-            v-for="e in store.edges"
-            :key="'x-' + e.id"
-            v-if="hoverEdgeId === e.id && edgeMid(e)"
-            class="edge-x-btn"
-            :style="edgeXStyle(e)"
-            title="断开连线"
-            @pointerenter="setHoverEdge(e.id)"
-            @pointerleave="clearHoverEdge(e.id)"
-            @pointerdown.stop.prevent
-            @click.stop="unlinkEdge(e)"
-          >×</button>
+          <template v-for="e in store.edges" :key="'x-' + e.id">
+            <button
+              v-if="hoverEdgeId === e.id && edgeMid(e)"
+              class="edge-x-btn"
+              :style="edgeXStyle(e)"
+              title="断开连线"
+              @pointerenter="setHoverEdge(e.id)"
+              @pointerleave="clearHoverEdge(e.id)"
+              @pointerdown.stop.prevent
+              @click.stop="unlinkEdge(e)"
+            >×</button>
+          </template>
         </div>
 
         <div v-if="!store.nodes.length" class="board-empty">
