@@ -32,6 +32,13 @@ work/
 *.bak-*
 _archive/
 
+# ---------- Node 依赖与前端构建产物 ----------
+# 可用 npm install / npm run build 重新生成，不进版本库
+node_modules/
+frontend/node_modules/
+frontend/dist/
+web/dist/
+
 # ---------- 临时与系统文件 ----------
 .tmp-test/
 # 变异测试的临时工作区（改写源码 → 跑测试 → 还原，里面的 .orig.js 是还原用的副本）
@@ -43,3 +50,6 @@ desktop.ini
 .DS_Store
 .vscode/
 .idea/
+.env
+.env.*
+!.env.example

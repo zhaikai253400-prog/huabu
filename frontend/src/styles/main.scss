@@ -1,0 +1,99 @@
+@import './tokens.scss';
+
+* { box-sizing: border-box; }
+html, body, #app {
+  margin: 0;
+  height: 100%;
+  font-family: var(--font);
+  color: var(--c-text);
+  background: var(--c-bg);
+}
+a { color: inherit; text-decoration: none; }
+.muted { color: var(--c-muted); }
+.page-card {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border-soft);
+  border-radius: 12px;
+}
+.grow { flex: 1; min-width: 0; }
+
+/* View UI 主色贴近原型 */
+.ivu-btn-primary {
+  background: var(--c-primary) !important;
+  border-color: var(--c-primary) !important;
+}
+.ivu-input:focus, .ivu-input:hover {
+  border-color: var(--c-primary) !important;
+}
+
+/* 深色下拉面板：Select 加 transfer-class-name="dark-select-drop" */
+.ivu-select-dropdown.dark-select-drop,
+.dark-select-drop.ivu-select-dropdown {
+  background: #151b24 !important;
+  border: 1px solid #2c333f !important;
+  border-radius: 10px !important;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55) !important;
+  padding: 6px !important;
+  max-height: 280px !important;
+  color: #e8ecf3 !important;
+
+  .ivu-select-dropdown-list { padding: 0 !important; }
+  .ivu-select-item {
+    color: #c9d2de !important;
+    background: transparent !important;
+    border-radius: 7px !important;
+    margin: 2px 0 !important;
+    padding: 8px 10px !important;
+    font-size: 12px !important;
+    line-height: 1.45 !important;
+    white-space: normal !important;
+  }
+  .ivu-select-item:hover,
+  .ivu-select-item-focus {
+    background: #1f2937 !important;
+    color: #e8ecf3 !important;
+  }
+  .ivu-select-item-selected,
+  .ivu-select-item-selected:hover {
+    background: #1e3a5f !important;
+    color: #93c5fd !important;
+    font-weight: 600 !important;
+  }
+  .ivu-select-item-disabled { color: #5d6675 !important; opacity: .7 !important; }
+  .ivu-select-not-found { color: #6b7684 !important; padding: 12px !important; }
+  .ivu-select-input { color: #e8ecf3 !important; }
+
+  &::-webkit-scrollbar { width: 8px; }
+  &::-webkit-scrollbar-thumb { background: #2f3947; border-radius: 8px; }
+  &::-webkit-scrollbar-track { background: transparent; }
+}
+
+/* 画布确认弹窗：Modal.confirm({ className: 'dark-confirm' }) */
+.ivu-modal-wrap.dark-confirm .ivu-modal-content,
+.dark-confirm .ivu-modal-content {
+  background: #1b1f26 !important;
+  border: 1px solid #2c333f;
+  border-radius: 12px !important;
+  overflow: hidden;
+}
+.ivu-modal-wrap.dark-confirm,
+.dark-confirm {
+  .ivu-modal-header,
+  .ivu-modal-footer,
+  .ivu-modal-body,
+  .ivu-modal-confirm-body {
+    background: #1b1f26 !important;
+    border-color: #2c333f !important;
+    color: #9aa8bd !important;
+  }
+  .ivu-modal-header-inner,
+  .ivu-modal-confirm-head-title {
+    color: #e8ecf3 !important;
+  }
+  .ivu-modal-close .ivu-icon-ios-close { color: #e8ecf3 !important; }
+  .ivu-btn-default {
+    background: #242a34 !important;
+    border-color: #333c4a !important;
+    color: #c3cad6 !important;
+  }
+}

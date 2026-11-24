@@ -23,7 +23,7 @@ const https = require('node:https');
 const paths = require('./paths');
 
 // 参与同步的目录（都在程序根目录下）
-const CODE_DIRS = ['web', 'server', 'tools', 'runtime'];
+const CODE_DIRS = ['web', 'server', 'tools', 'runtime', 'frontend'];
 
 // 参与同步的根部文件：双击启动需要的、以及说明文档
 const CODE_FILES = [
@@ -33,6 +33,7 @@ const CODE_FILES = [
   '使用说明.txt',
   'RUNTIME.txt',
   'dog.ico',
+  '需求文档-无限画布翻新-前后台管理系统.txt',
 ];
 
 // 目录级排除：数据、素材、临时目录、版本库

@@ -27,6 +27,7 @@ const guard = require('./guard');
 const keybox = require('./keybox');
 const codesync = require('./codesync');
 const share = require('./share');
+const adminAuth = require('./admin-auth');
 
 // --background：托盘在后台拉起服务时用，不弹浏览器、也不留在任务栏
 const BACKGROUND = process.argv.includes('--background');
@@ -286,6 +287,86 @@ function serveHtmlWithTokens(res, filePath, withAdmin, fromLan) {
     'Cache-Control': 'no-store',
   });
   res.end(body);
+}
+
+function spaIndexPath() {
+  return path.join(paths.WEB_DIR, 'dist', 'index.html');
+}
+
+function spaEnabled() {
+  try {
+    return fs.existsSync(spaIndexPath());
+  } catch {
+    return false;
+  }
+}
+
+// Vue SPA：本机注入页面钥匙 + 管理钥匙（后台通道仍走 admin）；局域网访客两把都空。
+function serveSpa(res, fromLan) {
+  const filePath = spaIndexPath();
+  if (!fs.existsSync(filePath)) return false;
+  const html = fs
+    .readFileSync(filePath, 'utf8')
+    .replace(/__LOCAL_TOKEN__/g, fromLan ? '' : adminToken)
+    .replace(/__UI_TOKEN__/g, fromLan ? '' : uiToken);
+  const body = Buffer.from(html, 'utf8');
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': body.length,
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+  return true;
+}
+
+function dirSizeBytes(root) {
+  let total = 0;
+  function walk(dir) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.forEach((ent) => {
+      const full = path.join(dir, ent.name);
+      try {
+        if (ent.isDirectory()) walk(full);
+        else total += fs.statSync(full).size;
+      } catch {
+        /* skip */
+      }
+    });
+  }
+  if (root && fs.existsSync(root)) walk(root);
+  return total;
+}
+
+function formatBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
+  if (v < 1024 * 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+  return (v / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function storageStatsPayload() {
+  const root = config.assetRoot;
+  const imageBytes = dirSizeBytes(path.join(root, '图片'));
+  const videoBytes = dirSizeBytes(path.join(root, '视频'));
+  const audioBytes = dirSizeBytes(path.join(root, '音频'));
+  const tailBytes = dirSizeBytes(path.join(root, '尾帧'));
+  const thumbBytes = dirSizeBytes(path.join(paths.DATA_DIR, 'thumbs'));
+  const totalBytes = imageBytes + videoBytes + audioBytes + tailBytes;
+  return {
+    assetRoot: root,
+    imageBytes,
+    videoBytes,
+    audioBytes,
+    tailBytes,
+    thumbBytes,
+    totalBytes,
+    totalText: formatBytes(totalBytes),
+  };
 }
 
 // 导出素材的落地目录：默认在桌面的「画布导出」里，找不到桌面就退回程序目录
@@ -590,6 +671,119 @@ async function handleApi(req, res, pathname, query) {
   if (pathname === '/api/health/ack' && method === 'POST') {
     const had = store.clearHealthNotice();
     return sendJson(res, 200, { ok: true, cleared: had });
+  }
+
+  // ---- 后台口令 / 仪表盘 / 存储统计（Vue 管理端）----
+  if (pathname === '/api/admin/status' && method === 'GET') {
+    const st = adminAuth.status();
+    const session = String(req.headers['x-admin-session'] || '');
+    st.unlocked = adminAuth.validSession(session);
+    return sendJson(res, 200, st);
+  }
+  if (pathname === '/api/admin/setup' && method === 'POST') {
+    const body = await readBody(req);
+    const password = String(body.password || '');
+    if (password.length < 4) return sendJson(res, 400, { error: '口令至少 4 位' });
+    if (!adminAuth.status().needSetup) return sendJson(res, 400, { error: '口令已设置过' });
+    const data = adminAuth.setup(password);
+    return sendJson(res, 200, data);
+  }
+  if (pathname === '/api/admin/login' && method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const data = adminAuth.login(String(body.password || ''));
+      return sendJson(res, 200, data);
+    } catch (error) {
+      return sendJson(res, 401, { error: error.message || '口令错误' });
+    }
+  }
+  if (pathname === '/api/admin/logout' && method === 'POST') {
+    adminAuth.logout(String(req.headers['x-admin-session'] || ''));
+    return sendJson(res, 200, { ok: true });
+  }
+  if (pathname === '/api/admin/dashboard' && method === 'GET') {
+    const stats = store.stats ? store.stats() : { canvases: 0 };
+    const storage = storageStatsPayload();
+    let tasksList = [];
+    try {
+      tasksList = store.listTasks ? store.listTasks(300) : [];
+    } catch {
+      tasksList = [];
+    }
+    const today = stamp().slice(0, 10);
+    let todayOk = 0;
+    let todayFail = 0;
+    let running = 0;
+    const trendMap = {};
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const key =
+        d.getFullYear() +
+        '-' +
+        String(d.getMonth() + 1).padStart(2, '0') +
+        '-' +
+        String(d.getDate()).padStart(2, '0');
+      trendMap[key] = { day: key, ok: 0, fail: 0 };
+    }
+    (tasksList || []).forEach((t) => {
+      const status = String(t.status || '').toLowerCase();
+      const when = String(t.updated_at || t.created_at || t.updatedAt || t.createdAt || '').slice(0, 10);
+      if (['running', 'queued', 'pending', 'waiting'].includes(status)) running += 1;
+      if (when === today) {
+        if (['done', 'completed', 'success'].includes(status)) todayOk += 1;
+        if (status === 'failed') todayFail += 1;
+      }
+      if (trendMap[when]) {
+        if (['done', 'completed', 'success'].includes(status)) trendMap[when].ok += 1;
+        if (status === 'failed') trendMap[when].fail += 1;
+      }
+    });
+    const channelsSummary = (config.channels || []).map((ch) => ({
+      id: ch.id,
+      name: ch.name || ch.id,
+      enabled: ch.enabled !== false,
+      balanceText: ch._balanceText || '',
+    }));
+    const errors = (logRing || [])
+      .filter((line) => /出错|失败|error|Error/i.test(line))
+      .slice(-5)
+      .reverse()
+      .map((line) => ({ when: line.slice(1, 20), message: line.replace(/^\[[^\]]+\]\s*/, '') }));
+    return sendJson(res, 200, {
+      todayOk,
+      todayFail,
+      running,
+      canvases: stats.canvases || 0,
+      storage,
+      trend: Object.values(trendMap),
+      channels: channelsSummary,
+      errors,
+      checks: selfCheck(paths.toolsInfo()),
+    });
+  }
+  if (pathname === '/api/admin/storage' && method === 'GET') {
+    return sendJson(res, 200, storageStatsPayload());
+  }
+  if (pathname === '/api/portal/stats' && method === 'GET') {
+    const stats = store.stats ? store.stats() : { canvases: 0 };
+    const storage = storageStatsPayload();
+    let todayTasks = 0;
+    try {
+      const tasksList = store.listTasks ? store.listTasks(200) : [];
+      const today = stamp().slice(0, 10);
+      todayTasks = (tasksList || []).filter((t) =>
+        String(t.updated_at || t.created_at || '').startsWith(today)
+      ).length;
+    } catch {
+      todayTasks = 0;
+    }
+    return sendJson(res, 200, {
+      canvases: stats.canvases || 0,
+      storageText: storage.totalText,
+      todayTasks,
+      usageText: storage.totalText,
+    });
   }
 
   // 托盘图标里点「退出」时走这里：只认本机钥匙，网页和其它程序都调不动
@@ -1876,8 +2070,8 @@ function isCollabPath(pathname) {
 
   // 页面与静态资源：协作者要能打开画布页、看到图片缩略图
   if (pathname === '/' || pathname === '/index.html') return true;
-  if (pathname === '/canvas' || pathname === '/canvas.html') return true;
-  if (pathname === '/favicon.ico') return true;
+  if (pathname === '/canvas' || pathname === '/canvas.html' || pathname.indexOf('/canvas/') === 0) return true;
+  if (pathname === '/favicon.ico' || pathname === '/favicon.svg') return true;
   if (pathname.indexOf('/assets/') === 0) return true;
   if (pathname.indexOf('/media/') === 0) return true;
   if (pathname.indexOf('/thumb/') === 0) return true;
@@ -2206,7 +2400,43 @@ async function requestHandler(req, res) {
     return;
   }
 
-  // 页面一律走令牌注入版：门户页 / 画布页 / 启动器拿页面钥匙，通道设置页拿管理钥匙
+  if (pathname.indexOf('/media/') === 0) {
+    return serveMedia(req, res, pathname.slice('/media/'.length));
+  }
+  if (pathname.indexOf('/thumb/') === 0) {
+    return thumbs.serveThumb(req, res, pathname.slice('/thumb/'.length));
+  }
+
+  // Vue SPA 优先：构建产物在 web/dist。旧 html 仍可通过 /legacy/* 访问。
+  if (spaEnabled()) {
+    // dist 内静态资源
+    if (pathname.indexOf('/assets/') === 0) {
+      return serveStatic(res, path.join(paths.WEB_DIR, 'dist', pathname.replace(/^\/+/, '')));
+    }
+    // 保留旧通道页给托盘快捷入口
+    if (pathname === '/channels' || pathname === '/channels.html') {
+      return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'channels.html'), true, fromLan);
+    }
+    if (pathname === '/legacy' || pathname === '/legacy/index.html') {
+      return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'index.html'), false, fromLan);
+    }
+    if (pathname === '/legacy/canvas' || pathname === '/legacy/canvas.html') {
+      return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'canvas.html'), false, fromLan);
+    }
+    if (pathname === '/update' || pathname === '/update.html') {
+      return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'update.html'), false, fromLan);
+    }
+    if (pathname === '/codesync' || pathname === '/codesync.html') {
+      return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'codesync.html'), false, fromLan);
+    }
+    if (pathname === '/launcher' || pathname === '/launcher.html') {
+      return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'launcher.html'), false, fromLan);
+    }
+    // 其余前台/后台路由一律回退 SPA
+    if (serveSpa(res, fromLan)) return;
+  }
+
+  // 未构建 SPA 时回退旧页面
   if (pathname === '/' || pathname === '/index.html') {
     return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'index.html'), false, fromLan);
   }
@@ -2216,24 +2446,14 @@ async function requestHandler(req, res) {
   if (pathname === '/channels' || pathname === '/channels.html') {
     return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'channels.html'), true, fromLan);
   }
-  // 托盘右键「检查画布更新…」打开的就是这一页：只读版本号，不改任何画布。
-  // 用页面钥匙就够了（它只调 /api/canvases 这种普通接口）。
   if (pathname === '/update' || pathname === '/update.html') {
     return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'update.html'), false, fromLan);
   }
-  // 托盘右键「同步程序代码…」打开的就是这一页：只搬 web / server / tools / runtime，
-  // 不碰 data 与 素材（白名单在 server/codesync.js 里）。
   if (pathname === '/codesync' || pathname === '/codesync.html') {
     return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'codesync.html'), false, fromLan);
   }
   if (pathname === '/launcher' || pathname === '/launcher.html') {
     return serveHtmlWithTokens(res, path.join(paths.WEB_DIR, 'launcher.html'), false, fromLan);
-  }
-  if (pathname.indexOf('/media/') === 0) {
-    return serveMedia(req, res, pathname.slice('/media/'.length));
-  }
-  if (pathname.indexOf('/thumb/') === 0) {
-    return thumbs.serveThumb(req, res, pathname.slice('/thumb/'.length));
   }
   return serveStatic(res, path.join(paths.WEB_DIR, pathname.replace(/^\/+/, '')));
 }
